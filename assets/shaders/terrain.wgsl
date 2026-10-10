@@ -127,7 +127,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let ground_amb = vec3(0.10, 0.08, 0.06) * (0.15 + 0.85 * daylight());
     let ambient = mix(ground_amb, sky_amb, n.y * 0.5 + 0.5) * occlusion;
 
-    var color = s.albedo * (sun * ndl + ambient);
+    // Faint, unshadowed moonlight from opposite the sun so nights aren't black.
+    let moon = vec3(0.05, 0.065, 0.12) * (1.0 - daylight()) * max(dot(n, -l), 0.0);
+    var color = s.albedo * (sun * ndl + ambient + moon);
     color += sun * ggx_specular(n, v, l, s.roughness);
 
     // Brush preview: a soft glowing rim where the surface meets the dig sphere.

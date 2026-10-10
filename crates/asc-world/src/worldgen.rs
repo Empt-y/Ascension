@@ -135,7 +135,11 @@ impl WorldGen {
         if p.y < col.height + 6.0 {
             let a = self.cave_a.get_noise_3d(p.x, p.y * 1.6, p.z);
             let b = self.cave_b.get_noise_3d(p.x, p.y * 1.6, p.z);
-            let cave = (a.abs().max(b.abs()) - 0.075) * 40.0;
+            // Tunnels widen within a few metres of the surface so they break through as an opening
+            // instead of leaving a thin crust that looks like a floating slab.
+            let depth = col.height - p.y;
+            let widen = 0.06 * (1.0 - depth / 6.0).clamp(0.0, 1.0);
+            let cave = (a.abs().max(b.abs()) - 0.075 - widen) * 40.0;
             // Smooth subtraction rounds off cave mouths, which a 1 m grid can't show as sharp creases.
             d = smooth_max(d, -cave, 2.5);
         }

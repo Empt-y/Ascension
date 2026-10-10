@@ -30,6 +30,10 @@ pub struct Options {
     pub time_of_day: Option<f32>,
     pub exit_after: Option<f32>,
     pub view_radius: Option<i32>,
+    pub vsync: bool,
+    pub hide_hud: bool,
+    /// Start pose: x, y, z, yaw, pitch (radians).
+    pub camera: Option<[f32; 5]>,
 }
 
 impl Options {
@@ -40,9 +44,18 @@ impl Options {
             let mut value = |name: &str| args.next().ok_or_else(|| anyhow::anyhow!("{name} needs a value"));
             match arg.as_str() {
                 "--autopilot" => opts.autopilot = true,
+                "--vsync" => opts.vsync = true,
+                "--hide-hud" => opts.hide_hud = true,
                 "--time" => opts.time_of_day = Some(value("--time")?.parse()?),
                 "--exit-after" => opts.exit_after = Some(value("--exit-after")?.parse()?),
                 "--view-radius" => opts.view_radius = Some(value("--view-radius")?.parse()?),
+                "--camera" => {
+                    let parts: Vec<f32> =
+                        value("--camera")?.split(',').map(str::parse).collect::<Result<_, _>>()?;
+                    let pose: [f32; 5] =
+                        parts.try_into().map_err(|_| anyhow::anyhow!("--camera wants x,y,z,yaw,pitch"))?;
+                    opts.camera = Some(pose);
+                }
                 other => anyhow::bail!("unknown argument {other}"),
             }
         }
@@ -91,6 +104,13 @@ struct State {
     last_frame: Instant,
     tick_accumulator: Duration,
     frame_ms: f32,
+    /// Longest frame since the last log line, to catch hitches averages hide.
+    worst_frame_ms: f32,
+    /// Worst CPU time spent updating, and inside the renderer (encode + submit + present).
+    worst_update_ms: f32,
+    worst_render_ms: f32,
+    /// Worst acquire / submit / present inside the renderer.
+    worst_gpu_wait: [f32; 3],
     last_stats: FrameStats,
     last_log: Instant,
     autopilot_dug: bool,
@@ -98,7 +118,12 @@ struct State {
 
 impl State {
     fn new(window: Arc<Window>, options: Options) -> anyhow::Result<Self> {
-        let renderer = Renderer::new(window.clone())?;
+        let mut renderer = Renderer::new(window.clone())?;
+        let renderer_vsync = options.vsync;
+        let show_hud = !options.hide_hud;
+        if options.vsync {
+            renderer.set_vsync(true);
+        }
         let world = World::new(SEED);
         let streamer = Streamer::new(world.worldgen.clone(), options.view_radius.unwrap_or(10));
         let mut sim = Sim::default();
@@ -106,8 +131,12 @@ impl State {
             sim.time_of_day = t.rem_euclid(1.0);
         }
         let ground = world.worldgen.height(0.0, 0.0);
-        let camera =
+        let mut camera =
             Camera { position: Vec3::new(0.0, ground + 25.0, 0.0), pitch: -0.25, ..Default::default() };
+        if let Some([x, y, z, yaw, pitch]) = options.camera {
+            camera = Camera { position: Vec3::new(x, y, z), yaw, pitch, ..camera };
+        }
+        log::info!("camera starts at {} (ground at origin {ground:.1})", camera.position);
         let egui_ctx = egui::Context::default();
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(),
@@ -130,8 +159,8 @@ impl State {
             egui_state,
             options,
             captured: false,
-            show_hud: true,
-            vsync: false,
+            show_hud,
+            vsync: renderer_vsync,
             fly_speed: 14.0,
             brush_radius: 3.0,
             last_edit: now,
@@ -140,6 +169,10 @@ impl State {
             last_frame: now,
             tick_accumulator: Duration::ZERO,
             frame_ms: 0.0,
+            worst_frame_ms: 0.0,
+            worst_update_ms: 0.0,
+            worst_render_ms: 0.0,
+            worst_gpu_wait: [0.0; 3],
             last_stats: FrameStats::default(),
             last_log: now,
             autopilot_dug: false,
@@ -171,6 +204,7 @@ impl State {
         let dt = (now - self.last_frame).min(Duration::from_millis(100));
         self.last_frame = now;
         self.frame_ms += (dt.as_secs_f32() * 1e3 - self.frame_ms) * 0.05;
+        self.worst_frame_ms = self.worst_frame_ms.max(dt.as_secs_f32() * 1e3);
 
         // Fixed-rate simulation, decoupled from rendering.
         self.tick_accumulator += dt;
@@ -220,15 +254,28 @@ impl State {
             textures: &output.textures_delta,
             pixels_per_point: output.pixels_per_point,
         };
+        let render_start = Instant::now();
+        self.worst_update_ms = self.worst_update_ms.max((render_start - now).as_secs_f32() * 1e3);
         self.last_stats = self.renderer.render(&params, Some(ui));
+        self.worst_render_ms = self.worst_render_ms.max(render_start.elapsed().as_secs_f32() * 1e3);
+        let st = &self.last_stats;
+        for (w, v) in self.worst_gpu_wait.iter_mut().zip([st.acquire_ms, st.submit_ms, st.present_ms]) {
+            *w = w.max(v);
+        }
 
         if self.last_log.elapsed() >= Duration::from_secs(2) {
             self.last_log = Instant::now();
+            let worst = std::mem::take(&mut self.worst_frame_ms);
+            let (retarget_ms, upload_ms) = self.streamer.take_worst();
+            let update_ms = std::mem::take(&mut self.worst_update_ms);
+            let render_ms = std::mem::take(&mut self.worst_render_ms);
+            let [acq, sub, pre] = std::mem::take(&mut self.worst_gpu_wait);
             let s = self.streamer.stats();
             log::info!(
-                "fps {:.0} ({:.2} ms) | chunks drawn {} / gpu {} / loaded {} / queued {} | tris {}k | build {:.2} ms mesh {:.2} ms | edit {}",
+                "fps {:.0} ({:.2} ms, worst {:.1}) | chunks drawn {} / gpu {} / loaded {} / queued {} | tris {}k | build {:.2} ms mesh {:.2} ms | edit {} | worst retarget {:.1} upload {:.1} update {:.1} render {:.1} (acquire {:.1} submit {:.1} present {:.1}) ms",
                 1000.0 / self.frame_ms.max(0.01),
                 self.frame_ms,
+                worst,
                 self.last_stats.chunks_drawn,
                 self.renderer.chunk_count(),
                 s.loaded,
@@ -237,6 +284,13 @@ impl State {
                 s.avg_build_ms,
                 s.avg_mesh_ms,
                 s.last_edit_ms.map_or("-".into(), |ms| format!("{ms:.1} ms")),
+                retarget_ms,
+                upload_ms,
+                update_ms,
+                render_ms,
+                acq,
+                sub,
+                pre,
             );
         }
         if let Some(limit) = self.options.exit_after

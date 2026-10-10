@@ -30,6 +30,7 @@ log = "0.4"
 env_logger = "0.11"
 anyhow = "1"
 pollster = "0.4"
+thread-priority = "3"
 
 [profile.dev]
 opt-level = 1

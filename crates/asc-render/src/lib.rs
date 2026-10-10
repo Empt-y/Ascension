@@ -4,6 +4,7 @@
 //! reversed-Z (1 near, 0 at infinity). The scene renders into an HDR target, then bloom and an ACES
 //! tonemap write the sRGB swapchain, and egui draws on top.
 
+mod arena;
 mod camera;
 mod gpu;
 mod pipelines;
@@ -17,9 +18,9 @@ use ahash::AHashMap;
 use anyhow::Result;
 use asc_world::{ChunkCoord, ChunkMesh, chunk_origin};
 use glam::{Mat4, Vec3, Vec4};
-use wgpu::util::DeviceExt;
 use winit::window::Window;
 
+use arena::Arena;
 pub use camera::{Camera, Frustum};
 pub use gpu::Gpu;
 use pipelines::{Layouts, Pipelines};
@@ -72,11 +73,17 @@ pub struct FrameStats {
     pub chunks_drawn: usize,
     pub shadow_chunks: usize,
     pub triangles: usize,
+    /// CPU time blocked acquiring the swapchain image, submitting, and presenting.
+    pub acquire_ms: f32,
+    pub submit_ms: f32,
+    pub present_ms: f32,
 }
 
+/// Where a chunk's mesh lives in the shared arenas.
 struct GpuChunk {
-    vertices: wgpu::Buffer,
-    indices: wgpu::Buffer,
+    first_vertex: u32,
+    vertex_count: u32,
+    first_index: u32,
     index_count: u32,
     /// Chunk-local bounds of the mesh.
     min: Vec3,
@@ -101,6 +108,8 @@ pub struct Renderer {
     post_bg: wgpu::BindGroup,
     bloom_bgs: BloomBindGroups,
     chunks: AHashMap<ChunkCoord, GpuChunk>,
+    vertices: Arena,
+    indices: Arena,
     // Per-frame scratch, kept to avoid allocating every frame.
     draw_list: Vec<(f32, ChunkCoord)>,
     shadow_list: Vec<ChunkCoord>,
@@ -149,6 +158,9 @@ impl Renderer {
             ..Default::default()
         });
         let placeholder = targets::placeholder_texture(device);
+        let vertex_size = std::mem::size_of::<asc_world::Vertex>() as u64;
+        let vertices = Arena::new(device, "chunk vertices", wgpu::BufferUsages::VERTEX, vertex_size, 2 << 20);
+        let indices = Arena::new(device, "chunk indices", wgpu::BufferUsages::INDEX, 4, 12 << 20);
         let egui = egui_wgpu::Renderer::new(device, gpu.ui_format(), egui_wgpu::RendererOptions::default());
 
         let (scene_bg, shadow_bg) =
@@ -173,6 +185,8 @@ impl Renderer {
             post_bg,
             bloom_bgs,
             chunks: AHashMap::new(),
+            vertices,
+            indices,
             draw_list: Vec::new(),
             shadow_list: Vec::new(),
             offset_data: Vec::new(),
@@ -286,33 +300,37 @@ impl Renderer {
     }
 
     pub fn upload_chunk(&mut self, coord: ChunkCoord, mesh: &ChunkMesh) {
+        self.remove_chunk(coord);
         if mesh.is_empty() {
-            self.chunks.remove(&coord);
             return;
         }
-        let device = &self.gpu.device;
         let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         for v in &mesh.vertices {
             let p = Vec3::from(v.position);
             min = min.min(p);
             max = max.max(p);
         }
-        let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("chunk vertices"),
-            contents: bytemuck::cast_slice(&mesh.vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("chunk indices"),
-            contents: bytemuck::cast_slice(&mesh.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-        self.chunks
-            .insert(coord, GpuChunk { vertices, indices, index_count: mesh.indices.len() as u32, min, max });
+        let (device, queue) = (&self.gpu.device, &self.gpu.queue);
+        let first_vertex = self.vertices.upload(device, queue, bytemuck::cast_slice(&mesh.vertices));
+        let first_index = self.indices.upload(device, queue, bytemuck::cast_slice(&mesh.indices));
+        self.chunks.insert(
+            coord,
+            GpuChunk {
+                first_vertex,
+                vertex_count: mesh.vertices.len() as u32,
+                first_index,
+                index_count: mesh.indices.len() as u32,
+                min,
+                max,
+            },
+        );
     }
 
     pub fn remove_chunk(&mut self, coord: ChunkCoord) {
-        self.chunks.remove(&coord);
+        if let Some(chunk) = self.chunks.remove(&coord) {
+            self.vertices.free(chunk.first_vertex, chunk.vertex_count);
+            self.indices.free(chunk.first_index, chunk.index_count);
+        }
     }
 
     pub fn chunk_count(&self) -> usize {
@@ -340,6 +358,7 @@ impl Renderer {
     }
 
     pub fn render(&mut self, frame: &FrameParams, ui: Option<UiFrame<'_>>) -> FrameStats {
+        let t_acquire = Instant::now();
         let surface = match self.gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
@@ -354,10 +373,11 @@ impl Renderer {
         let cam = &frame.camera;
         let view_proj = cam.view_proj(aspect);
         let shadow_view_proj = Self::shadow_matrix(cam.position, frame.sun_dir);
-        let stats = self.build_draw_lists(cam.position, view_proj, frame.view_distance);
+        let mut stats = self.build_draw_lists(cam.position, view_proj, frame.view_distance);
+        stats.acquire_ms = t_acquire.elapsed().as_secs_f32() * 1e3;
 
         let daylight = smoothstep(-0.08, 0.25, frame.sun_dir.y);
-        let exposure = 1.0 + (1.0 - daylight) * 1.5;
+        let exposure = 1.0 + (1.0 - daylight) * 1.0;
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             inv_view_proj: view_proj.inverse().to_cols_array_2d(),
@@ -410,13 +430,17 @@ impl Renderer {
             let mut pass = color_pass(&mut encoder, "egui", &ui_view, None).forget_lifetime();
             self.egui.render(&mut pass, ui.primitives, &screen);
         }
+        let t_submit = Instant::now();
         queue.submit(extra.into_iter().chain([encoder.finish()]));
+        stats.submit_ms = t_submit.elapsed().as_secs_f32() * 1e3;
         if let Some(ui) = &ui {
             for id in &ui.textures.free {
                 self.egui.free_texture(id);
             }
         }
+        let t_present = Instant::now();
         queue.present(surface);
+        stats.present_ms = t_present.elapsed().as_secs_f32() * 1e3;
         stats
     }
 
@@ -465,11 +489,18 @@ impl Renderer {
         stats
     }
 
+    fn bind_arenas(&self, pass: &mut wgpu::RenderPass<'_>) {
+        pass.set_vertex_buffer(0, self.vertices.buffer.slice(..));
+        pass.set_index_buffer(self.indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
+    }
+
     fn draw_chunk(&self, pass: &mut wgpu::RenderPass<'_>, coord: ChunkCoord, instance: u32) {
-        let chunk = &self.chunks[&coord];
-        pass.set_vertex_buffer(0, chunk.vertices.slice(..));
-        pass.set_index_buffer(chunk.indices.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..chunk.index_count, 0, instance..instance + 1);
+        let c = &self.chunks[&coord];
+        pass.draw_indexed(
+            c.first_index..c.first_index + c.index_count,
+            c.first_vertex as i32,
+            instance..instance + 1,
+        );
     }
 
     fn shadow_pass(&self, encoder: &mut wgpu::CommandEncoder) {
@@ -490,6 +521,7 @@ impl Renderer {
         });
         pass.set_pipeline(&self.pipelines.shadow);
         pass.set_bind_group(0, &self.shadow_bg, &[]);
+        self.bind_arenas(&mut pass);
         let base = self.draw_list.len() as u32;
         for (i, coord) in self.shadow_list.iter().enumerate() {
             self.draw_chunk(&mut pass, *coord, base + i as u32);
@@ -522,6 +554,7 @@ impl Renderer {
         });
         pass.set_bind_group(0, &self.scene_bg, &[]);
         pass.set_pipeline(&self.pipelines.terrain);
+        self.bind_arenas(&mut pass);
         for (i, (_, coord)) in self.draw_list.iter().enumerate() {
             self.draw_chunk(&mut pass, *coord, i as u32);
         }

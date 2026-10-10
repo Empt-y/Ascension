@@ -34,6 +34,9 @@ struct Built {
     coord: ChunkCoord,
     version: u32,
     mesh: ChunkMesh,
+    /// The surface leaves through the chunk's top / bottom face, so the chunk above / below is needed.
+    spills_up: bool,
+    spills_down: bool,
     build_time: Duration,
     mesh_time: Duration,
 }
@@ -57,6 +60,9 @@ pub struct StreamStats {
     pub avg_mesh_ms: f32,
     /// Time from the most recent edit until all chunks it touched were back on screen.
     pub last_edit_ms: Option<f32>,
+    /// Worst main-thread cost of retargeting / uploading since the stats were last taken.
+    pub worst_retarget_ms: f32,
+    pub worst_upload_ms: f32,
 }
 
 pub struct Streamer {
@@ -81,7 +87,12 @@ pub struct Streamer {
 
 impl Streamer {
     pub fn new(worldgen: Arc<WorldGen>, view_radius: i32) -> Self {
-        let workers = thread::available_parallelism().map_or(4, |n| n.get()).saturating_sub(2).max(1);
+        // Saturating the cores starves the render thread and the GPU driver's own threads: with 14
+        // workers frames spiked to 15-35 ms while flying, with 7 to ~16 ms, with 4 they stay under ~10 ms
+        // and still keep up at 40 m/s. A quarter of the cores, at low priority. ASC_WORKERS overrides.
+        let cores = thread::available_parallelism().map_or(4, |n| n.get());
+        let workers =
+            std::env::var("ASC_WORKERS").ok().and_then(|v| v.parse().ok()).unwrap_or(cores / 4).max(2);
         let (job_tx, job_rx) = crossbeam_channel::unbounded::<Job>();
         let (done_tx, done_rx) = crossbeam_channel::unbounded::<Built>();
         for i in 0..workers {
@@ -89,15 +100,23 @@ impl Streamer {
             thread::Builder::new()
                 .name(format!("chunk-worker-{i}"))
                 .spawn(move || {
+                    if let Err(err) =
+                        thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min)
+                    {
+                        log::warn!("could not lower chunk worker priority: {err:?}");
+                    }
                     for job in rx {
                         let t0 = Instant::now();
                         let data = ChunkData::build(&wg, job.coord, &job.ops);
                         let t1 = Instant::now();
                         let mesh = mesh_chunk(&data);
+                        let (spills_up, spills_down) = spills(&mesh);
                         let built = Built {
                             coord: job.coord,
                             version: job.version,
                             mesh,
+                            spills_up,
+                            spills_down,
                             build_time: t1 - t0,
                             mesh_time: t1.elapsed(),
                         };
@@ -126,6 +145,14 @@ impl Streamer {
             stats: StreamStats::default(),
             pending_edit: None,
         }
+    }
+
+    /// Read the stats and reset the worst-case timers.
+    pub fn take_worst(&mut self) -> (f32, f32) {
+        let w = (self.stats.worst_retarget_ms, self.stats.worst_upload_ms);
+        self.stats.worst_retarget_ms = 0.0;
+        self.stats.worst_upload_ms = 0.0;
+        w
     }
 
     pub fn stats(&self) -> StreamStats {
@@ -171,12 +198,16 @@ impl Streamer {
     pub fn update(&mut self, world: &World, camera: Vec3, frustum: &Frustum, renderer: &mut Renderer) {
         let center = chunk_of(camera);
         if self.last_center != Some(center) || self.last_radius != self.view_radius {
+            let t = Instant::now();
             self.retarget(center, camera, frustum, renderer);
+            self.stats.worst_retarget_ms = self.stats.worst_retarget_ms.max(t.elapsed().as_secs_f32() * 1e3);
             self.last_center = Some(center);
             self.last_radius = self.view_radius;
         }
         self.dispatch(world);
+        let t = Instant::now();
         self.receive(renderer);
+        self.stats.worst_upload_ms = self.stats.worst_upload_ms.max(t.elapsed().as_secs_f32() * 1e3);
     }
 
     /// Recompute which chunks are wanted and in what order; drop the ones that fell out of range.
@@ -208,10 +239,18 @@ impl Streamer {
         }
         wanted.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
         self.queue.clear();
+        let mut queued = AHashSet::new();
         for (_, coord) in wanted {
             let slot = self.slots.entry(coord).or_default();
             if slot.shown.is_none() && slot.in_flight == 0 {
                 self.queue.push_back(coord);
+                queued.insert(coord);
+            }
+        }
+        // Chunks added by following the surface aren't in the band estimate; keep them queued too.
+        for (coord, slot) in &self.slots {
+            if slot.shown.is_none() && slot.in_flight == 0 && !queued.contains(coord) {
+                self.queue.push_back(*coord);
             }
         }
 
@@ -228,6 +267,17 @@ impl Streamer {
             let d = *col - IVec2::new(center.x, center.z);
             d.length_squared() <= (keep + 4) * (keep + 4)
         });
+    }
+
+    fn follow(&mut self, coord: ChunkCoord) {
+        let Some(center) = self.last_center else { return };
+        let d = coord - center;
+        let r = self.view_radius;
+        if self.slots.contains_key(&coord) || d.x * d.x + d.z * d.z > r * r || d.y.abs() > r {
+            return;
+        }
+        self.slots.insert(coord, Slot::default());
+        self.queue.push_front(coord);
     }
 
     fn dispatch(&mut self, world: &World) {
@@ -267,9 +317,17 @@ impl Streamer {
                 continue;
             }
             slot.shown = Some(built.version);
+            let current = built.version == slot.wanted;
             renderer.upload_chunk(built.coord, &built.mesh);
+            // Follow the surface vertically: the band estimate misses peaks and steep cliffs.
+            if built.spills_up {
+                self.follow(built.coord + IVec3::Y);
+            }
+            if built.spills_down {
+                self.follow(built.coord - IVec3::Y);
+            }
             if let Some((started, waiting)) = &mut self.pending_edit
-                && built.version == slot.wanted
+                && current
             {
                 waiting.remove(&built.coord);
                 if waiting.is_empty() {
@@ -279,4 +337,15 @@ impl Streamer {
             }
         }
     }
+}
+
+/// Whether any vertex sits on the chunk's top or bottom face, i.e. the surface continues past it.
+fn spills(mesh: &ChunkMesh) -> (bool, bool) {
+    let top = CHUNK as f32 - 0.5;
+    let (mut up, mut down) = (false, false);
+    for v in &mesh.vertices {
+        up |= v.position[1] >= top;
+        down |= v.position[1] <= 0.5;
+    }
+    (up, down)
 }
