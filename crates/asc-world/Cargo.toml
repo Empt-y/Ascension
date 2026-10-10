@@ -1,0 +1,13 @@
+[package]
+name = "asc-world"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+glam.workspace = true
+fastnoise-lite.workspace = true
+ahash.workspace = true

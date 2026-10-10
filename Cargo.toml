@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = ["crates/asc-world", "crates/asc-render", "crates/asc-game"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[workspace.dependencies]
+asc-world = { path = "crates/asc-world" }
+asc-render = { path = "crates/asc-render" }
+wgpu = "30"
+winit = "0.30"
+glam = { version = "0.30", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+fastnoise-lite = "1.1"
+crossbeam-channel = "0.5"
+ahash = "0.8"
+egui = "0.36"
+egui-wgpu = "0.36"
+egui-winit = { version = "0.36", default-features = false, features = ["links", "wayland", "x11"] }
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"
+pollster = "0.4"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+debug = "line-tables-only"
