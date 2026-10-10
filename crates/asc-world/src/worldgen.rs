@@ -13,7 +13,7 @@ use crate::material::Material;
 
 /// Surfaces below this height are beaches.
 const SEA_LEVEL: f32 = 2.0;
-const SNOW_LINE: f32 = 115.0;
+const SNOW_LINE: f32 = 140.0;
 
 pub struct WorldGen {
     seed: i32,
@@ -50,6 +50,12 @@ fn noise(seed: i32, kind: NoiseType, freq: f32, fractal: Option<(FractalType, i3
     n
 }
 
+/// Polynomial smooth maximum with blend width `k`.
+fn smooth_max(a: f32, b: f32, k: f32) -> f32 {
+    let h = (0.5 + 0.5 * (a - b) / k).clamp(0.0, 1.0);
+    b + (a - b) * h + k * h * (1.0 - h)
+}
+
 fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -69,7 +75,7 @@ impl WorldGen {
             hills: noise(seed.wrapping_add(1), OpenSimplex2, 0.005, Some((FBm, 5))),
             ridges: noise(seed.wrapping_add(2), OpenSimplex2, 0.0018, Some((Ridged, 5))),
             warp,
-            overhang: noise(seed.wrapping_add(4), OpenSimplex2, 0.02, Some((FBm, 2))),
+            overhang: noise(seed.wrapping_add(4), OpenSimplex2, 0.014, Some((FBm, 2))),
             cave_a: noise(seed.wrapping_add(5), OpenSimplex2, 0.012, None),
             cave_b: noise(seed.wrapping_add(6), OpenSimplex2, 0.012, None),
             ore: noise(seed.wrapping_add(7), OpenSimplex2, 0.08, None),
@@ -124,13 +130,14 @@ impl WorldGen {
         }
         let mut d = surface;
         if col.mountain > 0.0 && surface.abs() < 12.0 {
-            d += self.overhang.get_noise_3d(p.x, p.y, p.z) * 7.0 * col.mountain;
+            d += self.overhang.get_noise_3d(p.x, p.y, p.z) * 4.5 * col.mountain;
         }
         if p.y < col.height + 6.0 {
             let a = self.cave_a.get_noise_3d(p.x, p.y * 1.6, p.z);
             let b = self.cave_b.get_noise_3d(p.x, p.y * 1.6, p.z);
             let cave = (a.abs().max(b.abs()) - 0.075) * 40.0;
-            d = d.max(-cave);
+            // Smooth subtraction rounds off cave mouths, which a 1 m grid can't show as sharp creases.
+            d = smooth_max(d, -cave, 2.5);
         }
         let d = d.clamp(-DENSITY_CLAMP, DENSITY_CLAMP);
         if d >= 0.0 {
@@ -152,7 +159,7 @@ impl WorldGen {
             return Material::Rock;
         }
         if depth < 1.5 {
-            if col.height > SNOW_LINE && col.slope < 0.8 {
+            if col.height > SNOW_LINE && col.mountain > 0.5 && col.slope < 0.8 {
                 Material::Snow
             } else if beach {
                 Material::Sand
@@ -207,6 +214,7 @@ impl WorldGen {
             coord,
             density: vec![DENSITY_CLAMP; n],
             material: vec![Material::Air as u8; n],
+            surface: columns.iter().map(|c| c.height).collect(),
             uniform: None,
         };
         // Whole chunk far above the terrain: leave it as air.

@@ -184,6 +184,7 @@ dependencies = [
 name = "asc-render"
 version = "0.1.0"
 dependencies = [
+ "ahash",
  "anyhow",
  "asc-world",
  "bytemuck",
@@ -201,6 +202,7 @@ name = "asc-world"
 version = "0.1.0"
 dependencies = [
  "ahash",
+ "bytemuck",
  "fastnoise-lite",
  "glam",
 ]

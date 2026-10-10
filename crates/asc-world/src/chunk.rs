@@ -36,6 +36,9 @@ pub struct ChunkData {
     /// `SAMPLES³` signed distances, x fastest. Sample `i` sits at `origin + (i - 1)`.
     pub density: Vec<f32>,
     pub material: Vec<u8>,
+    /// Worldgen surface height of each sample column (`SAMPLES²`, x fastest). Edits don't change it;
+    /// the mesher uses it to darken ambient light under the original surface (caves, overhangs).
+    pub surface: Vec<f32>,
     pub uniform: Option<Uniform>,
 }
 

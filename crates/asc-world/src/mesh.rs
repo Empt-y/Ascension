@@ -10,13 +10,25 @@ use glam::Vec3;
 
 use crate::chunk::{CHUNK, ChunkData, SAMPLES};
 
+/// Materials that can be blended per vertex: slot `i` holds material id `i + 1` (0 is air).
+pub const MATERIAL_SLOTS: usize = 8;
+
+/// 24 bytes. The renderer reads `normal` as snorm8x4 and `weights` as two unorm8x4.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
     /// Chunk-local position in metres.
     pub position: [f32; 3],
-    pub normal: [f32; 3],
-    pub material: u32,
+    /// xyz: unit normal. w: how much ambient light reaches this point (127 = open sky).
+    pub normal: [i8; 4],
+    /// Blend weights of the surrounding materials, summing to about 255.
+    pub weights: [u8; MATERIAL_SLOTS],
+}
+
+impl Vertex {
+    pub fn normal(&self) -> Vec3 {
+        Vec3::new(self.normal[0] as f32, self.normal[1] as f32, self.normal[2] as f32) / 127.0
+    }
 }
 
 #[derive(Default)]
@@ -81,17 +93,31 @@ pub fn mesh_chunk(chunk: &ChunkData) -> ChunkMesh {
                 }
                 let local = sum / count;
                 let normal = gradient(&corner, local).normalize_or(Vec3::Y);
-                // The most solid corner decides what the surface here is made of.
-                let deepest = (0..8).min_by(|a, b| corner[*a].total_cmp(&corner[*b])).unwrap_or(0);
-                let o = CORNERS[deepest];
-                let material = chunk.material[idx(x + o[0], y + o[1], z + o[2])];
+
+                // Blend the materials of the solid corners, deeper ones counting more, so material
+                // boundaries fade across triangles instead of following them.
+                let mut weight = [0.0f32; MATERIAL_SLOTS];
+                for (i, o) in CORNERS.iter().enumerate() {
+                    let m = chunk.material[idx(x + o[0], y + o[1], z + o[2])] as usize;
+                    if corner[i] < 0.0 && (1..=MATERIAL_SLOTS).contains(&m) {
+                        weight[m - 1] += (-corner[i]).min(2.0) + 0.05;
+                    }
+                }
+                let total: f32 = weight.iter().sum::<f32>().max(1e-6);
+                let weights = weight.map(|w| (w / total * 255.0).round() as u8);
+
                 // Cell (x, y, z) has its low corner at sample (x, y, z), which sits at chunk-local x - 1.
                 let position = Vec3::new(x as f32, y as f32, z as f32) - Vec3::ONE + local;
+                let column = (x + local.x.round() as usize) + SAMPLES * (z + local.z.round() as usize);
+                let buried = chunk.surface[column] - (chunk.coord.y * CHUNK) as f32 - position.y;
+                let occlusion = 1.0 - smoothstep(2.0, 12.0, buried) * 0.85;
+
+                let n = (normal * 127.0).round();
                 cell_vertex[cell_index(x, y, z)] = mesh.vertices.len() as u32;
                 mesh.vertices.push(Vertex {
                     position: position.into(),
-                    normal: normal.into(),
-                    material: u32::from(material),
+                    normal: [n.x as i8, n.y as i8, n.z as i8, (occlusion * 127.0).round() as i8],
+                    weights,
                 });
             }
         }
@@ -131,7 +157,13 @@ pub fn mesh_chunk(chunk: &ChunkData) -> ChunkMesh {
                     }
                     // Solid at the low end means the surface faces +axis; otherwise flip.
                     let [a, b, c, e] = if here < 0.0 { quad } else { [quad[0], quad[3], quad[2], quad[1]] };
-                    mesh.indices.extend_from_slice(&[a, b, c, a, c, e]);
+                    // Split along the shorter diagonal; always using the same one zigzags along creases.
+                    let p = |i: u32| Vec3::from(mesh.vertices[i as usize].position);
+                    if p(a).distance_squared(p(c)) <= p(b).distance_squared(p(e)) {
+                        mesh.indices.extend_from_slice(&[a, b, c, a, c, e]);
+                    } else {
+                        mesh.indices.extend_from_slice(&[b, c, e, b, e, a]);
+                    }
                 }
             }
         }
@@ -147,4 +179,9 @@ fn gradient(c: &[f32; 8], t: Vec3) -> Vec3 {
     let dy = lerp(lerp(c[2] - c[0], c[3] - c[1], t.x), lerp(c[6] - c[4], c[7] - c[5], t.x), t.z);
     let dz = lerp(lerp(c[4] - c[0], c[5] - c[1], t.x), lerp(c[6] - c[2], c[7] - c[3], t.x), t.y);
     Vec3::new(dx, dy, dz)
+}
+
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }

@@ -48,6 +48,8 @@ impl Gpu {
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .context("surface is not supported by the adapter")?;
         config.format = format;
+        // egui wants to write gamma-space colours itself, so it draws through a non-sRGB view.
+        config.view_formats = vec![format.remove_srgb_suffix()];
         config.desired_maximum_frame_latency = 2;
 
         let mut gpu = Self { device, queue, surface, config, adapter_info, vsync: false, mailbox_supported };
@@ -82,6 +84,11 @@ impl Gpu {
             wgpu::PresentMode::AutoNoVsync
         };
         self.surface.configure(&self.device, &self.config);
+    }
+
+    /// Format egui renders with: the swapchain format without sRGB encoding.
+    pub fn ui_format(&self) -> wgpu::TextureFormat {
+        self.config.format.remove_srgb_suffix()
     }
 
     pub fn size(&self) -> (u32, u32) {

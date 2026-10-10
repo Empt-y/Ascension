@@ -14,21 +14,23 @@ mod worldgen;
 pub use chunk::{CHUNK, ChunkCoord, ChunkData, SAMPLES, chunk_of, chunk_origin};
 pub use edit::{EditKind, EditLog, EditOp};
 pub use material::Material;
-pub use mesh::{ChunkMesh, Vertex, mesh_chunk};
+pub use mesh::{ChunkMesh, MATERIAL_SLOTS, Vertex, mesh_chunk};
 pub use raycast::{RayHit, raycast};
 pub use worldgen::WorldGen;
 
+use std::sync::Arc;
+
 use glam::Vec3;
 
-/// Worldgen plus the edits made on top of it. Cheap to clone the parts workers need.
+/// Worldgen plus the edits made on top of it. Worker threads share the generator through the `Arc`.
 pub struct World {
-    pub worldgen: WorldGen,
+    pub worldgen: Arc<WorldGen>,
     pub edits: EditLog,
 }
 
 impl World {
     pub fn new(seed: i32) -> Self {
-        Self { worldgen: WorldGen::new(seed), edits: EditLog::default() }
+        Self { worldgen: Arc::new(WorldGen::new(seed)), edits: EditLog::default() }
     }
 
     /// Density at an arbitrary point, with edits applied. Used for raycasts and queries.

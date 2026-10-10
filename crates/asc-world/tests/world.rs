@@ -42,6 +42,7 @@ fn uniform_chunks_have_empty_meshes() {
             coord: IVec3::ZERO,
             density: vec![value; n],
             material: vec![Material::Rock as u8; n],
+            surface: vec![0.0; SAMPLES * SAMPLES],
             uniform: None,
         };
         chunk.update_uniform();
