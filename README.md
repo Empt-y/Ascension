@@ -4,8 +4,9 @@ A GTNH-style progression and factory game in a custom Rust engine. It plays like
 crafting, a deep tech tree) but the world isn't made of blocks: it's a smooth, diggable density field,
 closer to No Man's Sky. Single-player.
 
-**Status: Milestone 1.** An infinite procedural world streams in around a fly camera. You can dig
-and fill it in real time. It renders with sky, sun shadows, fog, bloom and day/night.
+**Status: Milestone 2.** You walk an infinite procedural world. You mine it at a speed set by each
+material's hardness, collect what you dig into an inventory, place it back, and your world saves.
+It renders with sky, sun shadows, fog, bloom and day/night.
 
 ## Running
 
@@ -18,12 +19,16 @@ The debug build also works and hot-reloads shaders with F5, but use release to j
 | Input | Action |
 | --- | --- |
 | Click | Capture the mouse |
-| Esc | Release the mouse; press again to quit |
-| W A S D, Space, Ctrl | Fly |
-| Shift | Fly faster |
-| Alt + wheel | Change fly speed |
-| Left / right mouse | Dig / fill |
-| Wheel | Brush size (1–8 m) |
+| Esc | Close the inventory / release the mouse; press again to quit |
+| W A S D | Walk |
+| Space | Jump |
+| Shift | Sprint |
+| Hold left mouse | Mine (time depends on the material) |
+| Right mouse | Place the selected item |
+| 1–9 / wheel | Select a hotbar slot |
+| E | Inventory: click to pick up or put down, right-click to split, Shift+click to move |
+| F | Toggle fly mode (debug). Flying: Space/Ctrl up/down, mouse buttons dig/fill a brush, wheel sets brush size, Alt+wheel sets speed |
+| F9 | Save now |
 | T / Shift+T | Move time of day forward / back |
 | `[` / `]` | View radius |
 | F3 | Debug HUD |
@@ -33,7 +38,14 @@ The debug build also works and hot-reloads shaders with F5, but use release to j
 
 Command-line options:
 
+- `--world <name>`: world to load or create (default `world1`)
+- `--new-world`: start that world over (the old one is kept, renamed)
+- `--seed <n>`: seed for a new world
+- `--saves-dir <dir>`: where worlds live (default `%APPDATA%\Ascension\saves`)
 - `--autopilot`: fly a fixed route, dig once, and log performance every 2 s
+- `--walk-test`: sprint and jump across the terrain, logging collision clearance
+- `--mine-test`: mine and then place unattended, logging the inventory
+- `--show-inventory`: start with the inventory open
 - `--exit-after <s>`: quit after that many seconds
 - `--time <0..1>`: start time of day (0 midnight, 0.5 noon)
 - `--camera x,y,z,yaw,pitch`: starting pose
@@ -46,11 +58,14 @@ Command-line options:
 ## Layout
 
 ```
-crates/asc-world   CPU only, no GPU: density chunks, worldgen, surface nets, edit log, raycast
+crates/asc-world   CPU only, no GPU: density chunks, worldgen, surface nets, edit log, raycast,
+                   collision, volume census
 crates/asc-render  wgpu renderer: terrain, sky, fog, shadows, bloom, tonemap, egui
-crates/asc-game    the `ascension` binary: window, input, streaming, sim tick, HUD
+crates/asc-game    the `ascension` binary: window, input, streaming, sim tick, player, mining,
+                   inventory, saves, HUD
 assets/shaders     WGSL; common.wgsl is prepended to every shader
-tools/             check.sh (fmt + clippy + tests), fg_check.py, screenshot.py
+assets/data        items.toml and materials.toml (hardness, drops); read from disk in debug builds
+tools/             check.sh (fmt + clippy + tests), fg_check.py, screenshot.py, lowprio.py
 ```
 
 ## How the world works
@@ -81,6 +96,25 @@ tools/             check.sh (fmt + clippy + tests), fg_check.py, screenshot.py
 - **Simulation.** A fixed 20 Hz tick, separate from rendering. It only advances time of day for
   now; machines and networks will run on it.
 
+## Playing
+
+- **The player** is a capsule (three spheres) stepping at a fixed 60 Hz, and the camera is
+  interpolated between steps.
+  - Collision uses a true distance estimate (density divided by its gradient), because worldgen
+    density is up to 2× steeper than a real distance near caves.
+  - Walkable ground (normal y > 0.7) lifts you straight up, so you don't creep down hills.
+  - A gap too low to fit stops you like a wall, and being wedged in a narrow ravine counts as
+    standing.
+  - If you end up buried (for example after placing on yourself), you rise out.
+- **Mining:** hold the button and progress builds against the material's hardness. Each bite digs
+  a 0.9 m sphere and gives the volume it removed as items, 1 per m³. Fractions are kept per item,
+  so nothing rounds away. Placing pays for the air it fills.
+- **Saves:** a world is a folder holding `world.toml` (seed, time), `player.toml` (position,
+  inventory) and `edits.bin` (every edit). The terrain itself is rebuilt from the seed plus the
+  edits.
+  - Writes are atomic: the old copy is kept as `.bak`, and a damaged file falls back to it.
+  - It saves on exit, every 2 minutes, and with F9.
+
 ## Rendering
 
 - Everything is drawn camera-relative with reversed-Z depth.
@@ -96,14 +130,17 @@ tools/             check.sh (fmt + clippy + tests), fg_check.py, screenshot.py
 
 Measured on an RTX 3070 Laptop at 1920×991, release build, view radius 10 chunks (320 m):
 
-- **Frame rate:** about 350–420 fps (2.4–2.9 ms) while flying at 40 m/s and streaming.
-- **Worst frame:** about 6–11 ms per 2 s window.
-- **Chunk build:** about 4–6 ms each on a worker, plus about 0.5 ms to mesh.
-- **Edits:** a dig is visible 10–15 ms after the click.
+- **Frame rate:** about 350–420 fps flying at 40 m/s while streaming, and about 300–440 fps
+  walking or mining.
+- **Worst frame:** about 5–11 ms per 2 s window, once the first load is done.
+- **Chunk build:** about 4–6 ms each on a worker, plus about 0.5 ms to mesh. A chunk with 1000
+  mining bites rebuilds in about 8 ms.
+- **Physics:** 0.05–0.25 ms per 60 Hz step. `density_at` costs about 1.75 µs per call.
+- **Edits:** a bite is visible 7–15 ms after it completes. A save takes 2–5 ms.
 
-## Next (M2 candidates)
+## Next
 
-- Level of detail (clipmap or octree with seam stitching), so mountains are visible beyond 320 m
-- Saving and loading the edit log and world
-- A walking player with collision, replacing the fly camera
-- Per-material textures, and grass/rock scatter
+- **M2.5, level of detail:** clipmap or octree LOD with seam stitching, so mountains are visible
+  beyond 320 m.
+- **M3, building:** machines placed on grid-snapped foundations, and connection detection.
+- **Later:** per-material textures, grass and rock scatter, and tool tiers that change mining speed.

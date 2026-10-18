@@ -53,6 +53,8 @@ pub struct Options {
     pub new_world: bool,
     /// Seed for a newly created world.
     pub seed: Option<i32>,
+    /// Start with the inventory screen open (for screenshots).
+    pub show_inventory: bool,
 }
 
 impl Options {
@@ -66,6 +68,7 @@ impl Options {
                 "--walk-test" => opts.walk_test = true,
                 "--mine-test" => opts.mine_test = true,
                 "--new-world" => opts.new_world = true,
+                "--show-inventory" => opts.show_inventory = true,
                 "--world" => opts.world = value("--world")?,
                 "--saves-dir" => opts.saves_dir = Some(value("--saves-dir")?.into()),
                 "--seed" => opts.seed = Some(value("--seed")?.parse()?),
@@ -240,7 +243,7 @@ impl State {
             inventory,
             mining: Mining::default(),
             held: None,
-            inventory_open: false,
+            inventory_open: options.show_inventory,
             save_dir,
             seed,
             last_save: Instant::now(),
