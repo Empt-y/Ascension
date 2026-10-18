@@ -482,7 +482,7 @@ impl Renderer {
         let queue = &self.gpu.queue;
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
         queue.write_buffer(&self.offsets, 0, bytemuck::cast_slice(&self.offset_data));
-        self.far.write_levels(queue);
+        self.far.write_levels(queue, glam::Vec2::new(cam.position.x, cam.position.z), frame.view_distance);
         self.parts.prepare(&self.gpu.device, queue, cam.position, view_proj, SHADOW_RADIUS * 1.5 + 8.0);
         stats.parts_drawn = self.parts.drawn;
         stats.far_levels = if self.far.enabled { self.far.ready_levels() } else { 0 };

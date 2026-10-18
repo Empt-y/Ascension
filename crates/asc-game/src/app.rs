@@ -80,6 +80,8 @@ pub struct Options {
     pub showcase: bool,
     /// Flatten a site, build a small house on it, walk inside, and log what happens.
     pub build_test: bool,
+    /// Place a large scripted block of pieces near spawn (a building performance test).
+    pub build_stress: bool,
 }
 
 impl Options {
@@ -105,6 +107,7 @@ impl Options {
                 "--msaa" => opts.msaa = Some(value("--msaa")?.parse()?),
                 "--showcase" => opts.showcase = true,
                 "--build-test" => opts.build_test = true,
+                "--build-stress" => opts.build_stress = true,
                 "--world" => opts.world = value("--world")?,
                 "--saves-dir" => opts.saves_dir = Some(value("--saves-dir")?.into()),
                 "--seed" => opts.seed = Some(value("--seed")?.parse()?),
@@ -536,6 +539,13 @@ impl State {
             let s = self.streamer.stats();
             let physics_ms = std::mem::take(&mut self.worst_physics_ms);
             let fs = self.far.stats();
+            if !self.building.structures.is_empty() {
+                log::info!(
+                    "parts: {} placed, {} instances drawn",
+                    self.building.structures.len(),
+                    self.last_stats.parts_drawn,
+                );
+            }
             log::info!(
                 "far: {} levels drawn, {}k tris | worker {} jobs in flight, {:.0}k samples/s, {}k total",
                 self.last_stats.far_levels,
@@ -1185,6 +1195,54 @@ impl State {
         self.last_edit = Instant::now();
     }
 
+    /// About 1000 pieces: a 10x10 foundation slab with walls on every cell's north and east edge and
+    /// a ceiling over each storey, three storeys high, a little way from spawn.
+    fn build_stress(&mut self) {
+        use asc_build::{Edge, PieceKey};
+        let lattice = self.building.structures.lattice.clone();
+        let site = lattice.cell_of(self.spawn.x + 10.0, self.spawn.z - 10.0);
+        let mut highest = f32::MIN;
+        for dz in 0..=10 {
+            for dx in 0..=10 {
+                let (x, z) = ((site.x + dx) as f32 * lattice.cell, (site.y + dz) as f32 * lattice.cell);
+                highest = highest.max(self.world.worldgen.height(x, z));
+            }
+        }
+        let floor = lattice.units_at_or_above(highest + 0.5);
+        let base = floor - lattice.foundation_units;
+        let cells: Vec<glam::IVec2> =
+            (0..10).flat_map(|z| (0..10).map(move |x| site + glam::IVec2::new(x, z))).collect();
+        let mut failures = 0;
+        let mut place = |b: &mut Building, key: PieceKey, tier: usize, grounded: bool| {
+            if b.place_key(key, tier, grounded).is_err() {
+                failures += 1;
+            }
+        };
+        for &cell in &cells {
+            place(&mut self.building, PieceKey::foundation(cell, base), 1, true);
+        }
+        for storey in 0..3 {
+            let y = floor + storey * 2 * lattice.wall_units;
+            for layer in 0..2 {
+                for &cell in &cells {
+                    for edge in [Edge::North, Edge::East] {
+                        let tier = (storey as usize + layer as usize) % 4;
+                        place(
+                            &mut self.building,
+                            PieceKey::wall(cell, y + layer * lattice.wall_units, edge),
+                            tier,
+                            false,
+                        );
+                    }
+                }
+            }
+            for &cell in &cells {
+                place(&mut self.building, PieceKey::ceiling(cell, y + 2 * lattice.wall_units), 3, false);
+            }
+        }
+        log::info!("build stress: {} pieces placed, {failures} refused", self.building.structures.len());
+    }
+
     /// Every tier (rows) and part (columns) laid out in front of the spawn point.
     fn showcase(&mut self) {
         use asc_build::PartKind;
@@ -1271,6 +1329,9 @@ impl ApplicationHandler for App {
                 log::info!("inventory: {} | player at {:.1}", state.inventory_summary(), state.player.feet);
                 if state.options.showcase {
                     state.showcase();
+                }
+                if state.options.build_stress {
+                    state.build_stress();
                 }
                 self.state = Some(state);
             }
