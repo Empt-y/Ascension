@@ -14,8 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::player::Mode;
 
-/// Bumped when the save layout changes incompatibly.
-pub const FORMAT_VERSION: u32 = 1;
+/// Bumped when the save layout changes. 2 added `structures.bin`; version 1 saves load with no
+/// structures.
+pub const FORMAT_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorldMeta {
@@ -58,6 +59,13 @@ pub struct SaveGame {
     pub meta: WorldMeta,
     pub player: PlayerSave,
     pub ops: Vec<EditOp>,
+    pub structures: Vec<asc_build::Piece>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StructuresFile {
+    format_version: u32,
+    pieces: Vec<asc_build::Piece>,
 }
 
 /// `%APPDATA%\Ascension\saves` on Windows (the platform data directory elsewhere).
@@ -109,6 +117,8 @@ pub fn save(dir: &Path, game: &SaveGame) -> Result<()> {
     write_atomic(&dir.join("player.toml"), toml::to_string(&game.player)?.as_bytes())?;
     let edits = EditsFile { format_version: FORMAT_VERSION, ops: game.ops.clone() };
     write_atomic(&dir.join("edits.bin"), &postcard::to_stdvec(&edits)?)?;
+    let structures = StructuresFile { format_version: FORMAT_VERSION, pieces: game.structures.clone() };
+    write_atomic(&dir.join("structures.bin"), &postcard::to_stdvec(&structures)?)?;
     Ok(())
 }
 
@@ -135,7 +145,14 @@ pub fn load(dir: &Path) -> Result<Option<SaveGame>> {
     }
     let player: PlayerSave = read_with_backup(&dir.join("player.toml"), decode_toml)?;
     let edits: EditsFile = read_with_backup(&dir.join("edits.bin"), |b| Ok(postcard::from_bytes(b)?))?;
-    Ok(Some(SaveGame { meta, player, ops: edits.ops }))
+    let structures_path = dir.join("structures.bin");
+    let structures = if meta.format_version < 2 && !structures_path.exists() {
+        Vec::new()
+    } else {
+        let file: StructuresFile = read_with_backup(&structures_path, |b| Ok(postcard::from_bytes(b)?))?;
+        file.pieces
+    };
+    Ok(Some(SaveGame { meta, player, ops: edits.ops, structures }))
 }
 
 #[cfg(test)]
@@ -179,7 +196,32 @@ mod tests {
                     material: if i % 5 == 0 { Material::Rock } else { Material::Air },
                 })
                 .collect(),
+            structures: vec![
+                asc_build::Piece {
+                    key: asc_build::PieceKey::foundation(glam::IVec2::new(3, -2), 4),
+                    tier: 1,
+                    grounded: true,
+                },
+                asc_build::Piece {
+                    key: asc_build::PieceKey::wall(glam::IVec2::new(3, -2), 6, asc_build::Edge::East),
+                    tier: 3,
+                    grounded: false,
+                },
+            ],
         }
+    }
+
+    #[test]
+    fn version_1_saves_load_without_structures() {
+        let dir = temp_dir("v1");
+        let mut game = sample_game();
+        game.meta.format_version = 1;
+        save(&dir, &game).unwrap();
+        std::fs::remove_file(dir.join("structures.bin")).unwrap();
+        let loaded = load(&dir).unwrap().unwrap();
+        assert!(loaded.structures.is_empty());
+        assert_eq!(loaded.ops, game.ops);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -227,6 +269,14 @@ mod tests {
         assert_eq!(loaded.ops, first.ops, "edits come from the backup");
         assert_eq!(loaded.meta.ticks, second.meta.ticks, "undamaged files still load the latest");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_edit_kinds_keep_their_encoding() {
+        // Saves store enum variant indices, so Dig and Fill must stay the first two kinds; new
+        // kinds (the flatten boxes) are appended after them.
+        assert_eq!(postcard::to_stdvec(&EditKind::Dig).unwrap(), [0]);
+        assert_eq!(postcard::to_stdvec(&EditKind::Fill).unwrap(), [1]);
     }
 
     #[test]

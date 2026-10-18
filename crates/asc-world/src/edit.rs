@@ -14,10 +14,17 @@ use crate::material::Material;
 /// Densities are clamped to this distance from the surface (metres).
 pub const DENSITY_CLAMP: f32 = 4.0;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// What an edit does. New kinds must only ever be added at the end: saves store the variant index.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EditKind {
+    /// Remove a sphere of `radius`.
     Dig,
+    /// Fill a sphere of `radius` with `material`.
     Fill,
+    /// Remove a box: `radius` is its horizontal half-width (square), `half_height` its vertical.
+    DigBox { half_height: f32 },
+    /// Fill a box (same shape as `DigBox`) with `material`.
+    FillBox { half_height: f32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -29,18 +36,65 @@ pub struct EditOp {
 }
 
 impl EditOp {
+    /// Distance from the centre beyond which this op changes nothing.
     pub fn reach(&self) -> f32 {
-        self.radius + DENSITY_CLAMP
+        let extent = match self.kind {
+            EditKind::Dig | EditKind::Fill => self.radius,
+            EditKind::DigBox { half_height } | EditKind::FillBox { half_height } => {
+                Vec3::new(self.radius, half_height, self.radius).length()
+            }
+        };
+        extent + DENSITY_CLAMP
+    }
+
+    /// Signed distance from `p` to the op's shape.
+    #[inline]
+    fn shape_distance(&self, p: Vec3) -> f32 {
+        match self.kind {
+            EditKind::Dig | EditKind::Fill => p.distance(self.center) - self.radius,
+            EditKind::DigBox { half_height } | EditKind::FillBox { half_height } => {
+                let q = (p - self.center).abs() - Vec3::new(self.radius, half_height, self.radius);
+                q.max(Vec3::ZERO).length() + q.max_element().min(0.0)
+            }
+        }
     }
 
     #[inline]
     pub fn apply(&self, p: Vec3, d: f32, m: u8) -> (f32, u8) {
-        let s = p.distance(self.center) - self.radius;
+        let s = self.shape_distance(p);
         match self.kind {
-            EditKind::Dig => ((-s).max(d).min(DENSITY_CLAMP), m),
-            EditKind::Fill if s < d => (s.max(-DENSITY_CLAMP), self.material as u8),
-            EditKind::Fill => (d, m),
+            EditKind::Dig | EditKind::DigBox { .. } => ((-s).max(d).min(DENSITY_CLAMP), m),
+            EditKind::Fill | EditKind::FillBox { .. } if s < d => {
+                (s.max(-DENSITY_CLAMP), self.material as u8)
+            }
+            EditKind::Fill | EditKind::FillBox { .. } => (d, m),
         }
+    }
+
+    /// The two box edits that level a square footprint to `height`: cut everything above it (up to
+    /// `clear` metres) and fill everything below it (down to `depth` metres).
+    pub fn flatten(
+        center_xz: glam::Vec2,
+        half_width: f32,
+        height: f32,
+        clear: f32,
+        depth: f32,
+        material: Material,
+    ) -> [Self; 2] {
+        [
+            Self {
+                center: Vec3::new(center_xz.x, height + clear / 2.0, center_xz.y),
+                radius: half_width,
+                kind: EditKind::DigBox { half_height: clear / 2.0 },
+                material: Material::Air,
+            },
+            Self {
+                center: Vec3::new(center_xz.x, height - depth / 2.0, center_xz.y),
+                radius: half_width,
+                kind: EditKind::FillBox { half_height: depth / 2.0 },
+                material,
+            },
+        ]
     }
 
     /// Every chunk whose stored samples this op can change.

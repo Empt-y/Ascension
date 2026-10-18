@@ -2,6 +2,7 @@
 
 mod app;
 mod assets;
+mod building;
 mod content;
 mod far;
 mod hud;

@@ -151,3 +151,66 @@ pub fn window(ctx: &egui::Context, content: &Content, inventory: &mut Inventory,
         paint_stack(&painter, Rect::from_center_size(pointer, Vec2::splat(SLOT)), content, stack);
     }
 }
+
+/// What was picked in the build menu.
+#[derive(Clone, Copy, Debug)]
+pub enum MenuChoice {
+    Piece(usize, asc_build::PartKind),
+    Flatten,
+}
+
+/// The build menu: one preview tile per (tier, part), plus terrain tools.
+pub fn build_menu(
+    ctx: &egui::Context,
+    spec: &asc_build::BuildingSpec,
+    previews: &[[egui::TextureHandle; 3]],
+) -> Option<MenuChoice> {
+    let mut chosen = None;
+    egui::Window::new("Build")
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            egui::Grid::new("build grid").spacing([8.0, 8.0]).show(ui, |ui| {
+                ui.label("");
+                for kind in asc_build::PartKind::ALL {
+                    ui.label(&spec.part(kind).name);
+                }
+                ui.end_row();
+                for (tier, row) in previews.iter().enumerate() {
+                    ui.label(&spec.tiers[tier].name);
+                    for (slot, kind) in asc_build::PartKind::ALL.into_iter().enumerate() {
+                        let image = egui::Image::new(&row[slot]).fit_to_exact_size(Vec2::new(150.0, 112.0));
+                        let tip = format!("{} {}", spec.tiers[tier].name, spec.part(kind).name);
+                        if ui.add(egui::Button::image(image)).on_hover_text(tip).clicked() {
+                            chosen = Some(MenuChoice::Piece(tier, kind));
+                        }
+                    }
+                    ui.end_row();
+                }
+            });
+            ui.separator();
+            if ui.button("Flatten ground (2 x 2 m)").on_hover_text("Level the cell under the crosshair for a foundation").clicked() {
+                chosen = Some(MenuChoice::Flatten);
+            }
+            ui.label("Pick a piece. Then LMB places, X dismantles, wheel changes tier, RMB stops building. B or Esc closes this.");
+        });
+    chosen
+}
+
+/// One line about the piece being placed, above the hotbar.
+pub fn build_status(ctx: &egui::Context, text: &str, ok: bool) {
+    let screen = ctx.content_rect();
+    let pos = Pos2::new(screen.center().x, screen.bottom() - SLOT - 70.0);
+    let painter =
+        ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("build status")));
+    let color = if ok { Color32::from_rgb(150, 220, 255) } else { Color32::from_rgb(255, 150, 120) };
+    painter.text(
+        pos + Vec2::splat(1.0),
+        Align2::CENTER_BOTTOM,
+        text,
+        FontId::proportional(17.0),
+        Color32::BLACK,
+    );
+    painter.text(pos, Align2::CENTER_BOTTOM, text, FontId::proportional(17.0), color);
+}

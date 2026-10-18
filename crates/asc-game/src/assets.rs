@@ -66,3 +66,34 @@ impl PartModels {
         self.models[tier][slot]
     }
 }
+
+/// Decode the Blender preview renders into egui textures, `[tier][kind]`.
+pub fn load_previews(ctx: &egui::Context, spec: &BuildingSpec) -> Result<Vec<[egui::TextureHandle; 3]>> {
+    let dir = root()?.join("models").join("previews");
+    let mut out = Vec::new();
+    for tier in 0..spec.tiers.len() {
+        let mut row = Vec::new();
+        for kind in PartKind::ALL {
+            let name = format!("{}_{}.png", spec.tiers[tier].id, kind.id());
+            let bytes = std::fs::read(dir.join(&name)).with_context(|| format!("reading preview {name}"))?;
+            row.push(ctx.load_texture(name, decode_png(&bytes)?, egui::TextureOptions::LINEAR));
+        }
+        out.push(row.try_into().map_err(|_| anyhow::anyhow!("three parts per tier"))?);
+    }
+    Ok(out)
+}
+
+fn decode_png(bytes: &[u8]) -> Result<egui::ColorImage> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = decoder.read_info()?;
+    let mut buf = vec![0; reader.output_buffer_size().context("preview too large")?];
+    let info = reader.next_frame(&mut buf)?;
+    let pixels = &buf[..info.buffer_size()];
+    let size = [info.width as usize, info.height as usize];
+    Ok(match info.color_type {
+        png::ColorType::Rgba => egui::ColorImage::from_rgba_unmultiplied(size, pixels),
+        png::ColorType::Rgb => egui::ColorImage::from_rgb(size, pixels),
+        other => anyhow::bail!("unsupported preview colour type {other:?}"),
+    })
+}

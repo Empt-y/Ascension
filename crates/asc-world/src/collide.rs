@@ -35,22 +35,33 @@ impl Capsule {
     }
 }
 
-/// Density gradient from four samples on a tetrahedron (cheaper than six-sample central differences).
+/// Signed distance from `p` to an axis-aligned box.
+pub fn box_distance(p: Vec3, lo: Vec3, hi: Vec3) -> f32 {
+    let center = (lo + hi) * 0.5;
+    let half = (hi - lo) * 0.5;
+    let q = (p - center).abs() - half;
+    q.max(Vec3::ZERO).length() + q.max_element().min(0.0)
+}
+
+/// Density gradient by central differences.
+///
+/// Six samples along the axes rather than four on a tetrahedron: the diagonal tetrahedral offsets
+/// straddle sharp creases (a floor meeting a wall) and invent a sideways component there, which made
+/// players slide along walls they were pushing into. Returns the gradient scaled by `2 * eps`.
 pub fn gradient(density: &impl Fn(Vec3) -> f32, p: Vec3, eps: f32) -> Vec3 {
-    const K: [Vec3; 4] = [
-        Vec3::new(1.0, -1.0, -1.0),
-        Vec3::new(-1.0, -1.0, 1.0),
-        Vec3::new(-1.0, 1.0, -1.0),
-        Vec3::new(1.0, 1.0, 1.0),
-    ];
-    K.iter().map(|k| *k * density(p + *k * eps)).sum()
+    Vec3::new(
+        density(p + Vec3::X * eps) - density(p - Vec3::X * eps),
+        density(p + Vec3::Y * eps) - density(p - Vec3::Y * eps),
+        density(p + Vec3::Z * eps) - density(p - Vec3::Z * eps),
+    )
 }
 
 /// Estimated true distance to the surface: density divided by its gradient's length.
 pub fn distance_estimate(density: &impl Fn(Vec3) -> f32, p: Vec3) -> f32 {
-    const EPS: f32 = 0.1;
-    let len = (gradient(density, p, EPS) / (4.0 * EPS)).length();
-    density(p) / len.max(0.1)
+    // Small, so the samples only straddle a crease (floor meeting wall) within 2 cm of it.
+    const EPS: f32 = 0.02;
+    let len = (gradient(density, p, EPS) / (2.0 * EPS)).length();
+    density(p) / len.max(1.0)
 }
 
 /// If a sphere overlaps the ground, how to push it out.
@@ -59,19 +70,23 @@ pub fn distance_estimate(density: &impl Fn(Vec3) -> f32, p: Vec3) -> f32 {
 /// inside the ground it is clamped flat. Dividing by the gradient's length turns it into a proper
 /// distance estimate; a flat (clamped) field means "deep inside", reported with `depth > radius`.
 pub fn push_sphere(density: &impl Fn(Vec3) -> f32, center: Vec3, radius: f32) -> Option<Contact> {
-    const EPS: f32 = 0.1;
+    // Small, so the samples only straddle a crease (floor meeting wall) within 2 cm of it.
+    const EPS: f32 = 0.02;
     let d = density(center);
     // Cheap early out, assuming the field is never less than half as steep as a true distance.
     if d >= radius * 2.0 {
         return None;
     }
-    let g = gradient(density, center, EPS) / (4.0 * EPS);
+    let g = gradient(density, center, EPS) / (2.0 * EPS);
     let len = g.length();
     if len < 0.1 {
         // Clamped region: far inside solid ground (or far out in air, which the early out caught).
         return (d < 0.0).then_some(Contact { normal: Vec3::Y, depth: radius + 1.0 });
     }
-    let distance = d / len;
+    // Only ever shrink the distance (worldgen fields can be steeper than a true distance). Where
+    // the gradient is shallower than 1, at the crease where two surfaces meet, density is already
+    // a safe distance; dividing would push it out and let the capsule sink into the corner.
+    let distance = d / len.max(1.0);
     (distance < radius).then(|| Contact { normal: g / len, depth: radius - distance })
 }
 

@@ -27,6 +27,8 @@ const MAX_PUSH: f32 = 0.3;
 const BURIED_DEPTH: f32 = 0.6;
 /// How fast a buried player (e.g. after filling on themselves) is lifted out.
 const UNBURY_SPEED: f32 = 6.0;
+/// Ledges up to this high (a foundation's rim, a stair) are climbed automatically when walking.
+const STEP_HEIGHT: f32 = 0.55;
 /// Below this the player is put back at the spawn point.
 pub const KILL_Y: f32 = -400.0;
 
@@ -161,8 +163,13 @@ impl Player {
         let mut grounded = false;
         for _ in 0..substeps {
             let before = self.feet;
-            self.feet += motion / substeps as f32;
+            let step = motion / substeps as f32;
+            self.feet += step;
             let r = self.resolve(density);
+            if was_grounded && !jumped && self.try_step_up(before, step, density) {
+                grounded = true;
+                continue;
+            }
             if r.squeezed {
                 // Floor and ceiling at once: the gap is too low. Undo the horizontal part of the move,
                 // as if a wall stopped it, and settle again.
@@ -189,6 +196,50 @@ impl Player {
         if grounded && self.velocity.y < 0.0 {
             self.velocity.y = 0.0;
         }
+    }
+
+    /// If a low ledge stopped this substep's horizontal move, climb it: from `STEP_HEIGHT` up, probe
+    /// a capsule radius ahead, and if there's floor to land on, move onto it. Returns whether it
+    /// stepped. (Moving only this substep's few centimetres wouldn't get the capsule over the ledge.)
+    fn try_step_up(&mut self, before: Vec3, step: Vec3, density: &impl Fn(Vec3) -> f32) -> bool {
+        let wanted = Vec3::new(step.x, 0.0, step.z);
+        let moved = Vec3::new(self.feet.x - before.x, 0.0, self.feet.z - before.z);
+        if wanted.length_squared() < 1e-8 || moved.length() > wanted.length() * 0.5 {
+            return false;
+        }
+        let saved = (self.feet, self.velocity);
+        let velocity = self.velocity;
+        let fail = |this: &mut Self| {
+            (this.feet, this.velocity) = saved;
+            false
+        };
+        // Lift, and make sure there's headroom up there.
+        self.feet = before + Vec3::Y * STEP_HEIGHT;
+        if self.resolve(density).squeezed || self.feet.y < before.y + STEP_HEIGHT - 0.01 {
+            return fail(self);
+        }
+        let reach = Capsule::PLAYER.radius + 0.05;
+        let lifted = self.feet;
+        self.feet += wanted.normalize() * reach;
+        self.resolve(density);
+        let advanced = Vec3::new(self.feet.x - lifted.x, 0.0, self.feet.z - lifted.z).length();
+        if advanced < reach * 0.6 {
+            return fail(self);
+        }
+        // Settle back down onto the ledge in small steps (one big drop would pass through its top
+        // and end up inside it).
+        let mut landed = false;
+        let mut dropped = 0.0;
+        while dropped < STEP_HEIGHT + 0.05 && !landed {
+            self.feet.y -= 0.1;
+            dropped += 0.1;
+            landed = self.resolve(density).grounded;
+        }
+        if !landed || self.feet.y <= before.y + 0.02 {
+            return fail(self);
+        }
+        self.velocity = Vec3::new(velocity.x, 0.0, velocity.z);
+        true
     }
 
     /// Whether any part of the capsule is deeper in the ground than pushing should handle. Normal
@@ -329,6 +380,21 @@ mod tests {
     }
 
     #[test]
+    fn walks_up_a_low_ledge_but_not_a_high_one() {
+        // Ground rises 0.5 m at x = 2 (like a foundation's rim) and another 1 m at x = 6, built
+        // from exact box distance fields (a sloppy field misreports which face is nearest inside
+        // the risers).
+        let block = |p: Vec3, x0: f32, top: f32| {
+            asc_world::box_distance(p, Vec3::new(x0, -10.0, -50.0), Vec3::new(1000.0, top, 50.0))
+        };
+        let steps = move |p: Vec3| p.y.min(block(p, 2.0, 0.5)).min(block(p, 6.0, 1.5));
+        let mut p = Player::new(Vec3::ZERO);
+        run(&mut p, MoveInput { forward: 1.0, ..Default::default() }, 3.0, steps);
+        assert!(p.feet.x > 2.5 && p.feet.x < 6.0, "should climb 0.5 m but stop at 1 m: {}", p.feet);
+        assert!((p.feet.y - 0.5).abs() < 0.03 && p.grounded, "{}", p.feet);
+    }
+
+    #[test]
     fn a_buried_player_rises_out() {
         let mut p = Player::new(Vec3::new(0.0, -5.0, 0.0));
         run(&mut p, MoveInput::default(), 3.0, plane);
@@ -382,5 +448,25 @@ mod tests {
         p.update(STEP * 1.5, &input, &plane);
         let eye = p.eye() - Vec3::Y * EYE_HEIGHT;
         assert!(eye.x > p.prev_feet.x && eye.x < p.feet.x, "{eye} between {} and {}", p.prev_feet, p.feet);
+    }
+}
+
+#[cfg(test)]
+mod corner_tests {
+    use super::*;
+
+    #[test]
+    fn pushing_into_a_wall_from_a_floor_does_not_slide_or_sink() {
+        // Floor at y = 0 and a wall face at z = 2 (solid beyond), meeting in a sharp inside corner,
+        // like a foundation and a wall.
+        let room = |p: Vec3| p.y.min(2.0 - p.z);
+        let mut p = Player::new(Vec3::new(5.0, 0.0, 0.0));
+        p.yaw = std::f32::consts::FRAC_PI_2;
+        for _ in 0..(3.0 / STEP) as usize {
+            p.step(&MoveInput { forward: 1.0, ..Default::default() }, &room);
+        }
+        assert!((p.feet.x - 5.0).abs() < 0.01, "slid sideways to {}", p.feet);
+        assert!(p.feet.y.abs() < 0.02, "sank or rose: {}", p.feet);
+        assert!(p.feet.z <= 2.0 - Capsule::PLAYER.radius + 0.02 && p.grounded, "{}", p.feet);
     }
 }

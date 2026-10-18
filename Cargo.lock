@@ -196,6 +196,7 @@ dependencies = [
  "env_logger",
  "glam",
  "log",
+ "png",
  "postcard",
  "serde",
  "thread-priority",

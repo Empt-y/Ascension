@@ -257,3 +257,40 @@ fn material_names_round_trip() {
         assert_eq!(Material::from_u8(m as u8), m);
     }
 }
+
+#[test]
+fn flatten_levels_the_footprint() {
+    let mut world = World::new(SEED);
+    // A spot on a hillside.
+    let (x, z) = (37.0, -12.0);
+    let h = world.worldgen.height(x, z);
+    let target = (h * 2.0).round() / 2.0;
+    for op in EditOp::flatten(glam::Vec2::new(x, z), 1.0, target, 6.0, 3.0, Material::Soil) {
+        world.edits.push(op);
+    }
+    for (dx, dz) in [(-0.9, -0.9), (0.9, -0.9), (-0.9, 0.9), (0.9, 0.9), (0.0, 0.0)] {
+        let p = Vec3::new(x + dx, target, z + dz);
+        assert!(world.density_at(p + Vec3::Y * 0.3) > 0.0, "air just above the flattened top at {p}");
+        assert!(world.density_at(p - Vec3::Y * 0.3) < 0.0, "ground just below the flattened top at {p}");
+    }
+}
+
+#[test]
+fn neighbouring_flattens_leave_no_membrane_between_them() {
+    // Two adjacent cells flattened separately, in a hillside so the old ground above the target is
+    // solid: the seam between them must be open air, not a density-0 sheet.
+    let mut world = World::new(SEED);
+    let (x, z) = (37.0, -12.0);
+    let target = (world.worldgen.height(x, z) * 2.0).round() / 2.0 - 3.0;
+    for cx in [x - 1.0, x + 1.0] {
+        for op in EditOp::flatten(glam::Vec2::new(cx, z), 1.4, target, 6.0, 3.0, Material::Soil) {
+            world.edits.push(op);
+        }
+    }
+    // Anywhere across the seam, a player-sized sphere resting on the floor sees the floor 0.35 m
+    // away, not a phantom wall: density must read the true distance to the floor.
+    for dx in [-0.5, -0.2, 0.0, 0.2, 0.5] {
+        let p = Vec3::new(x + dx, target + 0.35, z);
+        assert!(world.density_at(p) > 0.34, "phantom wall at {p}: {}", world.density_at(p));
+    }
+}

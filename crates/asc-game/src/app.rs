@@ -13,12 +13,14 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 use crate::assets::PartModels;
+use crate::building::{BUILD_REACH, Building, Selection};
 use crate::content::Content;
 use crate::far::FarStreamer;
 use crate::hud::{self, HudInfo};
 use crate::input::Input;
 use crate::inventory::{HOTBAR, Inventory, Stack};
 use crate::inventory_ui;
+use crate::inventory_ui::MenuChoice;
 use crate::mining::{BITE_RADIUS, Mining, PlaceOutcome};
 use crate::player::{self, Mode, MoveInput, Player};
 use crate::save::{self, PlayerSave, SaveGame, SlotSave, WorldMeta};
@@ -26,7 +28,19 @@ use crate::sim::Sim;
 use crate::streaming::Streamer;
 
 const DEFAULT_SEED: i32 = 1337;
+
+/// The build tool in hand.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum BuildTool {
+    Piece(Selection),
+    Flatten,
+}
 const AUTOSAVE: Duration = Duration::from_secs(120);
+/// How far a flatten reaches past its cell (metres). Combining cut boxes with `max` gives the right
+/// surface but, inside the combined volume, only a lower bound on the distance to it: within this
+/// far of an internal box face it under-reports, which collision feels as an invisible wall. So
+/// neighbouring flattens overlap by more than the player's radius (0.35 m).
+const FLATTEN_OVERLAP: f32 = 0.4;
 const TICK: Duration = Duration::from_millis(50);
 const MAX_TICKS_PER_FRAME: u32 = 5;
 const FLY_REACH: f32 = 64.0;
@@ -64,6 +78,8 @@ pub struct Options {
     pub msaa: Option<u32>,
     /// Lay out every building part near spawn (for screenshots).
     pub showcase: bool,
+    /// Flatten a site, build a small house on it, walk inside, and log what happens.
+    pub build_test: bool,
 }
 
 impl Options {
@@ -88,6 +104,7 @@ impl Options {
                 "--fog" => opts.fog_density = Some(value("--fog")?.parse()?),
                 "--msaa" => opts.msaa = Some(value("--msaa")?.parse()?),
                 "--showcase" => opts.showcase = true,
+                "--build-test" => opts.build_test = true,
                 "--world" => opts.world = value("--world")?,
                 "--saves-dir" => opts.saves_dir = Some(value("--saves-dir")?.into()),
                 "--seed" => opts.seed = Some(value("--seed")?.parse()?),
@@ -138,6 +155,13 @@ struct State {
     spawn: Vec3,
     content: Content,
     parts: PartModels,
+    building: Building,
+    build_tool: Option<BuildTool>,
+    previews: Option<Vec<[egui::TextureHandle; 3]>>,
+    /// Flatten tool preview: cell centre and target height.
+    flatten_preview: Option<(glam::Vec2, f32)>,
+    build_test_phase: u8,
+    build_test_floor: f32,
     inventory: Inventory,
     mining: Mining,
     held: Option<Stack>,
@@ -216,6 +240,13 @@ impl State {
         let streamer = Streamer::new(world.worldgen.clone(), options.view_radius.unwrap_or(10));
         let far = FarStreamer::new(world.worldgen.clone());
         let parts = PartModels::load(&mut renderer)?;
+        let lattice = asc_build::Lattice::new(&parts.spec);
+        let structures = match &loaded {
+            Some(game) => asc_build::Structures::from_pieces(lattice, game.structures.iter().copied()),
+            None => asc_build::Structures::new(lattice),
+        };
+        log::info!("structures: {} pieces", structures.len());
+        let building = Building::new(structures);
         renderer.set_far_enabled(options.far);
         if let Some(samples) = options.msaa {
             renderer.set_msaa(samples)?;
@@ -272,6 +303,12 @@ impl State {
             spawn,
             content,
             parts,
+            building,
+            build_tool: None,
+            previews: None,
+            flatten_preview: None,
+            build_test_phase: 0,
+            build_test_floor: 0.0,
             inventory,
             mining: Mining::default(),
             held: None,
@@ -365,15 +402,47 @@ impl State {
             ..self.camera
         };
 
-        let reach = if self.player.mode == Mode::Fly { FLY_REACH } else { WALK_REACH };
-        self.hit = raycast(|p| self.world.density_at(p), self.camera.position, self.camera.forward(), reach);
-        if self.captured && self.player.mode == Mode::Fly {
-            self.edit_terrain();
-        }
-        if self.player.mode == Mode::Walk && !self.inventory_open {
-            self.mine_and_place(dt.as_secs_f32());
+        let reach = if self.build_tool.is_some() {
+            BUILD_REACH
+        } else if self.player.mode == Mode::Fly {
+            FLY_REACH
         } else {
+            WALK_REACH
+        };
+        let (world, building) = (&self.world, &self.building);
+        self.hit = raycast(
+            |p| world.density_at(p).min(building.sdf(p)),
+            self.camera.position,
+            self.camera.forward(),
+            reach,
+        );
+        if self.options.build_test {
+            self.build_test_step();
+        }
+        if self.build_tool.is_some() {
             self.mining.reset();
+            self.use_build_tool();
+        } else {
+            if self.captured && self.player.mode == Mode::Fly {
+                self.edit_terrain();
+            }
+            if self.player.mode == Mode::Walk && !self.inventory_open && !self.building.menu_open {
+                self.mine_and_place(dt.as_secs_f32());
+            } else {
+                self.mining.reset();
+            }
+        }
+        if !self.options.showcase {
+            self.building.sync(&mut self.renderer, &self.parts);
+            if let (Some(BuildTool::Flatten), Some((xz, h))) = (self.build_tool, self.flatten_preview) {
+                // Show the levelled top as a foundation-shaped ghost.
+                let model = self.parts.model(0, asc_build::PartKind::Foundation);
+                let position = Vec3::new(xz.x, h - self.building.structures.lattice.foundation_height, xz.y);
+                self.renderer.set_ghost(Some(asc_render::Ghost {
+                    instance: asc_render::PartInstance { model, position, rotation: 0 },
+                    valid: true,
+                }));
+            }
         }
 
         let (w, h) = self.renderer.gpu().size();
@@ -391,6 +460,16 @@ impl State {
         }
         let progress = self.mining.progress(&self.content);
         let walking = self.player.mode == Mode::Walk;
+        if self.building.menu_open && self.previews.is_none() {
+            match crate::assets::load_previews(&self.egui_ctx, &self.parts.spec) {
+                Ok(p) => self.previews = Some(p),
+                Err(err) => log::warn!("build menu previews: {err:#}"),
+            }
+        }
+        let menu = self.building.menu_open.then_some(()).and(self.previews.as_ref());
+        let spec = &self.parts.spec;
+        let status = self.build_status();
+        let mut picked = None;
         let (content, inventory, held) = (&self.content, &mut self.inventory, &mut self.held);
         let (open, captured, notice) = (self.inventory_open, self.captured, &self.notice);
         let output = self.egui_ctx.run_ui(raw_input, |ui| {
@@ -408,7 +487,16 @@ impl State {
             if open {
                 inventory_ui::window(ctx, content, inventory, held);
             }
+            if let Some(previews) = menu {
+                picked = inventory_ui::build_menu(ctx, spec, previews);
+            }
+            if let Some((text, ok)) = &status {
+                inventory_ui::build_status(ctx, text, *ok);
+            }
         });
+        if let Some(choice) = picked {
+            self.choose_build_tool(choice);
+        }
         self.egui_state.handle_platform_output(&self.window, output.platform_output);
         let primitives = self.egui_ctx.tessellate(output.shapes, output.pixels_per_point);
 
@@ -510,7 +598,11 @@ impl State {
     fn handle_keys(&mut self, event_loop: &ActiveEventLoop) {
         let input = &self.input;
         if input.pressed(KeyCode::Escape) {
-            if self.inventory_open {
+            if self.building.menu_open {
+                self.toggle_build_menu();
+            } else if self.build_tool.is_some() {
+                self.set_build_tool(None);
+            } else if self.inventory_open {
                 self.toggle_inventory();
             } else if self.captured {
                 self.set_captured(false);
@@ -518,8 +610,11 @@ impl State {
                 event_loop.exit();
             }
         }
-        if self.input.pressed(KeyCode::KeyE) && self.player.mode == Mode::Walk {
+        if self.input.pressed(KeyCode::KeyE) && self.player.mode == Mode::Walk && !self.building.menu_open {
             self.toggle_inventory();
+        }
+        if self.input.pressed(KeyCode::KeyB) && !self.inventory_open {
+            self.toggle_build_menu();
         }
         const DIGITS: [KeyCode; HOTBAR] = [
             KeyCode::Digit1,
@@ -575,7 +670,13 @@ impl State {
                 (self.sim.time_of_day + step * self.frame_ms / 1000.0 / 24.0).rem_euclid(1.0);
         }
         let wheel = self.input.wheel;
-        if wheel != 0.0 && self.player.mode == Mode::Walk && !self.input.held(KeyCode::AltLeft) {
+        if wheel != 0.0 && self.build_tool.is_some() {
+            if let Some(BuildTool::Piece(sel)) = self.build_tool {
+                let tiers = self.parts.spec.tiers.len();
+                let tier = if wheel > 0.0 { (sel.tier + tiers - 1) % tiers } else { (sel.tier + 1) % tiers };
+                self.set_build_tool(Some(BuildTool::Piece(Selection { tier, ..sel })));
+            }
+        } else if wheel != 0.0 && self.player.mode == Mode::Walk && !self.input.held(KeyCode::AltLeft) {
             // Wheel down moves right along the hotbar, as in most games.
             let step = if wheel > 0.0 { HOTBAR - 1 } else { 1 };
             self.inventory.selected = (self.inventory.selected + step) % HOTBAR;
@@ -608,9 +709,14 @@ impl State {
         if self.options.walk_test {
             input = self.walk_test_input();
         }
+        if self.options.build_test && self.build_test_phase == 2 {
+            // Walk straight in through the doorway, towards the back wall.
+            input = MoveInput { forward: 1.0, ..Default::default() };
+        }
         let t = Instant::now();
         let world = &self.world;
-        let steps = self.player.update(dt, &input, &|p| world.density_at(p));
+        let building = &self.building;
+        let steps = self.player.update(dt, &input, &|p| world.density_at(p).min(building.sdf(p)));
         if steps > 0 {
             self.worst_physics_ms = self.worst_physics_ms.max(t.elapsed().as_secs_f32() * 1e3 / steps as f32);
         }
@@ -703,6 +809,7 @@ impl State {
                 remainders: held.remainders.iter().map(|(id, v)| (item_id(*id), *v)).collect(),
             },
             ops: self.world.edits.ops().to_vec(),
+            structures: self.building.structures.iter().copied().collect(),
         }
     }
 
@@ -721,6 +828,244 @@ impl State {
             }
         }
         self.last_save = Instant::now();
+    }
+
+    fn toggle_build_menu(&mut self) {
+        self.building.menu_open = !self.building.menu_open;
+        if self.building.menu_open {
+            self.set_captured(false);
+        } else {
+            self.set_captured(true);
+        }
+    }
+
+    fn choose_build_tool(&mut self, choice: MenuChoice) {
+        self.building.menu_open = false;
+        self.set_captured(true);
+        self.set_build_tool(Some(match choice {
+            MenuChoice::Piece(tier, kind) => BuildTool::Piece(Selection { tier, kind }),
+            MenuChoice::Flatten => BuildTool::Flatten,
+        }));
+    }
+
+    fn set_build_tool(&mut self, tool: Option<BuildTool>) {
+        self.build_tool = tool;
+        self.building.selection = match tool {
+            Some(BuildTool::Piece(sel)) => Some(sel),
+            _ => None,
+        };
+        self.building.preview = None;
+        self.flatten_preview = None;
+        self.renderer.set_ghost(None);
+    }
+
+    /// Height of the real (edited) ground at (x, z), probing down from `above`.
+    fn ground_height(world: &World, x: f32, z: f32, above: f32) -> f32 {
+        let top = Vec3::new(x, above + 40.0, z);
+        raycast(|p| world.density_at(p), top, -Vec3::Y, 120.0)
+            .map_or(world.worldgen.height(x, z), |h| h.point.y)
+    }
+
+    /// Ghost preview, place, flatten and dismantle with the active build tool.
+    fn use_build_tool(&mut self) {
+        let camera = self.camera.position;
+        let above = self.hit.map_or(camera.y, |h| h.point.y.max(camera.y));
+        let world = &self.world;
+        let terrain = |x: f32, z: f32| Self::ground_height(world, x, z, above);
+        let clicked = self.captured && self.input.button_pressed(MouseButton::Left);
+        match self.build_tool {
+            Some(BuildTool::Piece(_)) => {
+                self.building.update_preview(self.hit, camera, &terrain);
+                // The gap rule needs the snap, so recheck with it.
+                if let Some((snap, valid)) = &mut self.building.preview {
+                    *valid = self.building.structures.check_snap(snap);
+                }
+                if clicked {
+                    match self.building.place() {
+                        Ok(key) => log::debug!("placed {key:?}"),
+                        Err(why) => self.show_notice(format!("Can't place: {why}")),
+                    }
+                }
+            }
+            Some(BuildTool::Flatten) => {
+                let lattice = &self.building.structures.lattice;
+                self.flatten_preview = self.hit.filter(|h| h.distance <= BUILD_REACH).map(|h| {
+                    let cell = lattice.cell_of(h.point.x, h.point.z);
+                    let center = (cell.as_vec2() + 0.5) * lattice.cell;
+                    let height = (h.point.y / lattice.unit).round() * lattice.unit;
+                    (center, height)
+                });
+                if clicked && let Some((center, height)) = self.flatten_preview {
+                    self.flatten(center, height);
+                }
+            }
+            None => {}
+        }
+        if self.captured && self.input.pressed(KeyCode::KeyX) {
+            match self.building.dismantle(self.hit) {
+                Ok(piece) => log::debug!("dismantled {:?}", piece.key),
+                Err(why) => self.show_notice(format!("Can't dismantle: {why}")),
+            }
+        }
+        if self.captured && self.input.button_pressed(MouseButton::Right) {
+            self.set_build_tool(None);
+        }
+    }
+
+    /// Level one grid cell to `height`: cut above, fill below with soil.
+    fn flatten(&mut self, center: glam::Vec2, height: f32) {
+        // Overlap the neighbouring cells (see FLATTEN_OVERLAP for why).
+        let half = self.building.structures.lattice.cell / 2.0 + FLATTEN_OVERLAP;
+        // Deep fill so the levelled pad meets the ground on downhill slopes instead of overhanging.
+        for op in EditOp::flatten(center, half, height, 6.0, 8.0, Material::Soil) {
+            let dirty = self.world.edits.push(op);
+            self.streamer.invalidate(&dirty);
+        }
+    }
+
+    fn build_status(&self) -> Option<(String, bool)> {
+        let spec = &self.parts.spec;
+        match self.build_tool? {
+            BuildTool::Piece(sel) => {
+                let name = format!("{} {}", spec.tiers[sel.tier].name, spec.part(sel.kind).name);
+                Some(match &self.building.preview {
+                    Some((_, Ok(()))) => {
+                        (format!("{name}: click to place   (wheel: tier, X: dismantle, RMB: stop)"), true)
+                    }
+                    Some((_, Err(why))) => (format!("{name}: {why}"), false),
+                    None => (format!("{name}: aim at the ground or a piece"), false),
+                })
+            }
+            BuildTool::Flatten => Some(match self.flatten_preview {
+                Some((_, h)) => {
+                    (format!("Flatten to {h:.1} m: click to level this cell   (RMB: stop)"), true)
+                }
+                None => ("Flatten: aim at the ground".to_owned(), false),
+            }),
+        }
+    }
+
+    /// Build test: flatten a 3x3 site, build a 4 m room with a doorway, walk in, and log.
+    fn build_test_step(&mut self) {
+        use asc_build::{PartKind, PieceKey, Side, Target};
+        let t = self.started.elapsed().as_secs_f32();
+        match self.build_test_phase {
+            0 if t > 2.0 => {
+                let lattice = self.building.structures.lattice.clone();
+                let site = lattice.cell_of(self.spawn.x + 6.0, self.spawn.z);
+                let ground =
+                    self.world.worldgen.height((site.x as f32 + 1.5) * 2.0, (site.y as f32 + 1.5) * 2.0);
+                let height = (ground / lattice.unit).round() * lattice.unit;
+                for dz in 0..3 {
+                    for dx in 0..3 {
+                        let cell = site + glam::IVec2::new(dx, dz);
+                        self.flatten((cell.as_vec2() + 0.5) * lattice.cell, height);
+                    }
+                }
+                let world = &self.world;
+                let terrain = |x: f32, z: f32| Self::ground_height(world, x, z, height + 5.0);
+                let mut placed = 0;
+                let mut failures = Vec::new();
+                for dz in 0..3 {
+                    for dx in 0..3 {
+                        let cell = site + glam::IVec2::new(dx, dz);
+                        let p = Vec3::new((cell.x as f32 + 0.5) * 2.0, height, (cell.y as f32 + 0.5) * 2.0);
+                        let snap = self.building.structures.snap(
+                            PartKind::Foundation,
+                            Target::Terrain(p),
+                            Vec3::ZERO,
+                            &terrain,
+                        );
+                        match self.building.structures.check_snap(&snap) {
+                            Ok(()) => {
+                                self.building.place_key(snap.key, 1, snap.grounded).ok();
+                                placed += 1;
+                            }
+                            Err(why) => {
+                                failures.push(format!("foundation {cell}: {why} (gap {:.2})", snap.gap))
+                            }
+                        }
+                    }
+                }
+                let mut heights: Vec<(glam::IVec2, i32)> =
+                    self.building.structures.iter().map(|p| (p.key.cell, p.key.y)).collect();
+                heights.sort_by_key(|(c, _)| (c.y, c.x));
+                log::info!("build test: flattened to {height:.2}; foundation (cell, base units) {heights:?}");
+                let floor = self.building.structures.iter().map(|p| lattice.top(&p.key)).max().unwrap_or(0);
+                // Two layers of walls round the outside, leaving a doorway in the south middle.
+                for layer in 0..2 {
+                    let y = floor + layer * lattice.wall_units;
+                    for i in 0..3 {
+                        let walls = [
+                            (site + glam::IVec2::new(i, 0), Side::NegZ),
+                            (site + glam::IVec2::new(i, 2), Side::PosZ),
+                            (site + glam::IVec2::new(0, i), Side::NegX),
+                            (site + glam::IVec2::new(2, i), Side::PosX),
+                        ];
+                        for (cell, side) in walls {
+                            if side == Side::NegZ && i == 1 {
+                                continue;
+                            }
+                            let key = PieceKey::wall_on_side(cell, y, side);
+                            match self.building.place_key(key, 2, false) {
+                                Ok(()) => placed += 1,
+                                Err(why) => failures.push(format!("wall {key:?}: {why}")),
+                            }
+                        }
+                    }
+                }
+                // Roof: edge cells first (they rest on walls), then the middle (rests on them).
+                let roof = floor + 2 * lattice.wall_units;
+                let mut cells: Vec<glam::IVec2> =
+                    (0..3).flat_map(|z| (0..3).map(move |x| glam::IVec2::new(x, z))).collect();
+                cells.sort_by_key(|c| u8::from(*c == glam::IVec2::ONE));
+                for c in cells {
+                    let key = PieceKey::ceiling(site + c, roof);
+                    match self.building.place_key(key, 3, false) {
+                        Ok(()) => placed += 1,
+                        Err(why) => failures.push(format!("ceiling {key:?}: {why}")),
+                    }
+                }
+                log::info!("build test: placed {placed} pieces, {} failures {failures:?}", failures.len());
+                // Stand in the doorway, facing in.
+                let door = (site + glam::IVec2::new(1, 0)).as_vec2() * 2.0 + glam::Vec2::new(1.0, 0.6);
+                self.player.mode = Mode::Walk;
+                self.player.teleport(Vec3::new(door.x, lattice.height(floor) + 0.3, door.y));
+                (self.player.yaw, self.player.pitch) = (std::f32::consts::FRAC_PI_2, 0.05);
+                self.build_test_floor = lattice.height(floor);
+                self.build_test_phase = 1;
+            }
+            1 | 2 if (t * 2.0).fract() < 0.02 => {
+                log::info!(
+                    "build test t={t:.1}: feet {:.2} v {:.2} grounded {}",
+                    self.player.feet,
+                    self.player.velocity,
+                    self.player.grounded
+                );
+                if self.build_test_phase == 1 && t > 4.0 {
+                    self.build_test_phase = 2;
+                }
+            }
+            1 if t > 4.0 => self.build_test_phase = 2,
+            2 if t > 9.0 => {
+                let feet = self.player.feet;
+                let lattice = &self.building.structures.lattice;
+                let under_roof = self.building.structures.sdf(feet + Vec3::Y * 3.5) < 0.6;
+                log::info!(
+                    "build test: feet {feet:.2} floor {:.2} grounded {} | inside, under the roof: {under_roof} | pieces {}",
+                    self.build_test_floor,
+                    self.player.grounded,
+                    self.building.structures.len(),
+                );
+                let _ = lattice;
+                // Finish in build mode with a wall ghost aimed at the floor, for screenshots.
+                self.set_build_tool(Some(BuildTool::Piece(Selection { tier: 0, kind: PartKind::Wall })));
+                self.player.teleport(self.player.feet - Vec3::Z * 2.5);
+                (self.player.yaw, self.player.pitch) = (std::f32::consts::FRAC_PI_2, -0.45);
+                self.build_test_phase = 3;
+            }
+            _ => {}
+        }
     }
 
     fn toggle_inventory(&mut self) {
@@ -743,6 +1088,11 @@ impl State {
 
     fn mine_and_place(&mut self, dt: f32) {
         self.mining.tick_cooldown(dt);
+        // Mining edits terrain only: a crosshair on a piece mines nothing.
+        if self.hit.is_some_and(|h| self.building.structures.piece_at(h.point, 0.05).is_some()) {
+            self.mining.reset();
+            return;
+        }
         let (mine, place) = if self.options.mine_test {
             self.mine_test_input()
         } else if self.captured {
@@ -824,8 +1174,8 @@ impl State {
         let r = self.brush_radius;
         let center = match kind {
             // Dig slightly into the surface; fill slightly out of it so it builds towards the player.
-            EditKind::Dig => hit.point - hit.normal * r * 0.3,
-            EditKind::Fill => hit.point + hit.normal * r * 0.3,
+            EditKind::Dig | EditKind::DigBox { .. } => hit.point - hit.normal * r * 0.3,
+            EditKind::Fill | EditKind::FillBox { .. } => hit.point + hit.normal * r * 0.3,
         };
         if kind == EditKind::Fill && center.distance(self.camera.position) < r + 0.5 {
             return;
@@ -953,6 +1303,7 @@ impl ApplicationHandler for App {
                     && button_state == ElementState::Pressed
                     && !egui_consumed
                     && !state.inventory_open
+                    && !state.building.menu_open
                 {
                     // The click that captures the mouse shouldn't also dig.
                     state.set_captured(true);

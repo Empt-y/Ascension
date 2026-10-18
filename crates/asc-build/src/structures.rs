@@ -25,6 +25,8 @@ pub enum Invalid {
     NoSupport,
     /// Dismantling would leave this piece unsupported.
     Supports(PieceKey),
+    /// The ground drops away under the foundation.
+    Gap,
     Missing,
 }
 
@@ -35,6 +37,7 @@ impl fmt::Display for Invalid {
             Self::Overlaps => write!(f, "overlaps another piece"),
             Self::NoSupport => write!(f, "needs support"),
             Self::Supports(_) => write!(f, "other pieces rest on it"),
+            Self::Gap => write!(f, "gap underneath (flatten the ground)"),
             Self::Missing => write!(f, "nothing to dismantle"),
         }
     }
@@ -51,7 +54,18 @@ pub enum Target {
 pub struct Snap {
     pub key: PieceKey,
     pub grounded: bool,
+    /// Foundations: the largest drop from the foundation's base to the terrain under it.
+    pub gap: f32,
 }
+
+/// The most terrain may fall away under a foundation (anywhere under its footprint) before the gap
+/// counts as notable and the foundation can't be placed. Flatten the ground first.
+pub const MAX_GAP: f32 = 0.5;
+
+/// A foundation's top always clears the highest ground under it by at least this much (then rounds
+/// up to the grid). Flush with the ground, terrain and floor would be coplanar and fight over which
+/// is drawn (and which the crosshair hits).
+pub const FOUNDATION_CLEARANCE: f32 = 0.1;
 
 /// How far boxes are shrunk before overlap tests, so pieces resting on or against each other don't
 /// count. Vertically generous (stacking), horizontally a hair (walls are only 0.2 m thick and
@@ -192,6 +206,22 @@ impl Structures {
         Ok(())
     }
 
+    /// Check a snapped placement, including the ground under a foundation.
+    pub fn check_snap(&self, snap: &Snap) -> Result<(), Invalid> {
+        let key = &snap.key;
+        if key.kind == PartKind::Foundation {
+            let stacked = self.has(PieceKey::foundation(key.cell, key.y - self.lattice.foundation_units));
+            if !stacked && snap.gap > MAX_GAP {
+                // Report occupancy first: it's the more useful message when aiming at a piece.
+                if self.has(*key) {
+                    return Err(Invalid::Occupied);
+                }
+                return Err(Invalid::Gap);
+            }
+        }
+        self.check(key, snap.grounded)
+    }
+
     pub fn place(&mut self, piece: Piece) -> Result<(), Invalid> {
         self.check(&piece.key, piece.grounded)?;
         self.insert(piece);
@@ -264,7 +294,8 @@ impl Structures {
                     } else {
                         self.nearest_side(key.cell, point)
                     };
-                    Snap { key: PieceKey::foundation(key.cell + side.offset(), key.y), grounded: false }
+                    let key = PieceKey::foundation(key.cell + side.offset(), key.y);
+                    self.foundation_snap(key, terrain)
                 }
                 Target::Piece { point, .. } | Target::Terrain(point) => {
                     self.foundation_on_terrain(point, terrain)
@@ -283,7 +314,7 @@ impl Structures {
                         PieceKey::wall_on_side(cell, terrain_units(point), self.nearest_side(cell, point))
                     }
                 };
-                Snap { key, grounded: false }
+                Snap { key, grounded: false, gap: 0.0 }
             }
             PartKind::Ceiling => {
                 let key = match target {
@@ -308,9 +339,32 @@ impl Structures {
                         PieceKey::ceiling(l.cell_of(point.x, point.z), terrain_units(point) + l.wall_units)
                     }
                 };
-                Snap { key, grounded: false }
+                Snap { key, grounded: false, gap: 0.0 }
             }
         }
+    }
+
+    /// Terrain heights at the corners and centre of a cell.
+    fn footprint_heights(&self, cell: IVec2, terrain: &impl Fn(f32, f32) -> f32) -> [f32; 5] {
+        let l = &self.lattice;
+        let (x0, z0) = (cell.x as f32 * l.cell, cell.y as f32 * l.cell);
+        let inset = 0.05;
+        [
+            (x0 + inset, z0 + inset),
+            (x0 + l.cell - inset, z0 + inset),
+            (x0 + inset, z0 + l.cell - inset),
+            (x0 + l.cell - inset, z0 + l.cell - inset),
+            (x0 + l.cell / 2.0, z0 + l.cell / 2.0),
+        ]
+        .map(|(x, z)| terrain(x, z))
+    }
+
+    /// A snap for a foundation at `key`, measuring the ground under it.
+    fn foundation_snap(&self, key: PieceKey, terrain: &impl Fn(f32, f32) -> f32) -> Snap {
+        let base = self.lattice.height(key.y);
+        let lowest = self.footprint_heights(key.cell, terrain).into_iter().fold(f32::MAX, f32::min);
+        let gap = (base - lowest).max(0.0);
+        Snap { key, grounded: gap <= MAX_GAP, gap }
     }
 
     /// A foundation over the cell at `point`, its top just above the highest terrain under it, or
@@ -318,17 +372,8 @@ impl Structures {
     fn foundation_on_terrain(&self, point: Vec3, terrain: &impl Fn(f32, f32) -> f32) -> Snap {
         let l = &self.lattice;
         let cell = l.cell_of(point.x, point.z);
-        let (x0, z0) = (cell.x as f32 * l.cell, cell.y as f32 * l.cell);
-        let inset = 0.05;
-        let samples = [
-            (x0 + inset, z0 + inset),
-            (x0 + l.cell - inset, z0 + inset),
-            (x0 + inset, z0 + l.cell - inset),
-            (x0 + l.cell - inset, z0 + l.cell - inset),
-            (x0 + l.cell / 2.0, z0 + l.cell / 2.0),
-        ];
-        let highest = samples.iter().map(|(x, z)| terrain(*x, *z)).fold(f32::MIN, f32::max);
-        let mut y = l.units_at_or_above(highest) - l.foundation_units;
+        let highest = self.footprint_heights(cell, terrain).into_iter().fold(f32::MIN, f32::max);
+        let mut y = l.units_at_or_above(highest + FOUNDATION_CLEARANCE) - l.foundation_units;
         let neighbour = Side::ALL.iter().find_map(|s| {
             self.near(cell + s.offset(), 0)
                 .find(|k| {
@@ -341,7 +386,7 @@ impl Structures {
         if let Some(ny) = neighbour {
             y = ny;
         }
-        Snap { key: PieceKey::foundation(cell, y), grounded: true }
+        self.foundation_snap(PieceKey::foundation(cell, y), terrain)
     }
 }
 
@@ -375,6 +420,15 @@ mod tests {
     }
 
     #[test]
+    fn foundations_stand_clear_of_flat_ground() {
+        let s = structures();
+        // Ground exactly on a height unit: the top goes a whole unit up, not flush with it.
+        let at = Target::Terrain(Vec3::new(1.0, 17.0, 1.0));
+        let snap = s.snap(PartKind::Foundation, at, Vec3::ZERO, &flat(17.0));
+        assert_eq!(s.lattice.height(s.lattice.top(&snap.key)), 17.5);
+    }
+
+    #[test]
     fn foundation_sits_above_the_highest_terrain_under_it() {
         let s = structures();
         let snap =
@@ -385,8 +439,8 @@ mod tests {
         let slope = |x: f32, _z: f32| x * 0.5;
         let snap =
             s.snap(PartKind::Foundation, Target::Terrain(Vec3::new(5.0, 0.0, 1.0)), Vec3::ZERO, &slope);
-        // Cell x 4..6: highest sample 5.95 * 0.5 = 2.975 -> top 3.0 = 6 units -> base 4.
-        assert_eq!(snap.key.y, 4);
+        // Cell x 4..6: highest sample 5.95 * 0.5 = 2.975, plus clearance -> top 3.5 = 7 units -> base 5.
+        assert_eq!(snap.key.y, 5);
     }
 
     #[test]
@@ -406,6 +460,40 @@ mod tests {
         let snap = s.snap(PartKind::Foundation, target, Vec3::ZERO, &flat(0.0));
         assert_eq!(snap.key, PieceKey::foundation(IVec2::new(0, 1), 2));
         assert!(s.check(&snap.key, snap.grounded).is_ok());
+    }
+
+    #[test]
+    fn foundations_need_ground_close_underneath() {
+        let mut s = structures();
+        // Flat ground: no gap.
+        let snap =
+            s.snap(PartKind::Foundation, Target::Terrain(Vec3::new(1.0, 0.0, 1.0)), Vec3::ZERO, &flat(0.0));
+        assert!(snap.gap < 0.01 && s.check_snap(&snap).is_ok());
+        // A 1 m foundation absorbs a 1 m rise across its cell (it sinks into the low side), but on
+        // a slope rising 2 m the top clears the high side and leaves ~1 m open under the low side.
+        let gentle = |x: f32, _z: f32| x * 0.5;
+        let snap =
+            s.snap(PartKind::Foundation, Target::Terrain(Vec3::new(5.0, 0.0, 1.0)), Vec3::ZERO, &gentle);
+        assert!(s.check_snap(&snap).is_ok(), "gentle slope gap {}", snap.gap);
+        let slope = |x: f32, _z: f32| x;
+        let snap =
+            s.snap(PartKind::Foundation, Target::Terrain(Vec3::new(5.0, 0.0, 1.0)), Vec3::ZERO, &slope);
+        assert!(snap.gap > MAX_GAP, "gap {}", snap.gap);
+        assert_eq!(s.check_snap(&snap), Err(Invalid::Gap));
+        // Extending a foundation out over a cliff edge is refused too.
+        s.place(piece(PieceKey::foundation(IVec2::ZERO, 0))).unwrap();
+        let cliff = |x: f32, _z: f32| if x < 2.0 { 0.0 } else { -6.0 };
+        let target = Target::Piece {
+            key: PieceKey::foundation(IVec2::ZERO, 0),
+            point: Vec3::new(2.0, 0.5, 1.0),
+            normal: Vec3::X,
+        };
+        let snap = s.snap(PartKind::Foundation, target, Vec3::ZERO, &cliff);
+        assert_eq!(snap.key, PieceKey::foundation(IVec2::new(1, 0), 0));
+        assert_eq!(s.check_snap(&snap), Err(Invalid::Gap));
+        // But stacking straight on top of a foundation needs no ground.
+        let stacked = Snap { key: PieceKey::foundation(IVec2::ZERO, 2), grounded: false, gap: 99.0 };
+        assert!(s.check_snap(&stacked).is_ok());
     }
 
     #[test]
