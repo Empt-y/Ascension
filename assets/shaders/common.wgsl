@@ -139,21 +139,86 @@ struct Surface {
     roughness: f32,
 }
 
-fn triplanar(p: vec3<f32>, w: vec3<f32>) -> f32 {
-    return value_noise(p.yzx) * w.x + value_noise(p.xzy) * w.y + value_noise(p) * w.z;
+fn triplanar(p: vec3<f32>, w_in: vec3<f32>) -> f32 {
+    // Skip projections that barely contribute (most surfaces need one or two), fading them out
+    // smoothly: a hard cut-off is a tiny step in the value, which bump mapping turns into a line.
+    let w = w_in * smoothstep(vec3(0.01), vec3(0.06), w_in);
+    var sum = 0.0;
+    if w.x > 0.0 {
+        sum += value_noise(p.yzx) * w.x;
+    }
+    if w.y > 0.0 {
+        sum += value_noise(p.xzy) * w.y;
+    }
+    if w.z > 0.0 {
+        sum += value_noise(p) * w.z;
+    }
+    return sum / max(w.x + w.y + w.z, 1e-4);
+}
+
+// Surface detail shared by the albedo and the bump-mapped normal.
+struct Detail {
+    // Roughly -0.5..0.5 brightness variation.
+    tone: f32,
+    // Normal with the fine relief applied.
+    normal: vec3<f32>,
+}
+
+const DETAIL_OCTAVES: u32 = 5u;
+const DETAIL_FREQ: array<f32, 5> = array(0.45, 1.3, 4.1, 12.0, 36.0);
+const DETAIL_TONE: array<f32, 5> = array(0.30, 0.34, 0.26, 0.18, 0.12);
+
+// Procedural detail filtered by pixel footprint: each octave fades out as its wavelength approaches
+// the size of a pixel on the surface (the procedural equivalent of mipmapping), so near ground is
+// crisp and distant or grazing ground is smooth rather than shimmering. The same octaves, as a small
+// height field, bump the normal using screen-space derivatives (Mikkelsen's surface gradient).
+//
+// Must be called in uniform control flow (before any discard): it takes derivatives.
+fn surface_detail(world: vec3<f32>, n: vec3<f32>) -> Detail {
+    let dpx = dpdx(world);
+    let dpy = dpdy(world);
+    // At grazing angles a pixel's footprint is long one way and short the other. Filtering colour
+    // by the long side (isotropic) blurs everything; the geometric mean keeps detail along the short
+    // side, the procedural cousin of anisotropic filtering. Relief keeps the stricter long side.
+    let footprint = max(length(dpx), length(dpy));
+    let tone_footprint = sqrt(length(dpx) * length(dpy));
+    var tw = pow(abs(n), vec3(4.0));
+    tw /= (tw.x + tw.y + tw.z);
+    var tone = 0.0;
+    var height = 0.0;
+    for (var i = 0u; i < DETAIL_OCTAVES; i++) {
+        let f = DETAIL_FREQ[i];
+        // Colour detail survives down to a wavelength of about 2-5 pixels; relief only to about 4-12,
+        // because screen-space derivatives come per 2x2 pixel quad and turn finer bumps blocky.
+        let keep = 1.0 - smoothstep(0.2, 0.55, tone_footprint * f);
+        let relief = 1.0 - smoothstep(0.08, 0.25, footprint * f);
+        if keep > 0.0 {
+            let v = triplanar(world * f + f32(i) * 17.31, tw) - 0.5;
+            tone += v * DETAIL_TONE[i] * keep;
+            // Relief proportional to wavelength keeps slopes similar at every scale.
+            height += v * (0.22 / f) * relief;
+        }
+    }
+    let dhx = dpdx(height);
+    let dhy = dpdy(height);
+    let r1 = cross(dpy, n);
+    let r2 = cross(n, dpx);
+    let det = dot(dpx, r1);
+    let grad = sign(det) * (dhx * r1 + dhy * r2);
+    var d: Detail;
+    d.tone = tone;
+    d.normal = normalize(abs(det) * n - grad);
+    if abs(det) < 1e-12 {
+        d.normal = n;
+    }
+    return d;
 }
 
 // Base colours are linear and deliberately saturated. Materials blend by the interpolated weights.
-fn terrain_surface(wa: vec4<f32>, wb: vec4<f32>, world: vec3<f32>, n: vec3<f32>, dist: f32) -> Surface {
-    // Triplanar detail: blend three axis-aligned noise projections by the normal.
-    var tw = pow(abs(n), vec3(4.0));
-    tw /= (tw.x + tw.y + tw.z);
-    // The finest octave fades out with distance before it can alias.
-    let near = 1.0 - smoothstep(8.0, 45.0, dist);
-    let grit = (triplanar(world * 14.0 + 5.0, tw) - 0.5) * near;
-    let fine = triplanar(world * 1.3, tw) * 0.6 + triplanar(world * 4.1 + 17.0, tw) * 0.4 + grit * 0.45;
+fn terrain_surface(wa: vec4<f32>, wb: vec4<f32>, world: vec3<f32>, n: vec3<f32>, tone: f32) -> Surface {
     let broad = fbm3(world * 0.035);
-    let detail = 0.74 + 0.52 * fine;
+    let detail = 1.0 + tone;
+    let fine = 0.5 + tone;
 
     let soil = mix(vec3(0.22, 0.13, 0.07), vec3(0.30, 0.19, 0.10), broad);
     let lush = mix(vec3(0.10, 0.34, 0.06), vec3(0.24, 0.42, 0.05), broad);

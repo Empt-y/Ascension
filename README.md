@@ -49,6 +49,7 @@ Command-line options:
 - `--show-inventory`: start with the inventory open
 - `--far on|off`: far terrain and water (default on)
 - `--fog <density>`: haze density (default 0.00045)
+- `--msaa 1|4`: scene anti-aliasing (default 4)
 - `--exit-after <s>`: quit after that many seconds
 - `--time <0..1>`: start time of day (0 midnight, 0.5 noon)
 - `--camera x,y,z,yaw,pitch`: starting pose
@@ -133,6 +134,13 @@ tools/             check.sh (fmt + clippy + tests), fg_check.py, screenshot.py, 
   - It uses the same material rules and lighting (`shade_terrain` in `common.wgsl`), so near and
     far match.
   - It ignores edits and cave mouths. Beyond 320 m they're too small to matter.
+- **Surface detail** is procedural: five noise octaves (0.45 to 36 per metre) give colour variation
+  and, through derivative-based bump mapping, lit relief.
+  - Each octave fades as its wavelength nears the pixel's footprint on the ground, the procedural
+    equivalent of mipmapping.
+  - Colour uses the geometric mean of the footprint's two axes, a cousin of anisotropic
+    filtering, so ground seen at a grazing angle stays crisp instead of smearing.
+- **Anti-aliasing:** 4× MSAA on the scene pass (`--msaa 1` turns it off).
 - **Water** is one flat surface at sea level (2 m) with ripples, sky reflection with Fresnel and a
   sun glint. Its depth comes from the far height textures, which gives shore fades and deep-water
   colour, and dry land (including pits dug below sea level) gets no water. It's visual only for
@@ -149,8 +157,9 @@ tools/             check.sh (fmt + clippy + tests), fg_check.py, screenshot.py, 
 
 Measured on an RTX 3070 Laptop at 1920×991, release build, view radius 10 chunks (320 m):
 
-- **Frame rate:** about 270–330 fps flying at 40 m/s with far terrain and water (889k far
-  triangles). That's about 0.4 ms more than `--far off` (330–350 fps).
+- **Frame rate:** about 200–230 fps at ground level with 4× MSAA and full surface detail (about
+  5 ms per frame). The detail shader costs about 1 ms and MSAA about 0.4 ms. Far terrain and water
+  cost about 0.4 ms more than `--far off`.
 - **Worst frame:** about 5–7 ms in most 2 s windows, with spikes up to about 24 ms where chunk
   streaming is heaviest; `--far off` shows similar spikes in the same spots.
 - **Far terrain:** a full refresh is about 455k height samples (0.15 s at about 3 M samples/s on

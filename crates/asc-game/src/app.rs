@@ -59,6 +59,8 @@ pub struct Options {
     /// Draw the far-terrain clipmap (on by default).
     pub far: bool,
     pub fog_density: Option<f32>,
+    /// Scene MSAA samples (1 or 4).
+    pub msaa: Option<u32>,
 }
 
 impl Options {
@@ -81,6 +83,7 @@ impl Options {
                     }
                 }
                 "--fog" => opts.fog_density = Some(value("--fog")?.parse()?),
+                "--msaa" => opts.msaa = Some(value("--msaa")?.parse()?),
                 "--world" => opts.world = value("--world")?,
                 "--saves-dir" => opts.saves_dir = Some(value("--saves-dir")?.into()),
                 "--seed" => opts.seed = Some(value("--seed")?.parse()?),
@@ -208,6 +211,9 @@ impl State {
         let streamer = Streamer::new(world.worldgen.clone(), options.view_radius.unwrap_or(10));
         let far = FarStreamer::new(world.worldgen.clone());
         renderer.set_far_enabled(options.far);
+        if let Some(samples) = options.msaa {
+            renderer.set_msaa(samples)?;
+        }
         if let Some(d) = options.fog_density {
             renderer.fog_density = d;
         }

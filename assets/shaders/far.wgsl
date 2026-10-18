@@ -110,6 +110,10 @@ fn far_weights(height: f32, n: vec3<f32>) -> array<vec4<f32>, 2> {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    // Detail takes derivatives, so it has to come before the discards below.
+    let geometric = normalize(in.normal);
+    let world = in.rel + globals.camera.xyz;
+    let detail = surface_detail(world, geometric);
     if length(in.rel.xz) < globals.fog.z - CHUNK_OVERLAP {
         discard;
     }
@@ -122,10 +126,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             discard;
         }
     }
-    let n = normalize(in.normal);
-    let world = in.rel + globals.camera.xyz;
-    let w = far_weights(world.y, n);
-    let s = terrain_surface(w[0], w[1], world, n, length(in.rel));
-    let color = shade_terrain(s, n, in.rel, 1.0, 1.0);
+    let w = far_weights(world.y, geometric);
+    let s = terrain_surface(w[0], w[1], world, geometric, detail.tone);
+    let color = shade_terrain(s, detail.normal, in.rel, 1.0, 1.0);
     return vec4(apply_fog(color, in.rel), 1.0);
 }

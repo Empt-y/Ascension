@@ -54,13 +54,15 @@ fn shadow_factor(rel: vec3<f32>, n: vec3<f32>) -> f32 {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let n = normalize(in.normal.xyz);
+    let geometric = normalize(in.normal.xyz);
     let occlusion = clamp(in.normal.w, 0.0, 1.0);
     let world = in.rel + globals.camera.xyz;
-    let s = terrain_surface(in.weights_a, in.weights_b, world, n, length(in.rel));
+    let detail = surface_detail(world, geometric);
+    let n = detail.normal;
+    let s = terrain_surface(in.weights_a, in.weights_b, world, geometric, detail.tone);
     var shadow = 1.0;
-    if dot(n, sun_dir()) > 0.0 {
-        shadow = shadow_factor(in.rel, n);
+    if dot(geometric, sun_dir()) > 0.0 {
+        shadow = shadow_factor(in.rel, geometric);
     }
     var color = shade_terrain(s, n, in.rel, occlusion, shadow);
 

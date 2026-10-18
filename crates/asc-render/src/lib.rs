@@ -33,6 +33,8 @@ use targets::{BLOOM_LEVELS, SHADOW_SIZE, Targets};
 /// With far terrain on, everything has faded into the sky by this distance (metres).
 pub const FAR_RANGE: f32 = 14_000.0;
 const DEFAULT_FOG_DENSITY: f32 = 0.00045;
+/// Samples per pixel for the scene pass (4x MSAA smooths silhouettes and geometric edges).
+pub const DEFAULT_MSAA: u32 = 4;
 
 /// Half-width of the area around the camera covered by the sun's shadow map (metres).
 const SHADOW_RADIUS: f32 = 110.0;
@@ -55,7 +57,7 @@ struct Globals {
 /// Build every pipeline against an sRGB target without a window. Used by tests.
 pub fn build_pipelines_headless(device: &wgpu::Device, shaders: &ShaderLib) -> Result<()> {
     let layouts = Layouts::new(device);
-    Pipelines::build(device, shaders, &layouts, wgpu::TextureFormat::Bgra8UnormSrgb).map(|_| ())
+    Pipelines::build(device, shaders, &layouts, wgpu::TextureFormat::Bgra8UnormSrgb, DEFAULT_MSAA).map(|_| ())
 }
 
 /// What the game hands the renderer each frame.
@@ -122,6 +124,7 @@ pub struct Renderer {
     indices: Arena,
     far: FarTerrain,
     pub fog_density: f32,
+    msaa: u32,
     // Per-frame scratch, kept to avoid allocating every frame.
     draw_list: Vec<(f32, ChunkCoord)>,
     shadow_list: Vec<ChunkCoord>,
@@ -144,8 +147,9 @@ impl Renderer {
         let device = &gpu.device;
         let shaders = ShaderLib::new();
         let layouts = Layouts::new(device);
-        let pipelines = Pipelines::build(device, &shaders, &layouts, gpu.config.format)?;
-        let targets = Targets::new(device, gpu.size());
+        let msaa = DEFAULT_MSAA;
+        let pipelines = Pipelines::build(device, &shaders, &layouts, gpu.config.format, msaa)?;
+        let targets = Targets::new(device, gpu.size(), msaa);
 
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("globals"),
@@ -202,6 +206,7 @@ impl Renderer {
             indices,
             far,
             fog_density: DEFAULT_FOG_DENSITY,
+            msaa,
             draw_list: Vec::new(),
             shadow_list: Vec::new(),
             offset_data: Vec::new(),
@@ -292,7 +297,7 @@ impl Renderer {
             return;
         }
         self.gpu.resize(width, height);
-        self.targets = Targets::new(&self.gpu.device, self.gpu.size());
+        self.targets = Targets::new(&self.gpu.device, self.gpu.size(), self.msaa);
         (self.post_bg, self.bloom_bgs) = Self::texture_bind_groups(
             &self.gpu.device,
             &self.layouts,
@@ -304,9 +309,35 @@ impl Renderer {
 
     /// Recompile every shader from disk. On failure the old pipelines stay in use.
     pub fn reload_shaders(&mut self) -> Result<()> {
-        let pipelines =
-            Pipelines::build(&self.gpu.device, &self.shaders, &self.layouts, self.gpu.config.format)?;
+        let pipelines = Pipelines::build(
+            &self.gpu.device,
+            &self.shaders,
+            &self.layouts,
+            self.gpu.config.format,
+            self.msaa,
+        )?;
         self.pipelines = pipelines;
+        Ok(())
+    }
+
+    pub fn msaa(&self) -> u32 {
+        self.msaa
+    }
+
+    /// Change the scene's sample count (1 = off). Rebuilds the targets and pipelines.
+    pub fn set_msaa(&mut self, samples: u32) -> Result<()> {
+        let samples = if samples > 1 { 4 } else { 1 };
+        let pipelines = Pipelines::build(
+            &self.gpu.device,
+            &self.shaders,
+            &self.layouts,
+            self.gpu.config.format,
+            samples,
+        )?;
+        self.pipelines = pipelines;
+        self.msaa = samples;
+        let (w, h) = self.gpu.size();
+        self.resize(w, h);
         Ok(())
     }
 
@@ -563,13 +594,25 @@ impl Renderer {
     fn scene_pass(&self, encoder: &mut wgpu::CommandEncoder) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("scene"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &self.targets.hdr,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                    store: wgpu::StoreOp::Store,
+            color_attachments: &[Some(match &self.targets.hdr_msaa {
+                // Multisampled: render into the MSAA target and resolve into the HDR texture.
+                Some(msaa) => wgpu::RenderPassColorAttachment {
+                    view: msaa,
+                    depth_slice: None,
+                    resolve_target: Some(&self.targets.hdr),
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Discard,
+                    },
+                },
+                None => wgpu::RenderPassColorAttachment {
+                    view: &self.targets.hdr,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
                 },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {

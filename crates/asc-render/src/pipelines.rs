@@ -135,6 +135,7 @@ const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] =
 
 struct Builder<'a> {
     device: &'a wgpu::Device,
+    samples: u32,
 }
 
 impl Builder<'_> {
@@ -171,7 +172,7 @@ impl Builder<'_> {
             },
             primitive,
             depth_stencil,
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState { count: self.samples, ..Default::default() },
             fragment: fs.map(|fs| wgpu::FragmentState {
                 module,
                 entry_point: Some(fs),
@@ -194,6 +195,7 @@ impl Pipelines {
         shaders: &ShaderLib,
         layouts: &Layouts,
         surface_format: wgpu::TextureFormat,
+        msaa: u32,
     ) -> Result<Self> {
         let terrain_src = shaders.module(device, "terrain")?;
         let sky_src = shaders.module(device, "sky")?;
@@ -203,7 +205,9 @@ impl Pipelines {
         let water_src = shaders.module(device, "water")?;
 
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let b = Builder { device };
+        let b = Builder { device, samples: 1 };
+        // Everything drawn in the HDR scene pass shares its sample count.
+        let scene_builder = Builder { device, samples: msaa };
         let scene = b.layout(&[&layouts.scene]);
         let shadow_layout = b.layout(&[&layouts.shadow]);
         let textures = b.layout(&[&layouts.scene, &layouts.textures]);
@@ -216,7 +220,7 @@ impl Pipelines {
         let back_culled = wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), ..Default::default() };
         let fullscreen = wgpu::PrimitiveState::default();
 
-        let terrain = b.pipeline(
+        let terrain = scene_builder.pipeline(
             "terrain",
             &scene,
             &terrain_src,
@@ -249,7 +253,7 @@ impl Pipelines {
             }),
             None,
         );
-        let sky = b.pipeline(
+        let sky = scene_builder.pipeline(
             "sky",
             &scene,
             &sky_src,
@@ -302,7 +306,7 @@ impl Pipelines {
             None,
             replace(surface_format),
         );
-        let far = b.pipeline(
+        let far = scene_builder.pipeline(
             "far terrain",
             &far_layout,
             &far_src,
@@ -319,7 +323,7 @@ impl Pipelines {
             }),
             replace(HDR_FORMAT),
         );
-        let water = b.pipeline(
+        let water = scene_builder.pipeline(
             "water",
             &far_layout,
             &water_src,
