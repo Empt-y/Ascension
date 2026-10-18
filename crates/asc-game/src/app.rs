@@ -1071,7 +1071,7 @@ impl State {
                 // Finish in build mode with a wall ghost aimed at the floor, for screenshots.
                 self.set_build_tool(Some(BuildTool::Piece(Selection { tier: 0, kind: PartKind::Wall })));
                 self.player.teleport(self.player.feet - Vec3::Z * 2.5);
-                (self.player.yaw, self.player.pitch) = (std::f32::consts::FRAC_PI_2, -0.45);
+                (self.player.yaw, self.player.pitch) = (std::f32::consts::FRAC_PI_2, -0.75);
                 self.build_test_phase = 3;
             }
             _ => {}
