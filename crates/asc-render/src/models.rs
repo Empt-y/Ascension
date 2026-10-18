@@ -181,7 +181,8 @@ mod tests {
         let mut count = 0;
         for entry in std::fs::read_dir(models_dir().join("nature")).unwrap() {
             let path = entry.unwrap().path();
-            if path.extension().is_some_and(|e| e == "glb") {
+            let far = path.file_stem().is_some_and(|s| s.to_string_lossy().ends_with("_far"));
+            if path.extension().is_some_and(|e| e == "glb") && !far {
                 let model = load_glb(&std::fs::read(&path).unwrap())
                     .unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
                 assert!(model.triangles() >= 20, "{}", path.display());

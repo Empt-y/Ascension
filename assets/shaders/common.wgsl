@@ -289,6 +289,16 @@ fn shadow_factor(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     return lit / 9.0;
 }
 
+// One hardware-filtered tap instead of 3x3 PCF, for surfaces drawn many layers deep (foliage).
+fn shadow_factor_fast(rel: vec3<f32>, n: vec3<f32>) -> f32 {
+    let p = globals.shadow_view_proj * vec4(rel + n * 0.35, 1.0);
+    let uv = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+    if any(uv < vec2(0.0)) || any(uv > vec2(1.0)) || p.z > 1.0 {
+        return 1.0;
+    }
+    return textureSampleCompareLevel(shadow_map, shadow_sampler, uv, p.z - 0.0015);
+}
+
 // Sun, sky ambient and moonlight on any opaque surface (metallic-roughness PBR, stylised ambient).
 // Shared by terrain, far terrain and building parts so they all sit in the same light.
 fn shade_pbr(albedo: vec3<f32>, roughness: f32, metallic: f32, n: vec3<f32>, rel: vec3<f32>, occlusion: f32, shadow: f32) -> vec3<f32> {

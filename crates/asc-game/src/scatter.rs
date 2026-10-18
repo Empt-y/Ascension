@@ -63,9 +63,13 @@ pub struct Config {
 
 impl Config {
     pub fn new(seed: i32, nature: &NatureModels) -> Self {
+        // Debugging aid: ASC_SCATTER_ONLY=tree,rock scatters only those kinds.
+        let only: Option<Vec<String>> =
+            std::env::var("ASC_SCATTER_ONLY").ok().map(|v| v.split(',').map(str::to_owned).collect());
         let kinds = nature
             .kinds
             .iter()
+            .filter(|(name, _)| only.as_ref().is_none_or(|o| o.contains(name)))
             .map(|(name, spec)| {
                 let mut density = [0.0; Biome::ALL.len()];
                 let mut models: [Vec<Model>; Biome::ALL.len()] = Default::default();
@@ -479,6 +483,7 @@ mod tests {
             max_slope: 0.8,
             shadows: true,
             collide,
+            lod: None,
         };
         let all: Vec<&str> = Biome::ALL.iter().map(|b| b.name()).collect();
         let nature = NatureModels {

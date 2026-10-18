@@ -91,10 +91,9 @@ class Mesh:
                 f.normal_flip()
         return f
 
-    def card(self, corners, mat, normals):
-        """A double-sided textured quad: `corners` in (0,0) (1,0) (1,1) (0,1) texture order, with
-        `normals` (one per corner, game space) used on both sides."""
-        uvs = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+    def card(self, corners, mat, normals, uvs=((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))):
+        """A double-sided textured quad: `corners` in (0,0) (1,0) (1,1) (0,1) texture order (or the
+        given `uvs`), with `normals` (one per corner, game space) used on both sides."""
         a, b = corners[1] - corners[0], corners[3] - corners[0]
         front = a.cross(b)
         for facing in (front, -front):
@@ -1143,6 +1142,105 @@ BUILDERS = {
 }  # fmt: skip
 
 
+# ---------------------------------------------------------------------------------------------
+# Impostors: what distant trees are drawn as
+
+IMPOSTOR_SIZE = 512
+IMPOSTORS = os.path.join(TEXTURES, "impostors")
+
+
+def render_impostor(obj, name, bounds):
+    """Render two flat-lit orthographic views of `obj` (from +z and from +x) side by side into
+    `impostors/<name>.png`. Returns the views' centre and their height in metres (each view is
+    half as wide as it is tall)."""
+    import numpy as np
+
+    lo, hi = Vector(bounds["min"]), Vector(bounds["max"])
+    center = (lo + hi) / 2
+    width = max(hi.x - lo.x, hi.z - lo.z)
+    height = max(hi.y - lo.y, 2.0 * width) * 1.02
+    scene = bpy.context.scene
+    for engine in ("BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"):
+        try:
+            scene.render.engine = engine
+            break
+        except TypeError:
+            continue
+    scene.render.resolution_x = IMPOSTOR_SIZE // 2
+    scene.render.resolution_y = IMPOSTOR_SIZE
+    scene.render.film_transparent = True
+    scene.view_settings.view_transform = "Standard"
+    if scene.world is None:
+        scene.world = bpy.data.worlds.new("world")
+    scene.world.use_nodes = True
+    bg = scene.world.node_tree.nodes.get("Background")
+    # Even white light from every side: the views hold albedo (and a little occlusion), and the game
+    # lights them like any other foliage.
+    bg.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+    bg.inputs["Strength"].default_value = 1.0
+    for o in list(scene.objects):
+        if o.type in {"CAMERA", "LIGHT"}:
+            bpy.data.objects.remove(o)
+    cam_data = bpy.data.cameras.new("impostor")
+    cam_data.type = "ORTHO"
+    cam_data.ortho_scale = height
+    cam_data.clip_end = 1000.0
+    cam = bpy.data.objects.new("impostor", cam_data)
+    scene.collection.objects.link(cam)
+    scene.camera = cam
+    views = []
+    for k, (eye, look_from) in enumerate([((0.0, 0.0, 1.0), "front"), ((1.0, 0.0, 0.0), "side")]):
+        pos = center + Vector(eye) * 100.0
+        cam.location = g2b(pos)
+        cam.rotation_euler = (g2b(center) - g2b(pos)).to_track_quat("-Z", "Y").to_euler()
+        path = os.path.join(IMPOSTORS, f"_{name}_{look_from}.png")
+        scene.render.filepath = path
+        bpy.ops.render.render(write_still=True)
+        img = bpy.data.images.load(path)
+        px = np.empty(len(img.pixels), dtype=np.float32)
+        img.pixels.foreach_get(px)
+        views.append(px.reshape(IMPOSTOR_SIZE, IMPOSTOR_SIZE // 2, 4))
+        bpy.data.images.remove(img)
+        os.remove(path)
+    out = np.concatenate(views, axis=1)
+    # Fill transparent texels with the average opaque colour so filtering never pulls in black.
+    covered = out[..., 3] > 0.5
+    if covered.any():
+        out[~covered, :3] = out[covered, :3].mean(axis=0)
+    image = bpy.data.images.new(name, IMPOSTOR_SIZE, IMPOSTOR_SIZE, alpha=True)
+    image.pixels.foreach_set(out.ravel())
+    image.filepath_raw = os.path.join(IMPOSTORS, f"{name}.png")
+    image.file_format = "PNG"
+    image.save()
+    bpy.data.images.remove(image)
+    return center, height
+
+
+def build_impostor(name, center, height):
+    """Two crossed cards showing the impostor views: the front view faces +z, the side view +x."""
+    m = Mesh(name)
+    mat = card_material(name, f"impostors/{name}")
+    w, h = height / 2, height
+    y0, y1 = center.y - h / 2, center.y + h / 2
+
+    def normals(corners, facing):
+        # Soft: mostly up and out from the trunk, so the flat cards light like a rounded crown.
+        out = []
+        for c in corners:
+            side = Vector((c.x - center.x, 0.0, c.z - center.z))
+            side = side.normalized() if side.length > 1e-3 else facing
+            out.append(UP * 0.45 + side * 0.4 + facing * 0.15)
+        return out
+
+    front = [Vector((center.x - w / 2, y0, 0)), Vector((center.x + w / 2, y0, 0)), Vector((center.x + w / 2, y1, 0)), Vector((center.x - w / 2, y1, 0))]
+    m.card(front, mat, normals(front, Vector((0, 0, 1))), uvs=((0.0, 0.0), (0.5, 0.0), (0.5, 1.0), (0.0, 1.0)))
+    # Seen from +x, the image's right edge is towards -z.
+    side = [Vector((0, y0, center.z + w / 2)), Vector((0, y0, center.z - w / 2)), Vector((0, y1, center.z - w / 2)), Vector((0, y1, center.z + w / 2))]
+    m.card(side, mat, normals(side, Vector((1, 0, 0))), uvs=((0.5, 0.0), (1.0, 0.0), (1.0, 1.0), (0.5, 1.0)))
+    m.root_shade = (height * 0.3, 0.3)
+    return m.finish()
+
+
 def main():
     argv = sys.argv[sys.argv.index("--") + 1 :]
     spec_path, out_dir = argv[0], argv[1]
@@ -1165,6 +1263,13 @@ def main():
         obj = m.finish()
         report[model["id"]] = measure(obj)
         export(obj, os.path.join(out_dir, f"{model['id']}.glb"))
+        if model["kind"] == "tree":
+            os.makedirs(IMPOSTORS, exist_ok=True)
+            far_name = f"{model['id']}_far"
+            center, height = render_impostor(obj, far_name, report[model["id"]])
+            far = build_impostor(far_name, center, height)
+            export(far, os.path.join(out_dir, f"{far_name}.glb"))
+            bpy.data.objects.remove(far)
         render_preview(obj, os.path.join(out_dir, "previews", f"{model['id']}.png"))
         print(f"PART {model['id']}: {report[model['id']]['triangles']} triangles", flush=True)
     with open(report_path, "w") as f:

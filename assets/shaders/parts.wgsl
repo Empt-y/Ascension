@@ -131,8 +131,6 @@ fn shade_foliage(albedo: vec3<f32>, n: vec3<f32>, rel: vec3<f32>, occlusion: f32
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let geometric = normalize(in.normal);
     let world = in.rel + globals.camera.xyz;
-    // Derivatives first: everything below may branch or discard.
-    let detail = surface_detail(world, geometric);
     let textured = material.extra.y >= 0.0;
     var albedo = material.base.rgb * in.color.rgb;
     var alpha = 1.0;
@@ -149,12 +147,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if material.extra.w > 0.5 {
         let shift = in.variety - 0.5;
         albedo *= vec3(1.0 + shift * 0.25, 1.0 + shift * 0.12, 1.0 - shift * 0.2) * (0.9 + 0.2 * hash11(in.variety * 7.0));
-        let shadow = shadow_factor(in.rel, geometric);
+        // Leaves are layered many deep, so they get a single-tap shadow lookup.
+        let shadow = shadow_factor_fast(in.rel, geometric);
         color = shade_foliage(albedo, geometric, in.rel, occlusion, shadow);
     } else {
         // The terrain's procedural detail, toned down: a little grain and relief so flat faces read
         // as material rather than plastic. Polished metal shows bump noise as blotchy glints, so
-        // metals get much less of it.
+        // metals get much less of it. (It takes derivatives; the branch is on a uniform, so this is
+        // still uniform control flow. Leaf cards skip it: their texture is their detail.)
+        let detail = surface_detail(world, geometric);
         let n = normalize(mix(geometric, detail.normal, mix(0.35, 0.06, material.extra.x)));
         albedo *= 1.0 + detail.tone * 0.35;
         var shadow = 1.0;
@@ -163,8 +164,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
         color = shade_pbr(albedo, material.base.a, material.extra.x, n, in.rel, occlusion, shadow);
     }
-    // Distance fade: thins out through MSAA coverage (a dissolve, not a pop).
-    alpha *= in.fade;
+    // Distance and LOD fades: a screen-space dither. A positive fade keeps pixels whose dither value
+    // is below it, a negative one the rest, so a model and its replacement cross-fade exactly.
+    let dither = fract(52.9829189 * fract(dot(in.clip.xy, vec2(0.06711056, 0.00583715))));
+    if (in.fade >= 0.0 && dither >= in.fade) || (in.fade < 0.0 && dither < 1.0 + in.fade) {
+        discard;
+    }
     if !ALPHA_TO_COVERAGE && alpha < 0.5 {
         discard;
     }

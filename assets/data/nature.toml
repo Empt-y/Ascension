@@ -18,6 +18,8 @@
 #   max_slope  not placed on ground steeper than this (rise over run)
 #   shadows    whether it casts sun shadows
 #   collide    "trunk" (a capsule up the trunk), "rock" (a sphere), or "none"
+#   lod        beyond this distance draw the model's impostor (<id>_far.glb, two crossed cards
+#              rendered by tools/blender/nature.py) instead of the model
 
 [kinds.tree]
 distance = 600.0
@@ -27,6 +29,7 @@ sway = 1.0
 max_slope = 0.7
 shadows = true
 collide = "trunk"
+lod = 90.0
 
 [kinds.shrub]
 distance = 160.0

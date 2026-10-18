@@ -23,7 +23,7 @@ use crate::models::{ModelData, PartVertex, TextureData};
 const DRAW_DISTANCE: f32 = 600.0;
 /// Every texture is resampled to this size to fit the array.
 pub const TEXTURE_SIZE: u32 = 512;
-const TEXTURE_LAYERS: u32 = 24;
+const TEXTURE_LAYERS: u32 = 48;
 const TEXTURE_MIPS: u32 = TEXTURE_SIZE.ilog2() + 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -49,6 +49,10 @@ impl PartInstance {
         Self { model, position, yaw, scale: 1.0, sway: 0.0 }
     }
 }
+
+/// Distant instances of a model switch to a cheaper one (an impostor) around this distance,
+/// cross-fading over `LOD_BAND` metres.
+const LOD_BAND: f32 = 12.0;
 
 /// A group of scatter instances (one terrain column of one kind) drawn and culled together.
 #[derive(Clone, Debug, PartialEq)]
@@ -87,7 +91,9 @@ struct MaterialUniform {
 struct InstanceData {
     /// xyz = camera-relative origin, w = yaw.
     origin: [f32; 4],
-    /// x = scale, y = ghost state (0 none, 1 valid, 2 invalid), z = sway, w = fade (1 = solid).
+    /// x = scale, y = ghost state (0 none, 1 valid, 2 invalid), z = sway, w = fade: 1 is solid,
+    /// f in 0..1 keeps the pixels whose dither value is below f, and -t keeps the complementary
+    /// ones (so a model fading out and its replacement fading in never overlap or leave holes).
     params: [f32; 4],
 }
 
@@ -118,6 +124,8 @@ pub struct Parts {
     capacity: usize,
     scratch: Vec<InstanceData>,
     scatter: HashMap<u64, StoredBatch>,
+    /// Per model: the far model it turns into, and at what distance.
+    lods: Vec<Option<(ModelId, f32)>>,
     /// Per-model buckets reused each frame while sorting instances.
     buckets: Vec<Vec<InstanceData>>,
     shadow_buckets: Vec<Vec<InstanceData>>,
@@ -173,6 +181,7 @@ impl Parts {
             capacity,
             scratch: Vec::new(),
             scatter: HashMap::new(),
+            lods: Vec::new(),
             buckets: Vec::new(),
             shadow_buckets: Vec::new(),
             visible: Vec::new(),
@@ -323,6 +332,15 @@ impl Parts {
         }
     }
 
+    /// Draw `near` as `far` beyond `distance` (scatter only).
+    pub fn set_lod(&mut self, near: ModelId, far: ModelId, distance: f32) {
+        let i = near.0 as usize;
+        if self.lods.len() <= i {
+            self.lods.resize(i + 1, None);
+        }
+        self.lods[i] = Some((far, distance));
+    }
+
     /// Scatter instances held (not just drawn).
     pub fn scatter_count(&self) -> usize {
         self.scatter.values().map(|b| b.batch.instances.len()).sum()
@@ -370,12 +388,33 @@ impl Parts {
             for i in &b.instances {
                 let m = i.model.0 as usize;
                 let dist = (i.position - camera).length();
+                let lod = self.lods.get(m).copied().flatten();
                 if in_view && dist < b.distance {
                     let fade = ((b.distance - dist) / b.fade.max(1e-3)).clamp(0.0, 1.0);
-                    self.buckets[m].push(instance_data(i, camera, 0, fade));
+                    match lod {
+                        Some((far, at)) => {
+                            // t: 0 fully near model .. 1 fully far model.
+                            let t = ((dist - at) / LOD_BAND + 0.5).clamp(0.0, 1.0);
+                            if t < 1.0 {
+                                let keep = if t > 0.0 { 1.0 - t } else { fade };
+                                self.buckets[m].push(instance_data(i, camera, 0, keep));
+                            }
+                            if t > 0.0 {
+                                let keep = if t < 1.0 { -t } else { fade };
+                                let far_i = PartInstance { model: far, ..*i };
+                                self.buckets[far.0 as usize].push(instance_data(&far_i, camera, 0, keep));
+                            }
+                        }
+                        None => self.buckets[m].push(instance_data(i, camera, 0, fade)),
+                    }
                 }
                 if casts && dist < shadow_reach {
-                    self.shadow_buckets[m].push(instance_data(i, camera, 0, 1.0));
+                    let model = match lod {
+                        Some((far, at)) if dist > at => far,
+                        _ => i.model,
+                    };
+                    let shadow_i = PartInstance { model, ..*i };
+                    self.shadow_buckets[model.0 as usize].push(instance_data(&shadow_i, camera, 0, 1.0));
                 }
             }
         }
