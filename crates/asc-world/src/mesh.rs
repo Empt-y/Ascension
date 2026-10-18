@@ -11,9 +11,9 @@ use glam::Vec3;
 use crate::chunk::{CHUNK, ChunkData, SAMPLES};
 
 /// Materials that can be blended per vertex: slot `i` holds material id `i + 1` (0 is air).
-pub const MATERIAL_SLOTS: usize = 8;
+pub const MATERIAL_SLOTS: usize = 12;
 
-/// 24 bytes. The renderer reads `normal` as snorm8x4 and `weights` as two unorm8x4.
+/// 28 bytes. The renderer reads `normal` as snorm8x4 and `weights` as three unorm8x4.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {

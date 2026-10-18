@@ -150,7 +150,14 @@ pub fn wrapped_pieces(rect: GridRect) -> Vec<(glam::UVec2, glam::UVec2, IVec2)> 
 }
 
 /// The values of one wrapped piece, row by row, cut out of `data` (row-major over `rect`).
-pub fn piece_data(rect: GridRect, data: &[f32], grid: IVec2, size: glam::UVec2) -> Vec<f32> {
+/// A rectangle's samples, row-major: heights and the surface material id at each.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Samples {
+    pub heights: Vec<f32>,
+    pub materials: Vec<u8>,
+}
+
+pub fn piece_data<T: Copy>(rect: GridRect, data: &[T], grid: IVec2, size: glam::UVec2) -> Vec<T> {
     let width = rect.size().x as usize;
     let mut out = Vec::with_capacity((size.x * size.y) as usize);
     for row in 0..size.y as i32 {

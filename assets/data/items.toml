@@ -30,3 +30,21 @@ places = "snow"
 id = "copper_ore"
 name = "Copper Ore"
 color = [0.85, 0.42, 0.18]
+
+[[item]]
+id = "mud"
+name = "Mud"
+color = [0.15, 0.11, 0.07]
+places = "mud"
+
+[[item]]
+id = "ice"
+name = "Ice"
+color = [0.62, 0.78, 0.92]
+places = "ice"
+
+[[item]]
+id = "sandstone"
+name = "Sandstone"
+color = [0.56, 0.38, 0.23]
+places = "sandstone"

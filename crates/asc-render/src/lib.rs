@@ -388,7 +388,12 @@ impl Renderer {
     }
 
     /// New samples for one far-terrain level; it switches to the window centred on `to`.
-    pub fn far_upload(&mut self, level: usize, to: glam::IVec2, rects: &[(clipmap::GridRect, Vec<f32>)]) {
+    pub fn far_upload(
+        &mut self,
+        level: usize,
+        to: glam::IVec2,
+        rects: &[(clipmap::GridRect, clipmap::Samples)],
+    ) {
         self.far.upload(&self.gpu.queue, level, to, rects);
     }
 

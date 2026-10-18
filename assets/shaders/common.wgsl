@@ -221,8 +221,9 @@ fn surface_detail(world: vec3<f32>, n: vec3<f32>) -> Detail {
     return d;
 }
 
-// Base colours are linear and deliberately saturated. Materials blend by the interpolated weights.
-fn terrain_surface(wa: vec4<f32>, wb: vec4<f32>, world: vec3<f32>, n: vec3<f32>, tone: f32) -> Surface {
+// Base colours are linear and deliberately saturated. Materials blend by the interpolated weights:
+// wa = grass, soil, rock, sand; wb = snow, copper ore, dry grass, moss; wc = mud, ice, sandstone.
+fn terrain_surface(wa: vec4<f32>, wb: vec4<f32>, wc: vec4<f32>, world: vec3<f32>, n: vec3<f32>, tone: f32) -> Surface {
     let broad = fbm3(world * 0.035);
     let detail = 1.0 + tone;
     let fine = 0.5 + tone;
@@ -236,11 +237,19 @@ fn terrain_surface(wa: vec4<f32>, wb: vec4<f32>, world: vec3<f32>, n: vec3<f32>,
     let snow = vec3(0.85, 0.88, 0.95);
     let fleck = smoothstep(0.72, 0.8, fine);
     let copper = mix(vec3(0.28, 0.25, 0.24), vec3(0.85, 0.42, 0.18), fleck);
+    let flat = smoothstep(0.62, 0.82, n.y);
+    let dry = mix(soil, mix(vec3(0.36, 0.29, 0.11), vec3(0.47, 0.38, 0.15), broad), flat);
+    let moss = mix(soil, mix(vec3(0.11, 0.16, 0.05), vec3(0.21, 0.22, 0.09), broad), flat);
+    let mud = mix(vec3(0.09, 0.07, 0.045), vec3(0.15, 0.11, 0.065), broad);
+    let ice = mix(vec3(0.50, 0.68, 0.86), vec3(0.62, 0.78, 0.92), broad);
+    let sandstone = mix(vec3(0.44, 0.28, 0.16), vec3(0.56, 0.38, 0.23), broad);
 
-    let total = max(dot(wa, vec4(1.0)) + dot(wb, vec4(1.0)), 1e-4);
+    let total = max(dot(wa, vec4(1.0)) + dot(wb, vec4(1.0)) + dot(wc, vec4(1.0)), 1e-4);
     var s: Surface;
-    s.albedo = (grass * wa.x + soil * wa.y + rock * wa.z + sand * wa.w + snow * wb.x + copper * wb.y) / total;
-    s.roughness = (0.9 * (wa.x + wa.y + wa.w) + 0.75 * wa.z + 0.5 * wb.x + mix(0.8, 0.3, fleck) * wb.y) / total;
+    s.albedo = (grass * wa.x + soil * wa.y + rock * wa.z + sand * wa.w + snow * wb.x + copper * wb.y
+        + dry * wb.z + moss * wb.w + mud * wc.x + ice * wc.y + sandstone * wc.z) / total;
+    s.roughness = (0.9 * (wa.x + wa.y + wa.w + wb.z + wb.w) + 0.75 * wa.z + 0.5 * wb.x
+        + mix(0.8, 0.3, fleck) * wb.y + 0.45 * wc.x + 0.12 * wc.y + 0.85 * wc.z) / total;
     s.albedo *= detail;
     return s;
 }

@@ -301,20 +301,15 @@ fn biomes_cover_the_world_in_sensible_shares() {
     let worldgen = WorldGen::new(SEED);
     let mut counts = std::collections::HashMap::new();
     let mut land = 0usize;
-    let mut highest = f32::MIN;
-    let n = 160;
+    let n = 200;
     for i in 0..n {
         for j in 0..n {
-            let g = worldgen.ground(i as f32 * 151.0 - 12000.0, j as f32 * 151.0 - 12000.0);
+            let g = worldgen.ground(i as f32 * 503.0 - 50000.0, j as f32 * 503.0 - 50000.0);
             if g.underwater {
                 continue;
             }
             land += 1;
-            highest = highest.max(g.height);
             *counts.entry(g.biome).or_insert(0usize) += 1;
-            if g.biome == Biome::Snow {
-                assert!(g.height > 140.0);
-            }
             assert!((0.0..=1.0).contains(&g.forest));
         }
     }
@@ -322,11 +317,9 @@ fn biomes_cover_the_world_in_sensible_shares() {
     for b in Biome::ALL {
         println!("{}: {:.1}%", b.name(), 100.0 * share(b));
     }
-    println!("highest ground sampled: {highest:.0} m");
-    // Every biome but snow (only the rare high peaks) exists on land, and the lowlands are split
-    // between open meadow and forest.
-    for b in [Biome::Shore, Biome::Meadow, Biome::Forest, Biome::Alpine] {
-        assert!(share(b) > 0.005, "{} is missing", b.name());
+    // Over 100 km every biome turns up on land, none takes over, and nothing is vanishingly rare.
+    for b in Biome::ALL {
+        assert!(share(b) > 0.01, "{} is too rare: {:.2}%", b.name(), 100.0 * share(b));
+        assert!(share(b) < 0.4, "{} takes over: {:.1}%", b.name(), 100.0 * share(b));
     }
-    assert!(share(Biome::Forest) > 0.1 && share(Biome::Meadow) > 0.1);
 }

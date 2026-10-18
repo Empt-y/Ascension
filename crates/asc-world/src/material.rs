@@ -11,13 +11,35 @@ pub enum Material {
     Snow = 5,
     /// Placeholder ore so the material channel is exercised end to end.
     CopperOre = 6,
+    /// Sun-bleached savanna and steppe grass.
+    DryGrass = 7,
+    /// Tundra and taiga ground cover.
+    Moss = 8,
+    /// Swamp ground.
+    Mud = 9,
+    /// Arctic ice sheets.
+    Ice = 10,
+    /// Desert bedrock and cliffs.
+    Sandstone = 11,
 }
 
 impl Material {
-    pub const COUNT: usize = 7;
+    pub const COUNT: usize = 12;
 
-    pub const ALL: [Self; Self::COUNT] =
-        [Self::Air, Self::Grass, Self::Soil, Self::Rock, Self::Sand, Self::Snow, Self::CopperOre];
+    pub const ALL: [Self; Self::COUNT] = [
+        Self::Air,
+        Self::Grass,
+        Self::Soil,
+        Self::Rock,
+        Self::Sand,
+        Self::Snow,
+        Self::CopperOre,
+        Self::DryGrass,
+        Self::Moss,
+        Self::Mud,
+        Self::Ice,
+        Self::Sandstone,
+    ];
 
     /// Stable lowercase name, as used in content files and saves.
     pub fn name(self) -> &'static str {
@@ -29,6 +51,11 @@ impl Material {
             Self::Sand => "sand",
             Self::Snow => "snow",
             Self::CopperOre => "copper_ore",
+            Self::DryGrass => "dry_grass",
+            Self::Moss => "moss",
+            Self::Mud => "mud",
+            Self::Ice => "ice",
+            Self::Sandstone => "sandstone",
         }
     }
 
@@ -44,6 +71,11 @@ impl Material {
             4 => Self::Sand,
             5 => Self::Snow,
             6 => Self::CopperOre,
+            7 => Self::DryGrass,
+            8 => Self::Moss,
+            9 => Self::Mud,
+            10 => Self::Ice,
+            11 => Self::Sandstone,
             _ => Self::Air,
         }
     }

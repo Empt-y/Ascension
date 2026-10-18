@@ -7,9 +7,10 @@ struct VsIn {
     @location(0) position: vec3<f32>,
     // xyz normal, w ambient occlusion (1 = open sky).
     @location(1) normal: vec4<f32>,
-    // Blend weights for material slots 0..3 and 4..7 (material id = slot + 1).
+    // Blend weights for material slots 0..3, 4..7 and 8..11 (material id = slot + 1).
     @location(2) weights_a: vec4<f32>,
     @location(3) weights_b: vec4<f32>,
+    @location(4) weights_c: vec4<f32>,
     @builtin(instance_index) instance: u32,
 }
 
@@ -19,6 +20,7 @@ struct VsOut {
     @location(1) normal: vec4<f32>,
     @location(2) weights_a: vec4<f32>,
     @location(3) weights_b: vec4<f32>,
+    @location(4) weights_c: vec4<f32>,
 }
 
 @vertex
@@ -30,6 +32,7 @@ fn vs_main(in: VsIn) -> VsOut {
     out.normal = in.normal;
     out.weights_a = in.weights_a;
     out.weights_b = in.weights_b;
+    out.weights_c = in.weights_c;
     return out;
 }
 
@@ -40,7 +43,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let world = in.rel + globals.camera.xyz;
     let detail = surface_detail(world, geometric);
     let n = detail.normal;
-    let s = terrain_surface(in.weights_a, in.weights_b, world, geometric, detail.tone);
+    let s = terrain_surface(in.weights_a, in.weights_b, in.weights_c, world, geometric, detail.tone);
     var shadow = 1.0;
     if dot(geometric, sun_dir()) > 0.0 {
         shadow = shadow_factor(in.rel, geometric);

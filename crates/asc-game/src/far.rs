@@ -10,7 +10,7 @@ use std::thread;
 use std::time::Instant;
 
 use asc_render::Renderer;
-use asc_render::clipmap::{self, GridRect, LEVELS};
+use asc_render::clipmap::{self, GridRect, LEVELS, Samples};
 use asc_world::WorldGen;
 use crossbeam_channel::{Receiver, Sender};
 use glam::{IVec2, Vec2};
@@ -24,7 +24,7 @@ struct Job {
 pub struct Strips {
     pub level: usize,
     pub to: IVec2,
-    pub rects: Vec<(GridRect, Vec<f32>)>,
+    pub rects: Vec<(GridRect, Samples)>,
     samples: usize,
     seconds: f32,
 }
@@ -50,13 +50,29 @@ pub struct FarStreamer {
     stats: FarStats,
 }
 
-/// Heights for every sample of `rect` on `level`, row-major.
-pub fn compute(worldgen: &WorldGen, level: usize, rect: GridRect) -> Vec<f32> {
+/// Heights and surface materials for every sample of `rect` on `level`, row-major. Heights are
+/// computed with a one-sample border so each sample's slope comes from its grid neighbours.
+pub fn compute(worldgen: &WorldGen, level: usize, rect: GridRect) -> Samples {
     let s = clipmap::spacing(level);
-    let mut out = Vec::with_capacity(rect.len());
-    for z in rect.min.y..=rect.max.y {
-        for x in rect.min.x..=rect.max.x {
-            out.push(worldgen.height(x as f32 * s, z as f32 * s));
+    let size = rect.size();
+    let (w, h) = (size.x as usize + 2, size.y as usize + 2);
+    let mut border = Vec::with_capacity(w * h);
+    for z in rect.min.y - 1..=rect.max.y + 1 {
+        for x in rect.min.x - 1..=rect.max.x + 1 {
+            border.push(worldgen.height(x as f32 * s, z as f32 * s));
+        }
+    }
+    let mut out =
+        Samples { heights: Vec::with_capacity(rect.len()), materials: Vec::with_capacity(rect.len()) };
+    for (j, z) in (rect.min.y..=rect.max.y).enumerate() {
+        for (i, x) in (rect.min.x..=rect.max.x).enumerate() {
+            let at = |di: usize, dj: usize| border[(j + dj) * w + i + di];
+            let height = at(1, 1);
+            let gx = (at(2, 1) - at(0, 1)) / (2.0 * s);
+            let gz = (at(1, 2) - at(1, 0)) / (2.0 * s);
+            let slope = (gx * gx + gz * gz).sqrt();
+            out.heights.push(height);
+            out.materials.push(worldgen.surface_material_at(x as f32 * s, z as f32 * s, height, slope) as u8);
         }
     }
     out
@@ -72,7 +88,7 @@ impl FarStreamer {
                 let _ = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
                 for job in job_rx {
                     let t = Instant::now();
-                    let rects: Vec<(GridRect, Vec<f32>)> = clipmap::dirty(job.from, job.to)
+                    let rects: Vec<(GridRect, Samples)> = clipmap::dirty(job.from, job.to)
                         .into_iter()
                         .map(|r| (r, compute(&worldgen, job.level, r)))
                         .collect();
@@ -138,10 +154,11 @@ mod tests {
         let level = 3;
         let rect = GridRect { min: IVec2::new(-5, 120), max: IVec2::new(4, 130) };
         let data = compute(&wg, level, rect);
-        assert_eq!(data.len(), rect.len());
+        assert_eq!(data.heights.len(), rect.len());
+        assert_eq!(data.materials.len(), rect.len());
         let s = clipmap::spacing(level);
         let width = rect.size().x;
-        for (i, h) in data.iter().enumerate() {
+        for (i, h) in data.heights.iter().enumerate() {
             let (x, z) = (rect.min.x + i as i32 % width, rect.min.y + i as i32 / width);
             assert_eq!(*h, wg.height(x as f32 * s, z as f32 * s));
         }

@@ -19,6 +19,8 @@ struct LevelInfo {
 
 @group(1) @binding(0) var heights: texture_2d_array<f32>;
 @group(1) @binding(1) var<storage, read> levels: array<LevelInfo, 7>;
+// Surface material id per sample (asc_world::Material), from worldgen's own rules.
+@group(1) @binding(2) var materials: texture_2d_array<u32>;
 
 const LEVEL_COUNT: u32 = 7u;
 const MESH_HALF: i32 = 126;
@@ -97,15 +99,24 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) level: u32) 
     return out;
 }
 
-// Material weights from height and slope, mirroring worldgen's rules (asc_world::WorldGen::material).
-fn far_weights(height: f32, n: vec3<f32>) -> array<vec4<f32>, 2> {
-    let slope = sqrt(max(1.0 - n.y * n.y, 0.0)) / max(n.y, 0.05);
-    let rock = smoothstep(0.95, 1.25, slope);
-    let snow = smoothstep(136.0, 144.0, height) * (1.0 - smoothstep(0.7, 0.9, slope)) * (1.0 - rock);
-    // A shore band around sea level (2 m), matching worldgen's SHORE_BELOW / SHORE_ABOVE.
-    let sand = smoothstep(-2.5, -1.5, height) * (1.0 - smoothstep(2.6, 3.4, height)) * (1.0 - rock);
-    let grass = max(1.0 - rock - snow - sand, 0.0);
-    return array(vec4(grass, 0.0, rock, sand), vec4(snow, 0.0, 0.0, 0.0));
+// Terrain material weights at a point: the bilinear blend of the four surrounding samples' materials,
+// in the slot layout terrain_surface expects (slot = material id - 1).
+fn far_weights(level: u32, xz: vec2<f32>) -> array<vec4<f32>, 3> {
+    let g = xz / levels[level].spacing;
+    let g0 = vec2<i32>(floor(g));
+    let f = g - floor(g);
+    var w: array<f32, 12>;
+    for (var k = 0; k < 4; k++) {
+        let o = vec2(k & 1, k >> 1u);
+        let p = g0 + o;
+        let id = textureLoad(materials, vec2(wrap(p.x), wrap(p.y)), i32(level), 0).r;
+        let fx = select(1.0 - f.x, f.x, o.x == 1);
+        let fy = select(1.0 - f.y, f.y, o.y == 1);
+        if id >= 1u && id <= 12u {
+            w[id - 1u] += fx * fy;
+        }
+    }
+    return array(vec4(w[0], w[1], w[2], w[3]), vec4(w[4], w[5], w[6], w[7]), vec4(w[8], w[9], w[10], w[11]));
 }
 
 @fragment
@@ -126,8 +137,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             discard;
         }
     }
-    let w = far_weights(world.y, geometric);
-    let s = terrain_surface(w[0], w[1], world, geometric, detail.tone);
+    let w = far_weights(in.level, in.world_xz);
+    let s = terrain_surface(w[0], w[1], w[2], world, geometric, detail.tone);
     let color = shade_terrain(s, detail.normal, in.rel, 1.0, 1.0);
     return vec4(apply_fog(color, in.rel), 1.0);
 }

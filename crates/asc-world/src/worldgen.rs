@@ -17,36 +17,62 @@ use crate::material::Material;
 const SEA_LEVEL: f32 = 2.0;
 const SHORE_BELOW: f32 = 4.0;
 const SHORE_ABOVE: f32 = 1.0;
-const SNOW_LINE: f32 = 140.0;
-/// Mountain ground above this is alpine (pines, junipers, boulders) rather than lowland.
-const ALPINE_LINE: f32 = 75.0;
+/// Temperature falls by this much per metre above 20 m, so mountains grow cold belts (taiga, then
+/// tundra, then arctic snow) whatever the climate below them.
+const LAPSE: f32 = 0.0034;
 
-/// What grows where. Chosen from height, slope and a low-frequency forest noise; the surface
-/// materials follow the same height and slope rules, so biomes line up with sand, grass and snow.
+/// What grows where, from climate (temperature and moisture), height and slope. Surface
+/// materials follow the biome, so sand, snow, moss and dry grass line up with what grows on them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Biome {
-    /// Sand and the strip just above the sea.
-    Shore,
-    /// Open lowland grass.
+    /// Frozen: snowfields and ice, a few snowy pines.
+    Arctic,
+    /// Cold and dry: moss, low shrubs, boulders, snow patches.
+    Tundra,
+    /// Cold and wet: dense pine forest.
+    Taiga,
+    /// Temperate and dry: open grassland and flowers.
     Meadow,
-    /// Wooded lowland and hills.
+    /// Temperate: broadleaf woods (oak, birch, maple) with clearings.
     Forest,
-    /// High mountain ground below the snow line.
-    Alpine,
-    /// Above the snow line.
-    Snow,
+    /// Temperate, wet and low-lying: mud, willows, reeds, dead trees.
+    Swamp,
+    /// Hot and dry: sand dunes, sandstone, cacti.
+    Desert,
+    /// Hot, seasonally dry: yellow grass and flat-topped acacias.
+    Savanna,
+    /// Hot and wet: dense broadleaf trees, palms and ferns.
+    Jungle,
+    /// Beaches and the strip just above the sea (outside deserts and the arctic).
+    Shore,
 }
 
 impl Biome {
-    pub const ALL: [Biome; 5] = [Biome::Shore, Biome::Meadow, Biome::Forest, Biome::Alpine, Biome::Snow];
+    pub const ALL: [Biome; 10] = [
+        Biome::Arctic,
+        Biome::Tundra,
+        Biome::Taiga,
+        Biome::Meadow,
+        Biome::Forest,
+        Biome::Swamp,
+        Biome::Desert,
+        Biome::Savanna,
+        Biome::Jungle,
+        Biome::Shore,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
-            Biome::Shore => "shore",
+            Biome::Arctic => "arctic",
+            Biome::Tundra => "tundra",
+            Biome::Taiga => "taiga",
             Biome::Meadow => "meadow",
             Biome::Forest => "forest",
-            Biome::Alpine => "alpine",
-            Biome::Snow => "snow",
+            Biome::Swamp => "swamp",
+            Biome::Desert => "desert",
+            Biome::Savanna => "savanna",
+            Biome::Jungle => "jungle",
+            Biome::Shore => "shore",
         }
     }
 
@@ -62,8 +88,11 @@ pub struct Ground {
     /// Rise over run.
     pub slope: f32,
     pub biome: Biome,
-    /// 0..1 how wooded: 0 in open meadow, rising through forest edges to 1 deep in a forest.
+    /// 0..1 how wooded: 0 in the open, rising through woodland edges to 1 deep in a wood.
     pub forest: f32,
+    /// 0..1 after the height lapse; 0 is frozen, 1 is tropical.
+    pub temperature: f32,
+    pub moisture: f32,
     /// Whether the surface is under the sea.
     pub underwater: bool,
 }
@@ -79,8 +108,15 @@ pub struct WorldGen {
     cavern: FastNoiseLite,
     /// 2D mask choosing the rare places where tunnels may reach the surface.
     entrance: FastNoiseLite,
-    /// Low-frequency woodland mask: forests where it's high.
+    /// Low-frequency woodland mask: woods where it's high (with clearings and edges).
     forest: FastNoiseLite,
+    /// Climate: very low-frequency temperature and moisture.
+    temperature: FastNoiseLite,
+    moisture: FastNoiseLite,
+    /// Mid-frequency patches (snow in the tundra, moss in the taiga, mud in swamps, ice sheets).
+    patches: FastNoiseLite,
+    /// Ridged dune field, stretched across the wind.
+    dunes: FastNoiseLite,
     ore: FastNoiseLite,
 }
 
@@ -96,6 +132,9 @@ struct Column {
     mountain: f32,
     /// 0..1: how freely caves may open to the surface here (1 only in rare entrance regions).
     entrance: f32,
+    biome: Biome,
+    /// 0..1 mid-frequency patch value, for snow, moss, mud and ice patches.
+    patch: f32,
 }
 
 fn noise(seed: i32, kind: NoiseType, freq: f32, fractal: Option<(FractalType, i32)>) -> FastNoiseLite {
@@ -140,6 +179,10 @@ impl WorldGen {
             entrance: noise(seed.wrapping_add(9), OpenSimplex2, 0.004, None),
             ore: noise(seed.wrapping_add(7), OpenSimplex2, 0.08, None),
             forest: noise(seed.wrapping_add(10), OpenSimplex2, 0.0028, Some((FBm, 3))),
+            temperature: noise(seed.wrapping_add(11), OpenSimplex2, 0.00005, Some((FBm, 2))),
+            moisture: noise(seed.wrapping_add(12), OpenSimplex2, 0.00008, Some((FBm, 2))),
+            patches: noise(seed.wrapping_add(13), OpenSimplex2, 0.012, Some((FBm, 2))),
+            dunes: noise(seed.wrapping_add(14), OpenSimplex2, 0.011, Some((Ridged, 2))),
         }
     }
 
@@ -152,6 +195,19 @@ impl WorldGen {
         smoothstep(0.05, 0.55, continent)
     }
 
+    /// Sea-level temperature and moisture at (x, z), both 0..1.
+    fn climate(&self, x: f32, z: f32) -> (f32, f32) {
+        // The noise rarely reaches its extremes, so stretch it to use the whole range.
+        let t = (0.5 + 0.75 * self.temperature.get_noise_2d(x, z)).clamp(0.0, 1.0);
+        let m = (0.5 + 0.9 * self.moisture.get_noise_2d(x, z)).clamp(0.0, 1.0);
+        (t, m)
+    }
+
+    /// 1 in hot, dry desert, fading to 0 at its edges.
+    fn desert_mask(t: f32, m: f32) -> f32 {
+        smoothstep(0.6, 0.7, t) * (1.0 - smoothstep(0.24, 0.32, m))
+    }
+
     /// Terrain height at (x, z), before any 3D features.
     pub fn height(&self, x: f32, z: f32) -> f32 {
         let continent = self.continent.get_noise_2d(x, z);
@@ -159,7 +215,54 @@ impl WorldGen {
         let hills = self.hills.get_noise_2d(x, z) * 14.0;
         let (wx, wz) = self.warp.domain_warp_2d(x, z);
         let ridge = self.ridges.get_noise_2d(wx, wz) * 0.5 + 0.5;
-        base + hills + ridge * ridge * 110.0 * Self::mountain_mask(continent)
+        let mountain = Self::mountain_mask(continent);
+        let mut h = base + hills + ridge * ridge * 110.0 * mountain;
+        // Dunes in the deserts: ridges across a prevailing wind, on low ground only.
+        let (t, m) = self.climate(x, z);
+        let desert =
+            Self::desert_mask(t, m) * (1.0 - mountain) * smoothstep(SEA_LEVEL + 1.0, SEA_LEVEL + 6.0, h);
+        if desert > 0.0 {
+            let d = self.dunes.get_noise_2d(x * 0.55, z) * 0.5 + 0.5;
+            h += desert * d * d * 7.0;
+        }
+        h
+    }
+
+    /// The biome from climate, height and slope (see [`Biome`]). Also returns the woodland value,
+    /// the lapsed temperature and the moisture.
+    fn biome(&self, x: f32, z: f32, h: f32, mountain: f32) -> (Biome, f32, f32, f32) {
+        let (t0, m) = self.climate(x, z);
+        let t = (t0 - (h - 20.0).max(0.0) * LAPSE).clamp(0.0, 1.0);
+        let wood = self.forest.get_noise_2d(x, z) * 0.5 + 0.5;
+        let shore = h < SEA_LEVEL + SHORE_ABOVE + 1.5 && h > SEA_LEVEL - SHORE_BELOW && mountain < 0.5;
+        let hot_dry = t >= 0.64 && m < 0.3;
+        let (biome, forest) = if t < 0.12 {
+            (Biome::Arctic, 0.15 * smoothstep(0.5, 0.75, wood))
+        } else if shore && !hot_dry {
+            (Biome::Shore, 0.0)
+        } else if t < 0.29 {
+            if m < 0.42 {
+                (Biome::Tundra, 0.2 * smoothstep(0.55, 0.8, wood))
+            } else {
+                (Biome::Taiga, 0.55 + 0.45 * smoothstep(0.35, 0.65, wood))
+            }
+        } else if t < 0.64 {
+            let woods = smoothstep(0.28, 0.45, m) * smoothstep(0.4, 0.58, wood);
+            if m > 0.72 && h < 25.0 {
+                (Biome::Swamp, 0.4 * smoothstep(0.4, 0.7, wood))
+            } else if woods > 0.15 {
+                (Biome::Forest, woods)
+            } else {
+                (Biome::Meadow, woods)
+            }
+        } else if m < 0.3 {
+            (Biome::Desert, 0.0)
+        } else if m < 0.58 {
+            (Biome::Savanna, 0.25 * smoothstep(0.5, 0.75, wood))
+        } else {
+            (Biome::Jungle, 0.6 + 0.4 * smoothstep(0.35, 0.65, wood))
+        };
+        (biome, forest, t, m)
     }
 
     /// `around` holds the heights at x-1, x+1, z-1 and z+1.
@@ -168,11 +271,15 @@ impl WorldGen {
         let g = Vec2::new(hx1 - hx0, hz1 - hz0) * 0.5;
         let slope = g.length();
         let continent = self.continent.get_noise_2d(x, z);
+        let mountain = Self::mountain_mask(continent);
+        let (biome, _, _, _) = self.biome(x, z, h, mountain);
         Column {
             height: h,
             slope,
             inv_grad: 1.0 / (1.0 + slope * slope).sqrt(),
-            mountain: Self::mountain_mask(continent),
+            mountain,
+            biome,
+            patch: self.patches.get_noise_2d(x, z) * 0.5 + 0.5,
             // Cave mouths belong on hillsides; on flat ground a near-horizontal tunnel only skims the
             // surface and leaves a long slit.
             entrance: smoothstep(0.55, 0.75, self.entrance.get_noise_2d(x, z)) * smoothstep(0.3, 0.7, slope),
@@ -186,27 +293,37 @@ impl WorldGen {
         self.column_from(x, z, h, [hx0, hx1, hz0, hz1])
     }
 
-    /// The surface at (x, z): height, slope, biome and how wooded it is.
+    /// The surface at (x, z): height, slope, biome, climate and how wooded it is.
     pub fn ground(&self, x: f32, z: f32) -> Ground {
         let col = self.column(x, z);
-        let h = col.height;
-        let underwater = h < SEA_LEVEL - 0.3;
-        let shore = h < SEA_LEVEL + SHORE_ABOVE + 1.5 && h > SEA_LEVEL - SHORE_BELOW;
-        // Woods thin out with height and on steep or high ground.
-        let wood = self.forest.get_noise_2d(x, z) * 0.5 + 0.5;
-        let forest = smoothstep(0.5, 0.68, wood) * (1.0 - smoothstep(0.75, 1.1, col.slope));
-        let biome = if h > SNOW_LINE && col.mountain > 0.5 {
-            Biome::Snow
-        } else if col.mountain > 0.35 && h > ALPINE_LINE {
-            Biome::Alpine
-        } else if shore || underwater {
-            Biome::Shore
-        } else if forest > 0.15 {
-            Biome::Forest
-        } else {
-            Biome::Meadow
+        let (biome, forest, temperature, moisture) = self.biome(x, z, col.height, col.mountain);
+        // Woods thin out on steep ground.
+        let forest = forest * (1.0 - smoothstep(0.75, 1.1, col.slope));
+        let underwater = col.height < SEA_LEVEL - 0.3;
+        Ground { height: col.height, slope: col.slope, biome, forest, temperature, moisture, underwater }
+    }
+
+    /// The material showing at the surface at (x, z).
+    pub fn surface_material(&self, x: f32, z: f32) -> Material {
+        let col = self.column(x, z);
+        self.material(Vec3::new(x, col.height - 0.5, z), &col)
+    }
+
+    /// The surface material at (x, z) given its height and slope, which the far terrain already
+    /// has from its own grid (so this skips the five height evaluations of a full column).
+    pub fn surface_material_at(&self, x: f32, z: f32, height: f32, slope: f32) -> Material {
+        let mountain = Self::mountain_mask(self.continent.get_noise_2d(x, z));
+        let (biome, _, _, _) = self.biome(x, z, height, mountain);
+        let col = Column {
+            height,
+            slope,
+            inv_grad: 1.0 / (1.0 + slope * slope).sqrt(),
+            mountain,
+            entrance: 0.0,
+            biome,
+            patch: self.patches.get_noise_2d(x, z) * 0.5 + 0.5,
         };
-        Ground { height: h, slope: col.slope, biome, forest, underwater }
+        self.material(Vec3::new(x, height - 0.5, z), &col)
     }
 
     /// Density and material at a point, given its column.
@@ -247,28 +364,39 @@ impl WorldGen {
 
     fn material(&self, p: Vec3, col: &Column) -> Material {
         let depth = col.height - p.y;
-        let beach = col.height < SEA_LEVEL + SHORE_ABOVE && col.height > SEA_LEVEL - SHORE_BELOW;
-        if depth > 5.0 {
+        let sandy = matches!(col.biome, Biome::Desert);
+        if depth > 5.0 && !(sandy && depth < 12.0) {
             if self.ore.get_noise_3d(p.x, p.y, p.z) > 0.72 {
                 return Material::CopperOre;
             }
             return Material::Rock;
         }
         if col.slope > 1.1 {
-            return Material::Rock;
-        }
-        if depth < 1.5 {
-            if col.height > SNOW_LINE && col.mountain > 0.5 && col.slope < 0.8 {
-                Material::Snow
-            } else if beach {
-                Material::Sand
+            return if matches!(col.biome, Biome::Desert | Biome::Savanna) {
+                Material::Sandstone
             } else {
-                Material::Grass
-            }
-        } else if beach {
-            Material::Sand
-        } else {
-            Material::Soil
+                Material::Rock
+            };
+        }
+        if depth >= 1.5 {
+            return match col.biome {
+                Biome::Desert => Material::Sandstone,
+                Biome::Shore => Material::Sand,
+                _ => Material::Soil,
+            };
+        }
+        let patch = col.patch;
+        match col.biome {
+            Biome::Arctic if col.slope < 0.12 && patch > 0.62 => Material::Ice,
+            Biome::Arctic => Material::Snow,
+            Biome::Tundra if patch > 0.66 && col.slope < 0.7 => Material::Snow,
+            Biome::Tundra => Material::Moss,
+            Biome::Taiga if patch > 0.6 => Material::Moss,
+            Biome::Swamp if patch > 0.42 => Material::Mud,
+            Biome::Desert | Biome::Shore => Material::Sand,
+            Biome::Savanna => Material::DryGrass,
+            Biome::Meadow if patch < 0.22 => Material::DryGrass,
+            _ => Material::Grass,
         }
     }
 
