@@ -7,6 +7,10 @@ user32 = ctypes.windll.user32
 hwnd = user32.FindWindowW(None, "Ascension")
 if not hwnd:
     sys.exit("no Ascension window")
+# The capture is a screen region, so if something else is in front (the user went back to a game)
+# it would grab that instead. Refuse.
+if user32.GetForegroundWindow() != hwnd:
+    sys.exit("Ascension isn't the foreground window; not capturing")
 rect = wt.RECT()
 user32.GetClientRect(hwnd, ctypes.byref(rect))
 pt = wt.POINT(0, 0)
