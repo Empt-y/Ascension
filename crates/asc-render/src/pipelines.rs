@@ -14,7 +14,7 @@ pub struct Layouts {
     pub textures: wgpu::BindGroupLayout,
     /// Far terrain: the clipmap height array and the per-level table.
     pub far: wgpu::BindGroupLayout,
-    /// One building-part material (uniform).
+    /// One model material: its uniform, plus the shared model texture array and sampler.
     pub material: wgpu::BindGroupLayout,
 }
 
@@ -85,7 +85,20 @@ impl Layouts {
             }),
             material: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("part material"),
-                entries: &[uniform_entry(0)],
+                entries: &[
+                    uniform_entry(0),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: float,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    sampler_entry(2, wgpu::SamplerBindingType::Filtering),
+                ],
             }),
             far: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("far"),
@@ -145,6 +158,8 @@ const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] =
 struct Builder<'a> {
     device: &'a wgpu::Device,
     samples: u32,
+    /// Turn shader alpha into MSAA coverage (only meaningful with more than one sample).
+    alpha_to_coverage: bool,
 }
 
 impl Builder<'_> {
@@ -169,7 +184,13 @@ impl Builder<'_> {
         depth_stencil: Option<wgpu::DepthStencilState>,
         target: Option<wgpu::ColorTargetState>,
     ) -> wgpu::RenderPipeline {
-        let targets = [target];
+        let targets: Vec<Option<wgpu::ColorTargetState>> = target.into_iter().map(Some).collect();
+        // parts.wgsl's `ALPHA_TO_COVERAGE` override defaults to false; other shaders don't declare it.
+        let constants = [("ALPHA_TO_COVERAGE", 1.0)];
+        let compilation_options = wgpu::PipelineCompilationOptions {
+            constants: if self.alpha_to_coverage { &constants } else { &[] },
+            ..Default::default()
+        };
         self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(layout),
@@ -181,11 +202,15 @@ impl Builder<'_> {
             },
             primitive,
             depth_stencil,
-            multisample: wgpu::MultisampleState { count: self.samples, ..Default::default() },
+            multisample: wgpu::MultisampleState {
+                count: self.samples,
+                alpha_to_coverage_enabled: self.alpha_to_coverage,
+                ..Default::default()
+            },
             fragment: fs.map(|fs| wgpu::FragmentState {
                 module,
                 entry_point: Some(fs),
-                compilation_options: Default::default(),
+                compilation_options: compilation_options.clone(),
                 targets: &targets,
             }),
             multiview_mask: None,
@@ -215,14 +240,17 @@ impl Pipelines {
         let parts_src = shaders.module(device, "parts")?;
 
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let b = Builder { device, samples: 1 };
+        let b = Builder { device, samples: 1, alpha_to_coverage: false };
         // Everything drawn in the HDR scene pass shares its sample count.
-        let scene_builder = Builder { device, samples: msaa };
+        let scene_builder = Builder { device, samples: msaa, alpha_to_coverage: false };
+        // Models (leaf cards) turn their cut-out alpha into coverage for smooth edges under MSAA.
+        let models_builder = Builder { device, samples: msaa, alpha_to_coverage: msaa > 1 };
         let scene = b.layout(&[&layouts.scene]);
         let shadow_layout = b.layout(&[&layouts.shadow]);
         let textures = b.layout(&[&layouts.scene, &layouts.textures]);
         let far_layout = b.layout(&[&layouts.scene, &layouts.far]);
         let parts_layout = b.layout(&[&layouts.scene, &layouts.material]);
+        let parts_shadow_layout = b.layout(&[&layouts.shadow, &layouts.material]);
         let vertex = [Some(wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<asc_world::Vertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -355,7 +383,7 @@ impl Pipelines {
             }),
         );
         let part_buffers = crate::parts::vertex_layouts();
-        let parts = scene_builder.pipeline(
+        let parts = models_builder.pipeline(
             "parts",
             &parts_layout,
             &parts_src,
@@ -373,9 +401,9 @@ impl Pipelines {
         );
         let parts_shadow = b.pipeline(
             "parts shadow",
-            &shadow_layout,
+            &parts_shadow_layout,
             &parts_src,
-            ("vs_shadow", None),
+            ("vs_shadow", Some("fs_shadow")),
             &part_buffers,
             wgpu::PrimitiveState::default(),
             Some(wgpu::DepthStencilState {

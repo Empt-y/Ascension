@@ -5,8 +5,10 @@ Run headless (tools/build_nature.py does this for you):
     blender --background --factory-startup --python tools/blender/nature.py -- <nature.toml> <out dir>
 
 Each `[[model]]` in the spec names a builder below and a seed; the builder grows the model from a
-few organic primitives (tapered tubes, noise-displaced blobs, jagged cone skirts and double-sided
-ribbons for leaves and blades). Exports `<out>/<id>.glb`, renders `<out>/previews/<id>.png` and
+few organic primitives: tapered tubes for trunks and limbs, noise-displaced blobs for rocks, and
+leaf cards (double-sided quads and curved strips carrying the cut-out textures drawn by
+tools/nature_textures.py) for foliage. Cards get normals pointing out of their crown, so a canopy
+lights as one volume, and every vertex gets baked ambient occlusion in its colour's alpha. Exports `<out>/<id>.glb`, renders `<out>/previews/<id>.png` and
 writes `<out>/report.json`.
 
 Geometry is authored in game coordinates (y up, metres) with the origin on the ground at the
@@ -56,6 +58,13 @@ class Mesh:
         self.name = name
         self.bm = bmesh.new()
         self.mats = []
+        # Per-vertex normals that override the geometric ones (leaf cards shade as one crown).
+        self.custom = {}
+        self.uv = self.bm.loops.layers.uv.verify()
+        # Baked ambient occlusion (vertex colour alpha): ellipsoids that darken what's deep inside
+        # them (crowns), and how much the bottom of the model darkens towards its roots.
+        self.occluders = []
+        self.root_shade = (0.5, 0.3)
 
     def mat_index(self, mat):
         for i, m in enumerate(self.mats):
@@ -82,16 +91,56 @@ class Mesh:
                 f.normal_flip()
         return f
 
+    def card(self, corners, mat, normals):
+        """A double-sided textured quad: `corners` in (0,0) (1,0) (1,1) (0,1) texture order, with
+        `normals` (one per corner, game space) used on both sides."""
+        uvs = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+        a, b = corners[1] - corners[0], corners[3] - corners[0]
+        front = a.cross(b)
+        for facing in (front, -front):
+            vs = self.verts(corners)
+            f = self.face(vs, mat, smooth=True, facing=facing)
+            for loop in f.loops:
+                loop[self.uv].uv = uvs[vs.index(loop.vert)]
+            for v, n in zip(vs, normals):
+                self.custom[v] = g2b(n.normalized())
+
+    def bake_occlusion(self, mesh):
+        attr = mesh.color_attributes.new("Col", "FLOAT_COLOR", "POINT")
+        height, strength = self.root_shade
+        for i, v in enumerate(mesh.vertices):
+            p = Vector((v.co.x, v.co.z, -v.co.y))
+            ao = lerp(1.0 - strength, 1.0, smoothstep(0.0, height, p.y))
+            for center, radii in self.occluders:
+                d = Vector(((p.x - center.x) / radii[0], (p.y - center.y) / radii[1], (p.z - center.z) / radii[2])).length
+                ao *= lerp(0.4, 1.0, smoothstep(0.15, 1.0, d))
+            attr.data[i].color = (1.0, 1.0, 1.0, ao)
+        mesh.color_attributes.active_color_name = "Col"
+
     def finish(self):
         mesh = bpy.data.meshes.new(self.name)
         self.bm.normal_update()
+        self.bm.verts.index_update()
+        custom = {v.index: n for v, n in self.custom.items()}
         self.bm.to_mesh(mesh)
         self.bm.free()
         for m in self.mats:
             mesh.materials.append(m)
+        self.bake_occlusion(mesh)
+        if custom:
+            normals = []
+            for loop in mesh.loops:
+                n = custom.get(loop.vertex_index)
+                normals.append(n if n is not None else mesh.corner_normals[loop.index].vector.copy())
+            mesh.normals_split_custom_set(normals)
         obj = bpy.data.objects.new(self.name, mesh)
         bpy.context.collection.objects.link(obj)
         return obj
+
+
+def smoothstep(a, b, x):
+    t = max(0.0, min(1.0, (x - a) / (b - a)))
+    return t * t * (3 - 2 * t)
 
 
 def perpendicular(t):
@@ -214,37 +263,149 @@ def branch(m, start, direction, length, radius, mat, rng, segments=3, sides=6, c
     return pts[-1]
 
 
-def skirt(m, center, radius, height, mat, rng, points=9, droop=0.25, upper=None):
-    """One tier of a conifer: a jagged cone with drooping tips and a shallow underside. `upper`
-    paints its upper half (snow)."""
-    c = Vector(center)
-    rot = rng.uniform(0, TAU)
-    apex = c + UP * height
-    under = c + UP * height * 0.22
-    rim, mid = [], []
-    for k in range(points * 2):
-        a = rot + math.pi * k / points
-        tip = k % 2 == 0
-        r = radius * (1.0 if tip else 0.62) * rng.uniform(0.9, 1.08)
-        p = c + horizontal(a) * r + UP * (-droop * radius * 0.35 if tip else 0.0)
-        rim.append(p)
-        mid.append(p.lerp(apex, 0.5) + horizontal(a) * radius * 0.06)
-    rv, mv = m.verts(rim), m.verts(mid)
-    (av,) = m.verts([apex])
-    (uv,) = m.verts([under])
-    count = len(rim)
-    for k in range(count):
-        k2 = (k + 1) % count
-        m.face([rv[k], rv[k2], mv[k2], mv[k]], mat, away=c + UP * (height * 0.1))
-        m.face([mv[k], mv[k2], av], upper or mat, away=c + UP * (height * 0.4))
-        m.face([rv[k2], rv[k], uv], mat, facing=DOWN)
-
-
 def random_unit(rng):
     while True:
         v = Vector((rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(-1, 1)))
         if 0.01 < v.length <= 1.0:
             return v.normalized()
+
+
+# ---------------------------------------------------------------------------------------------
+# Textured foliage
+
+TEXTURES = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "assets", "textures", "nature"
+)
+
+
+def card_material(name, texture, tint=(1.0, 1.0, 1.0), roughness=0.75):
+    """A cutout material: texels with alpha below 0.5 are discarded (glTF alphaMode MASK). The
+    texture is multiplied by `tint`."""
+    key = f"card_{name}"
+    if key in MATERIALS:
+        return MATERIALS[key]
+    mat = bpy.data.materials.new(key)
+    mat.use_nodes = True
+    nodes, links = mat.node_tree.nodes, mat.node_tree.links
+    bsdf = nodes.get("Principled BSDF")
+    tex = nodes.new("ShaderNodeTexImage")
+    tex.image = bpy.data.images.load(os.path.join(TEXTURES, f"{texture}.png"), check_existing=True)
+    mix = nodes.new("ShaderNodeMix")
+    mix.data_type = "RGBA"
+    mix.blend_type = "MULTIPLY"
+    mix.inputs["Factor"].default_value = 1.0
+    mix.inputs[7].default_value = (*tint, 1.0)
+    links.new(tex.outputs["Color"], mix.inputs[6])
+    links.new(mix.outputs[2], bsdf.inputs["Base Color"])
+    cutoff = nodes.new("ShaderNodeMath")
+    cutoff.operation = "GREATER_THAN"
+    cutoff.inputs[1].default_value = 0.5
+    links.new(tex.outputs["Alpha"], cutoff.inputs[0])
+    links.new(cutoff.outputs[0], bsdf.inputs["Alpha"])
+    bsdf.inputs["Roughness"].default_value = roughness
+    if hasattr(mat, "surface_render_method"):
+        mat.surface_render_method = "DITHERED"
+    mat.use_backface_culling = True
+    MATERIALS[key] = mat
+    return mat
+
+
+def crown_normal(p, center, radii):
+    """Outward from an ellipsoidal crown, so the canopy lights as one soft volume."""
+    d = p - center
+    return Vector((d.x / radii[0] ** 2, d.y / radii[1] ** 2, d.z / radii[2] ** 2)).normalized()
+
+
+def quad(base, up, across, length, width):
+    return [
+        base - across * width / 2,
+        base + across * width / 2,
+        base + across * width / 2 + up * length,
+        base - across * width / 2 + up * length,
+    ]
+
+
+def bounds_of(points, pad):
+    lo = Vector((min(p.x for p in points), min(p.y for p in points), min(p.z for p in points)))
+    hi = Vector((max(p.x for p in points), max(p.y for p in points), max(p.z for p in points)))
+    return (lo + hi) / 2, tuple((hi - lo) / 2 + Vector((pad, pad, pad)))
+
+
+def hang_cards(m, rng, twigs, mat, size, per_twig, center, radii, outward=0.6, jitter=0.45, up_bias=0.15, floor=None):
+    """Leaf cards on each twig `(point, direction)`: each starts at the twig, points mostly along
+    it and away from the crown centre, and gets crown normals."""
+    for point, direction in twigs:
+        for _ in range(per_twig):
+            out = (point - center).normalized() if (point - center).length > 1e-3 else UP
+            up = (direction * (1.0 - outward) + out * outward + random_unit(rng) * jitter).normalized()
+            across = up.cross(random_unit(rng))
+            if across.length < 1e-3:
+                continue
+            across.normalize()
+            length = size * rng.uniform(0.8, 1.2)
+            base = point + random_unit(rng) * size * 0.15 - up * length * 0.12
+            corners = quad(base, up, across, length, length)
+            if floor is not None and min(c.y for c in corners) < floor:
+                continue
+            m.card(corners, mat, [crown_normal(c, center, radii) * (1 - up_bias) + UP * up_bias for c in corners])
+
+
+def strip_card(m, points, widths, sides, mat, normals):
+    """A curved double-sided textured strip: the texture's v runs along `points` (0 at the first),
+    u across `widths[i]` along `sides[i]`. `normals[i]` is used at both edges of row i."""
+    n = len(points)
+    for facing_sign in (1.0, -1.0):
+        rows = []
+        for i in range(n):
+            half = sides[i] * (widths[i] / 2)
+            rows.append(m.verts([points[i] - half, points[i] + half]))
+        for i in range(n - 1):
+            a, b = rows[i], rows[i + 1]
+            vs = [a[0], a[1], b[1], b[0]]
+            front = (points[i + 1] - points[i]).cross(sides[i]) * facing_sign
+            f = m.face(vs, mat, smooth=True, facing=front)
+            uv_of = {
+                a[0]: (0.0, i / (n - 1)),
+                a[1]: (1.0, i / (n - 1)),
+                b[1]: (1.0, (i + 1) / (n - 1)),
+                b[0]: (0.0, (i + 1) / (n - 1)),
+            }
+            for loop in f.loops:
+                loop[m.uv].uv = uv_of[loop.vert]
+        for i, row in enumerate(rows):
+            for v in row:
+                m.custom[v] = g2b(normals[i].normalized())
+
+
+def grow(m, rng, start, direction, length, radius, depth, bark_mat, twigs, spread=0.8, rise=0.35, children=(2, 3)):
+    """A recursive limb; the ends of the finest limbs (and points along them) become twigs."""
+    end = branch(m, start, direction, length, radius, bark_mat, rng, sides=max(4, 3 + depth), curl=0.12, tip=0.55)
+    if depth == 0:
+        twigs.append((end, direction))
+        twigs.append((Vector(start).lerp(end, 0.55), direction))
+        return
+    for _ in range(rng.randint(*children)):
+        s = Vector(start).lerp(end, rng.uniform(0.5, 1.0))
+        nd = (direction + random_unit(rng) * spread + UP * rise).normalized()
+        grow(m, rng, s, nd, length * rng.uniform(0.55, 0.72), radius * 0.6, depth - 1, bark_mat, twigs, spread, rise, children)
+
+
+def tuft_cards(m, rng, mat, height, width, cards, lean=0.15):
+    """A grass tuft: vertical cards crossed round the centre, leaning out a little. Normals point
+    mostly up so the tuft lights like the ground it grows from; occlusion darkens the roots."""
+    rot = rng.uniform(0, TAU)
+    for k in range(cards):
+        a = rot + math.pi * k / cards + rng.uniform(-0.2, 0.2)
+        across = horizontal(a)
+        out = UP.cross(across).normalized() * rng.choice((-1, 1))
+        h = height * rng.uniform(0.85, 1.15)
+        w = width * rng.uniform(0.85, 1.15)
+        base = out * rng.uniform(0.0, 0.05) - UP * 0.03
+        top = base + UP * h + out * h * lean * rng.uniform(0.3, 1.0)
+        points = [base, base.lerp(top, 0.5) - out * h * lean * 0.15, top]
+        normals = [(UP * 0.8 + out * 0.2), (UP * 0.75 + out * 0.25), (UP * 0.7 + out * 0.3)]
+        strip_card(m, points, [w, w, w], [across] * 3, mat, normals)
+    m.root_shade = (height, 0.45)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -271,97 +432,110 @@ def rock_mats():
 # Trees
 
 
-def broadleaf(m, rng, leaves, bark_mat, crown_scale=1.0):
-    height = rng.uniform(6.8, 8.4)
-    trunk_top = height * rng.uniform(0.4, 0.48)
-    lean = horizontal(rng.uniform(0, TAU)) * rng.uniform(0.15, 0.45)
+def broadleaf(m, rng, leaves, bark_mat, height=(7.0, 8.5), trunk=0.38, limbs=(4, 5), card=1.7, per_twig=5, rise=0.35):
+    """A branching broadleaf: a trunk, recursive limbs, and leaf cards on every twig."""
+    h = rng.uniform(*height)
+    trunk_top = h * trunk
+    lean = horizontal(rng.uniform(0, TAU)) * rng.uniform(0.15, 0.4)
     pts = [Vector((0, -0.4, 0)) + lean * (i / 5) ** 2 + UP * ((trunk_top + 0.4) * i / 5) for i in range(6)]
-    tube(m, pts, [0.44, 0.33, 0.29, 0.26, 0.24, 0.22], 8, bark_mat, cap_end=False)
-    top = pts[-1]
-    ends = []
-    count = rng.randint(3, 5)
+    tube(m, pts, [0.44, 0.34, 0.3, 0.27, 0.25, 0.23], 9, bark_mat, cap_end=False)
+    twigs = []
+    count = rng.randint(*limbs)
     for b in range(count):
-        a = TAU * b / count + rng.uniform(-0.4, 0.4)
-        out = (horizontal(a) + UP * rng.uniform(0.6, 1.1)).normalized()
-        start = top - UP * rng.uniform(0.0, 0.9)
-        ends.append(branch(m, start, out, rng.uniform(1.6, 2.5), 0.15, bark_mat, rng))
-    crown = top + UP * (height - trunk_top) * 0.42
-    r = 2.1 * crown_scale
-    blob(m, crown, (r, r * 0.8, r), leaves[0], rng, amp=0.16)
-    for e in ends:
-        rr = rng.uniform(1.25, 1.75) * crown_scale
-        blob(m, e + UP * 0.25, (rr, rr * 0.82, rr), rng.choice(leaves), rng, amp=0.18)
+        d = (horizontal(TAU * b / count + rng.uniform(-0.4, 0.4)) + UP * rng.uniform(0.7, 1.2)).normalized()
+        grow(m, rng, pts[-1] - UP * rng.uniform(0, 0.6), d, rng.uniform(2.2, 2.9) * h / 7.7, 0.17, 2, bark_mat, twigs, rise=rise)
+    grow(m, rng, pts[-1], UP, 2.4 * h / 7.7, 0.16, 2, bark_mat, twigs, rise=rise)
+    center, radii = bounds_of([p for p, _ in twigs], 0.8)
+    hang_cards(m, rng, twigs, leaves, card, per_twig, center, radii)
+    m.occluders.append((center, radii))
 
 
 def oak(m, rng):
-    leaves = [leaf("oak_a", (0.08, 0.24, 0.035)), leaf("oak_b", (0.14, 0.31, 0.05))]
-    broadleaf(m, rng, leaves, bark("oak", (0.12, 0.08, 0.05)))
+    tint = rng.choice([(0.28, 0.5, 0.16), (0.24, 0.46, 0.13), (0.31, 0.52, 0.17)])
+    broadleaf(m, rng, card_material(f"oak_{tint[0]}", "leaves_oak", tint), bark("oak", (0.12, 0.08, 0.05)))
 
 
 def maple(m, rng):
-    leaves = [
-        leaf("maple_a", (0.62, 0.16, 0.03)),
-        leaf("maple_b", (0.72, 0.32, 0.04)),
-        leaf("maple_c", (0.48, 0.07, 0.03)),
-    ]
-    broadleaf(m, rng, leaves, bark("maple", (0.14, 0.10, 0.07)), crown_scale=1.08)
+    leaves = card_material("maple_autumn", "leaves_maple", (0.95, 0.42, 0.1))
+    broadleaf(m, rng, leaves, bark("maple", (0.14, 0.10, 0.07)), card=1.6, per_twig=6)
 
 
 def birch(m, rng):
     white = bark("birch", (0.72, 0.70, 0.65), 0.75)
     mark = bark("birch_mark", (0.06, 0.055, 0.05))
-    leaves = [leaf("birch_a", (0.20, 0.38, 0.06)), leaf("birch_b", (0.30, 0.44, 0.08))]
+    leaves = card_material("birch", "leaves_round", (0.36, 0.56, 0.15))
     height = rng.uniform(8.5, 10.0)
     sway = horizontal(rng.uniform(0, TAU)) * rng.uniform(0.2, 0.5)
     n = 14
-    pts = [Vector((0, -0.3, 0)) + sway * math.sin(math.pi * i / n) + UP * ((height * 0.88 + 0.3) * i / n) for i in range(n + 1)]
-    radii = [lerp(0.2, 0.06, i / n) for i in range(n + 1)]
+    pts = [Vector((0, -0.3, 0)) + sway * math.sin(math.pi * i / n) + UP * ((height * 0.85 + 0.3) * i / n) for i in range(n + 1)]
+    radii = [lerp(0.2, 0.05, i / n) for i in range(n + 1)]
     marks = {(i, k) for i in range(n) for k in range(7) if rng.random() < 0.16}
     tube(m, pts, radii, 7, white, mat_fn=lambda i, k: mark if (i, k) in marks else white)
-    for b in range(rng.randint(4, 6)):
-        i = rng.randint(n // 2, n - 2)
-        out = (horizontal(rng.uniform(0, TAU)) + UP * rng.uniform(0.9, 1.6)).normalized()
-        branch(m, pts[i], out, rng.uniform(0.9, 1.5), 0.06, white, rng, sides=5)
-    def on_trunk(t):
-        x = t * n
-        i = min(int(x), n - 1)
-        return pts[i].lerp(pts[i + 1], x - i)
-
-    for b in range(rng.randint(6, 8)):
-        p = on_trunk(rng.uniform(0.5, 0.9)) + horizontal(rng.uniform(0, TAU)) * rng.uniform(0.25, 0.65)
-        r = rng.uniform(0.85, 1.15)
-        blob(m, p, (r, r * rng.uniform(1.15, 1.45), r), rng.choice(leaves), rng, amp=0.2)
-    blob(m, pts[-1], (0.9, 1.2, 0.9), leaves[1], rng, amp=0.2)
+    twigs = [(pts[-1], UP)]
+    for i in range(n // 3, n):
+        for _ in range(2 if i > n // 2 else 1):
+            d = (horizontal(rng.uniform(0, TAU)) + UP * rng.uniform(0.4, 1.0)).normalized()
+            reach = lerp(1.9, 0.8, (i - n // 3) / (n - n // 3)) * rng.uniform(0.8, 1.1)
+            grow(m, rng, pts[i], d, reach, 0.045, 1, white, twigs, spread=0.6, rise=-0.15, children=(2, 3))
+    center, crown = bounds_of([p for p, _ in twigs], 0.6)
+    hang_cards(m, rng, twigs, leaves, 1.15, 4, center, crown)
+    m.occluders.append((center, crown))
 
 
-def conifer(m, rng, needles, bark_mat, height, snow=None):
-    tiers = rng.randint(6, 8)
-    base = 1.4
-    top = height - 1.0
-    pts = [Vector((0, -0.3, 0)), Vector((0, base, 0)), Vector((0, top * 0.6, 0)), Vector((0, top, 0))]
-    tube(m, pts, [0.3, 0.24, 0.14, 0.05], 7, bark_mat)
-    for i in range(tiers):
-        t = i / (tiers - 1)
-        y = lerp(base, top - 0.6, t ** 0.9)
-        radius = lerp(2.5, 0.65, t) * rng.uniform(0.9, 1.1)
-        h = lerp(2.2, 1.5, t)
-        skirt(m, (0, y, 0), radius, h, needles[i % len(needles)], rng, upper=snow)
-    skirt(m, (0, top - 0.2, 0), 0.35, 1.3, needles[0], rng, points=6, droop=0.0, upper=snow)
+def conifer(m, rng, needles, height, snow=None, reach_scale=1.0):
+    """Whorls of drooping branches up a straight trunk, each lined with needle sprays. With `snow`,
+    upward-facing sprays in the upper crown use the snowy texture."""
+    bark_mat = bark("pine", (0.13, 0.07, 0.045))
+    trunk = [Vector((0, -0.3, 0)), Vector((0, 1.5, 0)), Vector((0, height * 0.6, 0)), Vector((0, height - 0.3, 0))]
+    tube(m, trunk, [0.32, 0.26, 0.15, 0.04], 8, bark_mat)
+    center, radii = Vector((0, height * 0.45, 0)), (2.6 * reach_scale, height * 0.55, 2.6 * reach_scale)
+    whorls = int(height / 0.75)
+    for w in range(whorls):
+        t = w / (whorls - 1)
+        y = lerp(1.6, height - 0.6, t)
+        reach = lerp(2.7, 0.35, t**0.9) * rng.uniform(0.85, 1.1) * reach_scale
+        rot = rng.uniform(0, TAU)
+        spokes = rng.randint(6, 8)
+        for k in range(spokes):
+            d = (horizontal(rot + TAU * k / spokes + rng.uniform(-0.25, 0.25)) + DOWN * rng.uniform(0.05, 0.3)).normalized()
+            start = Vector((0, y, 0))
+            radius = 0.05 * (1.0 - 0.6 * t) + 0.015
+            end = branch(m, start, d, reach, radius, bark_mat, rng, segments=2, sides=4, curl=-0.1, tip=0.4)
+            steps = max(1, int(reach / 0.55))
+            for i in range(steps):
+                p = start.lerp(end, (i + 0.7) / steps)
+                for flip in (-1, 1):
+                    side = d.cross(UP).normalized() * flip
+                    up = (d * 0.8 + side * 0.35 + UP * rng.uniform(-0.05, 0.25)).normalized()
+                    # Tilt the spray about its own axis so it isn't edge-on from the side.
+                    flat = up.cross(UP).normalized()
+                    tilt = rng.uniform(0.35, 0.8) * rng.choice((-1, 1))
+                    across = flat * math.cos(tilt) + up.cross(flat) * math.sin(tilt)
+                    size = 1.3 * (1.0 - 0.4 * t) * rng.uniform(0.85, 1.15)
+                    corners = quad(p - up * size * 0.1, up, across, size, size)
+                    mat = snow if snow is not None and t > 0.15 and rng.random() < 0.65 else needles
+                    m.card(corners, mat, [crown_normal(c, center, radii) * 0.7 + UP * 0.3 for c in corners])
+    top = Vector((0, height - 0.9, 0))
+    for k in range(3):
+        corners = quad(top, UP, horizontal(TAU * k / 3), 1.1, 0.6)
+        m.card(corners, snow or needles, [crown_normal(c, center, radii) * 0.5 + UP * 0.5 for c in corners])
+    m.occluders.append((center, radii))
 
 
 def pine(m, rng):
-    needles = [leaf("pine_a", (0.035, 0.12, 0.05)), leaf("pine_b", (0.05, 0.16, 0.06))]
-    conifer(m, rng, needles, bark("pine", (0.13, 0.07, 0.045)), rng.uniform(10.0, 13.0))
+    tint = rng.choice([(0.11, 0.21, 0.12), (0.10, 0.19, 0.13), (0.13, 0.22, 0.11)])
+    conifer(m, rng, card_material(f"pine_{tint[1]}", "needles", tint), rng.uniform(10.5, 12.5))
 
 
 def snow_pine(m, rng):
-    needles = [leaf("snow_pine_a", (0.03, 0.09, 0.05)), leaf("snow_pine_b", (0.04, 0.11, 0.06))]
-    conifer(m, rng, needles, bark("pine", (0.13, 0.07, 0.045)), rng.uniform(8.5, 11.5), snow=snow_mat())
+    needles = card_material("snow_pine", "needles", (0.08, 0.16, 0.11))
+    snow = card_material("snow_pine_snowy", "needles_snow")
+    conifer(m, rng, needles, rng.uniform(8.5, 11.0), snow=snow, reach_scale=0.85)
 
 
 def palm(m, rng):
     trunk_mat = bark("palm", (0.30, 0.22, 0.13), 0.85)
-    fronds = [leaf("palm_a", (0.10, 0.30, 0.05)), leaf("palm_b", (0.16, 0.34, 0.07))]
+    frond = card_material("palm", "palm_frond", (0.32, 0.56, 0.16))
     nut = material("coconut", (0.22, 0.13, 0.05), 0.8)
     height = rng.uniform(6.0, 7.5)
     lean = horizontal(rng.uniform(0, TAU)) * rng.uniform(0.8, 1.8)
@@ -370,54 +544,55 @@ def palm(m, rng):
     radii = [lerp(0.27, 0.16, i / n) * (1.0 if i % 2 == 0 else 0.86) for i in range(n + 1)]
     tube(m, pts, radii, 7, trunk_mat)
     top = pts[-1]
-    blob(m, top, (0.3, 0.25, 0.3), fronds[0], rng, subdiv=1, amp=0.1)
-    count = rng.randint(8, 10)
+    count = rng.randint(9, 11)
     for f in range(count):
         a = TAU * f / count + rng.uniform(-0.25, 0.25)
         d = horizontal(a)
         side = UP.cross(d).normalized()
-        length = rng.uniform(2.6, 3.4)
-        rise = rng.uniform(0.35, 0.6)
+        length = rng.uniform(2.8, 3.6)
+        rise = rng.uniform(0.3, 0.65)
         steps = 8
         spine = [top + d * length * (i / steps) + UP * length * (rise * i / steps - 0.85 * (i / steps) ** 2) for i in range(steps + 1)]
-        mat = rng.choice(fronds)
-        ribbon(m, spine, [0.07] * steps + [0.0], side, mat)
-        for i in range(1, steps):
-            t = i / steps
-            p = spine[i]
-            tangent = (spine[i + 1] - spine[i - 1]).normalized()
-            span = 0.95 * math.sin(math.pi * t) + 0.15
-            for s in (-1, 1):
-                out = (side * s + DOWN * 0.55 + tangent * 0.45).normalized()
-                ribbon(m, [p, p + out * span * 0.55, p + out * span * 1.1], [0.2, 0.17, 0.0], tangent, mat)
+        widths = [lerp(0.25, 1.15, math.sin(math.pi * min(1.0, i / steps + 0.1))) * 1.0 for i in range(steps + 1)]
+        # Leaflets hang down either side of the rib: tilt the strip's sides downwards.
+        sides = [(side + DOWN * 0.15).normalized() for _ in spine]
+        normals = [crown_normal(p, top - UP * 0.4, (3.0, 1.5, 3.0)) * 0.6 + UP * 0.4 for p in spine]
+        strip_card(m, spine, widths, sides, frond, normals)
     for k in range(3):
         a = TAU * k / 3 + rng.uniform(0, 1)
-        blob(m, top + horizontal(a) * 0.22 - UP * 0.25, (0.15, 0.17, 0.15), nut, rng, subdiv=1, amp=0.05)
+        blob(m, top + horizontal(a) * 0.22 - UP * 0.25, (0.15, 0.17, 0.15), nut, rng, subdiv=2, amp=0.05)
+    m.occluders.append((top - UP * 0.2, (1.6, 0.9, 1.6)))
 
 
 def willow(m, rng):
     bark_mat = bark("willow", (0.17, 0.13, 0.09))
-    leaves = [leaf("willow_a", (0.18, 0.32, 0.07)), leaf("willow_b", (0.25, 0.38, 0.09))]
+    leaves = card_material("willow", "leaves_round", (0.42, 0.58, 0.2))
+    strand_mat = card_material("willow_strand", "willow_strand", (0.4, 0.56, 0.18))
     trunk = [Vector((0, -0.4, 0)), Vector((0.1, 1.0, 0)), Vector((-0.1, 2.2, 0.15)), Vector((0, 3.0, 0))]
     tube(m, trunk, [0.5, 0.38, 0.33, 0.3], 8, bark_mat, cap_end=False)
-    for b in range(4):
-        out = (horizontal(TAU * b / 4 + rng.uniform(-0.3, 0.3)) + UP * 0.8).normalized()
-        branch(m, trunk[-1], out, rng.uniform(1.8, 2.4), 0.16, bark_mat, rng)
-    crown = Vector((0, 5.3, 0))
-    blob(m, crown, (2.9, 1.5, 2.9), leaves[0], rng, amp=0.2)
-    for _ in range(3):
-        p = crown + horizontal(rng.uniform(0, TAU)) * 1.4 + UP * rng.uniform(0.2, 0.8)
-        blob(m, p, (1.4, 0.9, 1.4), leaves[1], rng, amp=0.2)
-    for s in range(40):
-        a = rng.uniform(0, TAU)
-        r = rng.uniform(1.4, 2.9)
-        start = crown + horizontal(a) * r - UP * 0.4 * (r / 2.9) ** 2
-        length = rng.uniform(2.0, 3.6)
-        sway = horizontal(a) * rng.uniform(0.1, 0.4)
-        strand = [start + sway * (i / 4) ** 2 - UP * length * i / 4 for i in range(5)]
-        if strand[-1].y < 0.8:
+    twigs = []
+    for b in range(5):
+        out = (horizontal(TAU * b / 5 + rng.uniform(-0.3, 0.3)) + UP * 0.9).normalized()
+        grow(m, rng, trunk[-1], out, rng.uniform(2.2, 2.8), 0.17, 2, bark_mat, twigs, spread=0.7, rise=0.1)
+    center, crown = bounds_of([p for p, _ in twigs], 0.7)
+    hang_cards(m, rng, twigs, leaves, 1.3, 3, center, crown)
+    # Long strands hanging from the outer twigs.
+    for p, _ in twigs:
+        out = Vector((p.x - center.x, 0.0, p.z - center.z))
+        if out.length < 0.6:
             continue
-        ribbon(m, strand, [0.32, 0.3, 0.24, 0.14, 0.0], horizontal(a + math.pi / 2), rng.choice(leaves))
+        out.normalize()
+        length = min(rng.uniform(2.2, 3.8), p.y - 0.8)
+        if length < 1.0:
+            continue
+        drift = out * rng.uniform(0.15, 0.4)
+        strand = [p + drift * (i / 4) ** 2 - UP * length * i / 4 for i in range(5)]
+        across = UP.cross(out).normalized()
+        normals = [crown_normal(q, center, crown) * 0.5 + out * 0.5 for q in strand]
+        strip_card(m, strand, [0.6] * 5, [across] * 5, strand_mat, normals)
+        # A second strand crossing the first, so it doesn't vanish edge-on.
+        strip_card(m, strand, [0.6] * 5, [out] * 5, strand_mat, normals)
+    m.occluders.append((center, crown))
 
 
 def dead_tree(m, rng):
@@ -445,35 +620,37 @@ def dead_tree(m, rng):
 # Shrubs
 
 
+def shrub(m, rng, leaves, stems=(4, 6), reach=(0.55, 0.85), card=0.75, per_twig=6, rise=0.5, spread=1.0):
+    """Woody stems from the ground with leaf cards on their twigs. Returns the twigs."""
+    stem_mat = bark("shrub", (0.16, 0.12, 0.08))
+    twigs = []
+    for k in range(rng.randint(*stems)):
+        d = (horizontal(rng.uniform(0, TAU)) * spread * rng.uniform(0.4, 1.0) + UP * rise).normalized()
+        grow(m, rng, Vector((0, -0.05, 0)), d, rng.uniform(*reach), 0.035, 1, stem_mat, twigs, spread=0.7, rise=0.2)
+    center, radii = bounds_of([p for p, _ in twigs], 0.35)
+    hang_cards(m, rng, twigs, leaves, card, per_twig, center, radii, outward=0.7, floor=-0.08)
+    m.occluders.append((center, radii))
+    return twigs
+
+
 def bush(m, rng):
-    leaves = [leaf("bush_a", (0.07, 0.22, 0.04)), leaf("bush_b", (0.12, 0.28, 0.05))]
-    blobs = []
-    for _ in range(rng.randint(4, 6)):
-        c = horizontal(rng.uniform(0, TAU)) * rng.uniform(0.0, 0.5) + UP * rng.uniform(0.35, 0.7)
-        r = rng.uniform(0.42, 0.68)
-        blob(m, c, (r, r * 0.85, r), rng.choice(leaves), rng, amp=0.2, freq=2.0, floor=-0.05)
-        blobs.append((c, r))
-    return blobs
+    texture = rng.choice(["leaves_round", "leaves_oak"])
+    tint = rng.choice([(0.25, 0.46, 0.12), (0.3, 0.5, 0.15), (0.22, 0.42, 0.13)])
+    shrub(m, rng, card_material(f"bush_{texture}_{tint[0]}", texture, tint))
 
 
 def berry_bush(m, rng):
     berry = material("berry", (0.55, 0.02, 0.04), 0.35)
-    blobs = bush(m, rng)
-    for _ in range(18):
-        c, r = rng.choice(blobs)
-        d = random_unit(rng)
-        d.y = abs(d.y) * 0.8 + 0.2
-        d.normalize()
-        p = c + Vector((d.x * r, d.y * r * 0.85, d.z * r)) * 1.04
-        blob(m, p, (0.045, 0.045, 0.045), berry, rng, subdiv=1, amp=0.0)
+    twigs = shrub(m, rng, card_material("berry_bush", "leaves_round", (0.2, 0.4, 0.12)))
+    for p, _ in rng.sample(twigs, min(len(twigs), 14)):
+        for _ in range(2):
+            q = p + random_unit(rng) * 0.12
+            blob(m, q, (0.04, 0.04, 0.04), berry, rng, subdiv=1, amp=0.0)
 
 
 def juniper(m, rng):
-    leaves = [leaf("juniper_a", (0.04, 0.13, 0.10)), leaf("juniper_b", (0.06, 0.16, 0.11))]
-    for _ in range(rng.randint(5, 7)):
-        c = horizontal(rng.uniform(0, TAU)) * rng.uniform(0.0, 0.9) + UP * rng.uniform(0.2, 0.42)
-        r = rng.uniform(0.55, 0.9)
-        blob(m, c, (r, r * rng.uniform(0.45, 0.6), r), rng.choice(leaves), rng, amp=0.28, freq=2.6, smooth=False, floor=-0.05)
+    needles = card_material("juniper", "needles", (0.12, 0.2, 0.17))
+    shrub(m, rng, needles, stems=(7, 9), reach=(0.6, 0.9), card=0.6, per_twig=6, rise=0.12, spread=1.5)
 
 
 def dry_shrub(m, rng):
@@ -497,24 +674,19 @@ def dry_shrub(m, rng):
 
 
 def fern(m, rng):
-    greens = [leaf("fern_a", (0.07, 0.24, 0.04)), leaf("fern_b", (0.10, 0.30, 0.05))]
-    for f in range(rng.randint(8, 11)):
+    tint = rng.choice([(0.26, 0.5, 0.14), (0.3, 0.55, 0.16)])
+    mat = card_material(f"fern_{tint[0]}", "fern_frond", tint)
+    for f in range(rng.randint(9, 12)):
         a = TAU * f / 10 + rng.uniform(-0.3, 0.3)
         d = horizontal(a)
         side = UP.cross(d).normalized()
-        length = rng.uniform(0.7, 1.05)
-        steps = 7
+        length = rng.uniform(0.75, 1.1)
+        steps = 6
         spine = [d * length * 0.85 * (i / steps) + UP * length * (1.5 * i / steps - 0.95 * (i / steps) ** 2) for i in range(steps + 1)]
-        mat = rng.choice(greens)
-        ribbon(m, spine, [0.035] * steps + [0.0], side, mat)
-        for i in range(1, steps):
-            t = i / steps
-            p = spine[i]
-            tangent = (spine[i + 1] - spine[i - 1]).normalized()
-            span = 0.24 * (1.0 - t) + 0.06
-            for s in (-1, 1):
-                out = (side * s + tangent * 0.45 + DOWN * 0.12).normalized()
-                ribbon(m, [p, p + out * span * 0.5, p + out * span], [0.05, 0.07, 0.0], tangent, mat)
+        widths = [0.38 * length] * (steps + 1)
+        normals = [UP * 0.7 + d * 0.3 for _ in spine]
+        strip_card(m, spine, widths, [side] * (steps + 1), mat, normals)
+    m.root_shade = (0.6, 0.4)
 
 
 def stems_with_heads(m, rng, count, height, stem_mat, head, leaves=None, bend=0.08):
@@ -671,26 +843,20 @@ def cattails(m, rng):
 
 
 def grass(m, rng):
-    mats = [leaf("grass_a", (0.10, 0.32, 0.05)), leaf("grass_b", (0.17, 0.38, 0.06)), leaf("grass_c", (0.24, 0.40, 0.07))]
-    blades(m, rng, rng.randint(10, 16), (0.22, 0.45), mats)
+    tint = rng.choice([(0.36, 0.6, 0.17), (0.32, 0.56, 0.16), (0.4, 0.62, 0.18)])
+    tuft_cards(m, rng, card_material(f"grass_{tint[0]}", "grass_tuft", tint), rng.uniform(0.32, 0.45), 0.7, 3)
 
 
 def tall_grass(m, rng):
-    mats = [leaf("grass_a", (0.10, 0.32, 0.05)), leaf("grass_b", (0.17, 0.38, 0.06)), leaf("grass_dry", (0.36, 0.38, 0.12))]
-    seed = material("seed_head", (0.42, 0.34, 0.16), 0.8)
-    tips = blades(m, rng, rng.randint(12, 16), (0.65, 1.0), mats, spread=0.15, lean=(0.15, 0.4), width=0.03)
-    for p in tips[:5]:
-        blob(m, p - UP * 0.05, (0.018, 0.07, 0.018), seed, rng, subdiv=1, amp=0.0)
+    tuft_cards(m, rng, card_material("tall_grass", "grass_tall", (0.42, 0.58, 0.2)), rng.uniform(0.8, 1.0), 0.85, 4)
 
 
 def beach_grass(m, rng):
-    mats = [leaf("beach_grass_a", (0.32, 0.32, 0.13)), leaf("beach_grass_b", (0.24, 0.30, 0.10))]
-    blades(m, rng, rng.randint(14, 18), (0.45, 0.85), mats, spread=0.18, lean=(0.4, 0.8), width=0.03)
+    tuft_cards(m, rng, card_material("beach_grass", "grass_thin", (0.62, 0.62, 0.36)), rng.uniform(0.6, 0.8), 0.8, 4, lean=0.3)
 
 
 def alpine_grass(m, rng):
-    mats = [leaf("alpine_grass_a", (0.16, 0.22, 0.07)), leaf("alpine_grass_b", (0.26, 0.26, 0.10))]
-    blades(m, rng, rng.randint(14, 20), (0.1, 0.26), mats, spread=0.14, lean=(0.3, 0.7), width=0.025)
+    tuft_cards(m, rng, card_material("alpine_grass", "grass_tuft", (0.42, 0.5, 0.22)), rng.uniform(0.2, 0.28), 0.55, 3)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -702,7 +868,8 @@ def rock(m, rng, top_mat=None, top=0.5, size=(0.9, 1.3)):
     rx = rng.uniform(*size)
     ry = rx * rng.uniform(0.55, 0.8)
     rz = rx * rng.uniform(0.7, 1.0)
-    blob(m, (0, ry * 0.5, 0), (rx, ry, rz), a, rng, amp=0.24, freq=1.1, smooth=False, top_mat=top_mat, top=top, mat2=b, mix=0.45)
+    blob(m, (0, ry * 0.5, 0), (rx, ry, rz), a, rng, subdiv=4, amp=0.26, freq=1.2, smooth=True, top_mat=top_mat, top=top, mat2=b, mix=0.45)
+    m.root_shade = (ry * 0.6, 0.35)
 
 
 def boulder(m, rng):
@@ -722,7 +889,7 @@ def pebbles(m, rng):
     for _ in range(rng.randint(6, 9)):
         c = horizontal(rng.uniform(0, TAU)) * rng.uniform(0.0, 0.45)
         r = rng.uniform(0.05, 0.14)
-        blob(m, c + UP * r * 0.35, (r, r * 0.6, r * 0.85), rng.choice((a, b)), rng, subdiv=2, amp=0.15, smooth=False)
+        blob(m, c + UP * r * 0.35, (r, r * 0.6, r * 0.85), rng.choice((a, b)), rng, subdiv=2, amp=0.15)
 
 
 def lying_log(m, rng, length, radius, bark_mat, end_mat, stubs):

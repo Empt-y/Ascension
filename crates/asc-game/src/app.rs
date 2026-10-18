@@ -445,7 +445,7 @@ impl State {
                 let model = self.parts.model(0, asc_build::PartKind::Foundation);
                 let position = Vec3::new(xz.x, h - self.building.structures.lattice.foundation_height, xz.y);
                 self.renderer.set_ghost(Some(asc_render::Ghost {
-                    instance: asc_render::PartInstance { model, position, rotation: 0 },
+                    instance: asc_render::PartInstance::rigid(model, position, 0),
                     valid: true,
                 }));
             }
@@ -1260,11 +1260,11 @@ impl State {
                     PartKind::Ceiling => ground + 1.4,
                     _ => ground,
                 };
-                instances.push(asc_render::PartInstance {
-                    model: self.parts.model(tier, kind),
-                    position: Vec3::new(x, y, z),
-                    rotation: 3,
-                });
+                instances.push(asc_render::PartInstance::rigid(
+                    self.parts.model(tier, kind),
+                    Vec3::new(x, y, z),
+                    3,
+                ));
             }
         }
         // Nature models in a row per kind behind the parts, spaced by how big that kind is.
@@ -1281,7 +1281,9 @@ impl State {
                     instances.push(asc_render::PartInstance {
                         model: *model,
                         position: Vec3::new(x, ground, z),
-                        rotation: (i % 4) as u8,
+                        yaw: i as f32 * 1.3,
+                        scale: 1.0,
+                        sway: 1.0,
                     });
                 }
                 z += spacing * 0.5;

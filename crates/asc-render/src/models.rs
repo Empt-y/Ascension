@@ -1,7 +1,10 @@
-//! Loading static models (building parts and later machines) from glTF binaries.
+//! Loading static models (building parts, nature scatter and later machines) from glTF binaries.
 //!
-//! Only what the parts pipeline draws is kept: positions, normals, indices and each primitive's
-//! metallic-roughness factors. Node transforms are baked into the vertices.
+//! Only what the parts pipeline draws is kept: positions, normals, texture coordinates, vertex
+//! colours, indices, and each primitive's metallic-roughness factors plus an optional base colour
+//! texture with an alpha cutoff (leaf cards). Node transforms are baked into the vertices.
+
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use glam::{Mat4, Vec3};
@@ -11,6 +14,18 @@ use glam::{Mat4, Vec3};
 pub struct PartVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
+    pub uv: [f32; 2],
+    /// sRGB-ish tint in rgb and ambient occlusion in a (white when the model has no colours).
+    pub color: [u8; 4],
+}
+
+/// A decoded RGBA8 texture, named by its glTF image so models can share it.
+#[derive(Debug, PartialEq)]
+pub struct TextureData {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -21,6 +36,10 @@ pub struct PrimitiveData {
     pub base_color: [f32; 3],
     pub roughness: f32,
     pub metallic: f32,
+    /// Base colour texture (multiplied by `base_color`), if any.
+    pub texture: Option<Arc<TextureData>>,
+    /// Texels with alpha below this are cut away (glTF alphaMode MASK).
+    pub alpha_cutoff: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -39,7 +58,8 @@ impl ModelData {
 
 /// Parse a `.glb` (or `.gltf` with embedded buffers).
 pub fn load_glb(bytes: &[u8]) -> Result<ModelData> {
-    let (doc, buffers, _images) = gltf::import_slice(bytes).context("parsing glTF")?;
+    let (doc, buffers, images) = gltf::import_slice(bytes).context("parsing glTF")?;
+    let mut textures: Vec<Option<Arc<TextureData>>> = vec![None; images.len()];
     let mut primitives = Vec::new();
     let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
     let scene = doc.default_scene().or_else(|| doc.scenes().next()).context("glTF has no scene")?;
@@ -59,29 +79,56 @@ pub fn load_glb(bytes: &[u8]) -> Result<ModelData> {
                     Some(n) => n.collect(),
                     None => bail!("primitive without normals"),
                 };
+                let uvs: Vec<[f32; 2]> = match reader.read_tex_coords(0) {
+                    Some(t) => t.into_f32().collect(),
+                    None => vec![[0.0; 2]; positions.len()],
+                };
+                let colors: Vec<[u8; 4]> = match reader.read_colors(0) {
+                    Some(c) => c.into_rgba_u8().collect(),
+                    None => vec![[255; 4]; positions.len()],
+                };
                 let indices: Vec<u32> = match reader.read_indices() {
                     Some(i) => i.into_u32().collect(),
                     None => (0..positions.len() as u32).collect(),
                 };
-                let vertices = positions
-                    .iter()
-                    .zip(&normals)
-                    .map(|(p, n)| {
-                        let p = transform.transform_point3(Vec3::from(*p));
-                        let n = normal_matrix.transform_vector3(Vec3::from(*n)).normalize_or(Vec3::Y);
+                let vertices = (0..positions.len())
+                    .map(|i| {
+                        let p = transform.transform_point3(Vec3::from(positions[i]));
+                        let n = normal_matrix.transform_vector3(Vec3::from(normals[i])).normalize_or(Vec3::Y);
                         min = min.min(p);
                         max = max.max(p);
-                        PartVertex { position: p.into(), normal: n.into() }
+                        PartVertex { position: p.into(), normal: n.into(), uv: uvs[i], color: colors[i] }
                     })
                     .collect();
-                let pbr = prim.material().pbr_metallic_roughness();
+                let material = prim.material();
+                let pbr = material.pbr_metallic_roughness();
                 let [r, g, b, _] = pbr.base_color_factor();
+                let texture = match pbr.base_color_texture() {
+                    Some(info) => {
+                        let source = info.texture().source();
+                        let slot = &mut textures[source.index()];
+                        if slot.is_none() {
+                            let name = source
+                                .name()
+                                .map_or_else(|| format!("image{}", source.index()), str::to_owned);
+                            *slot = Some(Arc::new(rgba(&images[source.index()], name)?));
+                        }
+                        slot.clone()
+                    }
+                    None => None,
+                };
+                let alpha_cutoff = match material.alpha_mode() {
+                    gltf::material::AlphaMode::Mask => Some(material.alpha_cutoff().unwrap_or(0.5)),
+                    _ => None,
+                };
                 primitives.push(PrimitiveData {
                     vertices,
                     indices,
                     base_color: [r, g, b],
                     roughness: pbr.roughness_factor(),
                     metallic: pbr.metallic_factor(),
+                    texture,
+                    alpha_cutoff,
                 });
             }
         }
@@ -91,6 +138,18 @@ pub fn load_glb(bytes: &[u8]) -> Result<ModelData> {
         bail!("glTF contains no triangle meshes");
     }
     Ok(ModelData { primitives, min, max })
+}
+
+fn rgba(image: &gltf::image::Data, name: String) -> Result<TextureData> {
+    use gltf::image::Format;
+    let rgba = match image.format {
+        Format::R8G8B8A8 => image.pixels.clone(),
+        Format::R8G8B8 => {
+            image.pixels.as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect()
+        }
+        other => bail!("texture {name}: unsupported format {other:?}"),
+    };
+    Ok(TextureData { name, width: image.width, height: image.height, rgba })
 }
 
 #[cfg(test)]
@@ -137,7 +196,8 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 47);
+        let spec = std::fs::read_to_string(models_dir().join("../data/nature.toml")).unwrap();
+        assert_eq!(count, spec.matches("[[model]]").count());
     }
 
     #[test]

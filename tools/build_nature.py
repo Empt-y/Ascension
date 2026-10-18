@@ -24,12 +24,12 @@ BUDGETS = {
     "tree": (200, 4500),
     "shrub": (100, 2500),
     "plant": (40, 2000),
-    "grass": (20, 600),
+    "grass": (8, 600),
     "rock": (40, 1500),
     "debris": (60, 1500),
 }
 MAX_SINK = 0.6
-MAX_HALF_WIDTH = 6.0
+MAX_HALF_WIDTH = 7.0
 
 
 def main():

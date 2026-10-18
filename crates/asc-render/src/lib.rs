@@ -394,7 +394,7 @@ impl Renderer {
 
     /// Upload a model for drawing as building parts.
     pub fn add_model(&mut self, model: &models::ModelData) -> ModelId {
-        self.parts.add_model(&self.gpu.device, &self.layouts.material, model)
+        self.parts.add_model(&self.gpu.device, &self.gpu.queue, &self.layouts.material, model)
     }
 
     /// Every placed part. Call when the set changes.

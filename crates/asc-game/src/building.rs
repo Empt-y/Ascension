@@ -84,7 +84,7 @@ impl Building {
                 .iter()
                 .map(|p| {
                     let (position, rotation) = lattice.placement(&p.key);
-                    PartInstance { model: models.model(p.tier as usize, p.key.kind), position, rotation }
+                    PartInstance::rigid(models.model(p.tier as usize, p.key.kind), position, rotation)
                 })
                 .collect();
             renderer.set_parts(&instances);
@@ -94,7 +94,7 @@ impl Building {
             (Some(sel), Some((snap, valid))) => {
                 let (position, rotation) = lattice.placement(&snap.key);
                 let model = models.model(sel.tier, snap.key.kind);
-                Some(Ghost { instance: PartInstance { model, position, rotation }, valid: valid.is_ok() })
+                Some(Ghost { instance: PartInstance::rigid(model, position, rotation), valid: valid.is_ok() })
             }
             _ => None,
         };

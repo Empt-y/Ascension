@@ -18,7 +18,7 @@ id = "oak_1"
 kind = "tree"
 builder = "oak"
 seed = 1
-height = [6.0, 10.0]
+height = [6.0, 11.0]
 biomes = ["forest", "meadow"]
 
 [[model]]
@@ -26,7 +26,7 @@ id = "oak_2"
 kind = "tree"
 builder = "oak"
 seed = 2
-height = [6.0, 10.0]
+height = [6.0, 11.0]
 biomes = ["forest", "meadow"]
 
 [[model]]
@@ -34,7 +34,7 @@ id = "oak_3"
 kind = "tree"
 builder = "oak"
 seed = 3
-height = [6.0, 10.0]
+height = [6.0, 11.0]
 biomes = ["forest"]
 
 [[model]]
@@ -42,7 +42,7 @@ id = "maple_autumn_1"
 kind = "tree"
 builder = "maple"
 seed = 4
-height = [6.0, 10.0]
+height = [6.0, 11.0]
 biomes = ["forest"]
 
 [[model]]
@@ -156,7 +156,7 @@ id = "bush_2"
 kind = "shrub"
 builder = "bush"
 seed = 21
-height = [0.6, 1.8]
+height = [0.6, 2.0]
 biomes = ["meadow", "forest"]
 
 [[model]]
@@ -172,7 +172,7 @@ id = "berry_bush_1"
 kind = "shrub"
 builder = "berry_bush"
 seed = 23
-height = [0.6, 1.6]
+height = [0.6, 1.8]
 biomes = ["forest", "meadow"]
 
 [[model]]

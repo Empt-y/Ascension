@@ -50,7 +50,7 @@ def export(obj, path):
     bpy.ops.object.select_all(action="DESELECT")
     obj.select_set(True)
     bpy.context.view_layer.objects.active = obj
-    bpy.ops.export_scene.gltf(
+    options = dict(
         filepath=path,
         export_format="GLB",
         use_selection=True,
@@ -59,6 +59,10 @@ def export(obj, path):
         export_normals=True,
         export_materials="EXPORT",
     )
+    if obj.data.color_attributes:
+        # Vertex colours carry baked occlusion; the default only exports them when a material uses them.
+        options["export_vertex_color"] = "ACTIVE"
+    bpy.ops.export_scene.gltf(**options)
 
 
 def render_preview(obj, path):
