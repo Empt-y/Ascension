@@ -22,6 +22,9 @@ pub use worldgen::WorldGen;
 
 use std::sync::Arc;
 
+/// Bumped whenever worldgen changes what a seed produces, so saves can warn about mismatched terrain.
+pub const WORLDGEN_VERSION: u32 = 1;
+
 use glam::Vec3;
 
 /// Volume (m³) of each material, and of air, inside a sphere.

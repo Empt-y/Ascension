@@ -1,11 +1,14 @@
 //! Ascension game binary.
 
 mod app;
-#[allow(dead_code)] // wired up by mining in the next step
 mod content;
 mod hud;
 mod input;
+mod inventory;
+mod inventory_ui;
+mod mining;
 mod player;
+mod save;
 mod sim;
 mod streaming;
 

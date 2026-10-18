@@ -4,7 +4,8 @@ Live tests open windows and steal focus; never do that while the user is in a ga
 """
 import ctypes, ctypes.wintypes as wt, os, sys
 
-ALLOWED = {"claude.exe", "explorer.exe", "ascension.exe", "windowsterminal.exe", "code.exe", "fsh-shell.exe"}
+# prismlauncher.exe: the Minecraft launcher itself is fine (user, 2026-10-18); the game it starts is not.
+ALLOWED = {"claude.exe", "explorer.exe", "ascension.exe", "windowsterminal.exe", "code.exe", "fsh-shell.exe", "prismlauncher.exe"}
 
 user32, kernel32, psapi = ctypes.windll.user32, ctypes.windll.kernel32, ctypes.windll.psapi
 hwnd = user32.GetForegroundWindow()

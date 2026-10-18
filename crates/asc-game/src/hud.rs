@@ -1,4 +1,4 @@
-//! Debug HUD (F3) and crosshair.
+//! Debug HUD (F3).
 
 use asc_render::FrameStats;
 use glam::Vec3;
@@ -7,7 +7,11 @@ use crate::streaming::StreamStats;
 
 pub struct HudInfo {
     pub visible: bool,
-    pub captured: bool,
+    pub mode: &'static str,
+    pub grounded: bool,
+    pub speed: f32,
+    pub target: Option<&'static str>,
+    pub physics_ms: f32,
     pub frame_ms: f32,
     pub position: Vec3,
     pub frame: FrameStats,
@@ -30,12 +34,6 @@ fn clock(time_of_day: f32) -> String {
 }
 
 pub fn draw(ctx: &egui::Context, info: &HudInfo) {
-    if info.captured {
-        let center = ctx.content_rect().center();
-        let painter =
-            ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("crosshair")));
-        painter.circle_stroke(center, 3.0, egui::Stroke::new(1.5, egui::Color32::from_white_alpha(200)));
-    }
     if !info.visible {
         return;
     }
@@ -59,6 +57,14 @@ pub fn draw(ctx: &egui::Context, info: &HudInfo) {
             let p = info.position;
             ui.label(format!("pos {:.1} {:.1} {:.1}", p.x, p.y, p.z));
             ui.label(format!("time {}  tick {}", clock(info.time_of_day), info.ticks));
+            ui.label(format!(
+                "{}  {}  {:.1} m/s  physics {:.2} ms",
+                info.mode,
+                if info.grounded { "grounded" } else { "airborne" },
+                info.speed,
+                info.physics_ms
+            ));
+            ui.label(format!("looking at {}", info.target.unwrap_or("-")));
             ui.separator();
             ui.label(format!(
                 "chunks drawn {}  shadow {}",
@@ -80,9 +86,10 @@ pub fn draw(ctx: &egui::Context, info: &HudInfo) {
                 info.view_radius, info.brush_radius, info.fly_speed
             ));
             ui.separator();
-            ui.label("click: capture mouse   Esc: release / quit");
-            ui.label("WASD Space Ctrl: fly   Shift: fast   Alt+wheel: speed");
-            ui.label("LMB dig   RMB fill   wheel: brush size");
+            ui.label("click: capture mouse   Esc: release / quit   E: inventory   F: walk/fly");
+            ui.label("WASD: move   Space: jump (fly: up)   Shift: sprint   Ctrl: fly down");
+            ui.label("hold LMB: mine   RMB: place   1-9 / wheel: hotbar   F9: save");
+            ui.label("fly mode: LMB/RMB dig/fill brush, wheel brush size, Alt+wheel speed");
             ui.label("T / Shift+T: time   [ ]: view radius   F3 HUD   F6 vsync   F11 fullscreen");
             if info.hot_reload {
                 ui.label("F5: reload shaders");
