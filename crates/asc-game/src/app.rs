@@ -13,6 +13,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 use crate::content::Content;
+use crate::far::FarStreamer;
 use crate::hud::{self, HudInfo};
 use crate::input::Input;
 use crate::inventory::{HOTBAR, Inventory, Stack};
@@ -55,11 +56,14 @@ pub struct Options {
     pub seed: Option<i32>,
     /// Start with the inventory screen open (for screenshots).
     pub show_inventory: bool,
+    /// Draw the far-terrain clipmap (on by default).
+    pub far: bool,
+    pub fog_density: Option<f32>,
 }
 
 impl Options {
     pub fn from_args() -> anyhow::Result<Self> {
-        let mut opts = Self { world: "world1".into(), ..Self::default() };
+        let mut opts = Self { world: "world1".into(), far: true, ..Self::default() };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             let mut value = |name: &str| args.next().ok_or_else(|| anyhow::anyhow!("{name} needs a value"));
@@ -69,6 +73,14 @@ impl Options {
                 "--mine-test" => opts.mine_test = true,
                 "--new-world" => opts.new_world = true,
                 "--show-inventory" => opts.show_inventory = true,
+                "--far" => {
+                    opts.far = match value("--far")?.as_str() {
+                        "on" => true,
+                        "off" => false,
+                        other => anyhow::bail!("--far wants on or off, not {other}"),
+                    }
+                }
+                "--fog" => opts.fog_density = Some(value("--fog")?.parse()?),
                 "--world" => opts.world = value("--world")?,
                 "--saves-dir" => opts.saves_dir = Some(value("--saves-dir")?.into()),
                 "--seed" => opts.seed = Some(value("--seed")?.parse()?),
@@ -113,6 +125,7 @@ struct State {
     renderer: Renderer,
     world: World,
     streamer: Streamer,
+    far: FarStreamer,
     sim: Sim,
     player: Player,
     spawn: Vec3,
@@ -193,6 +206,11 @@ impl State {
             None => log::info!("new world {} (seed {seed})", save_dir.display()),
         }
         let streamer = Streamer::new(world.worldgen.clone(), options.view_radius.unwrap_or(10));
+        let far = FarStreamer::new(world.worldgen.clone());
+        renderer.set_far_enabled(options.far);
+        if let Some(d) = options.fog_density {
+            renderer.fog_density = d;
+        }
         let mut sim = Sim::default();
         if let Some(game) = &loaded {
             sim.ticks = game.meta.ticks;
@@ -236,6 +254,7 @@ impl State {
             renderer,
             world,
             streamer,
+            far,
             sim,
             player,
             spawn,
@@ -347,6 +366,10 @@ impl State {
         let (w, h) = self.renderer.gpu().size();
         let frustum = Frustum::from_view_proj(self.camera.view_proj(w as f32 / h as f32));
         self.streamer.update(&self.world, self.camera.position, &frustum, &mut self.renderer);
+        if self.renderer.far_enabled() {
+            let p = self.camera.position;
+            self.far.update(glam::Vec2::new(p.x, p.z), &mut self.renderer);
+        }
 
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let info = self.hud_info();
@@ -411,6 +434,15 @@ impl State {
             let [acq, sub, pre] = std::mem::take(&mut self.worst_gpu_wait);
             let s = self.streamer.stats();
             let physics_ms = std::mem::take(&mut self.worst_physics_ms);
+            let fs = self.far.stats();
+            log::info!(
+                "far: {} levels drawn, {}k tris | worker {} jobs in flight, {:.0}k samples/s, {}k total",
+                self.last_stats.far_levels,
+                self.last_stats.far_triangles / 1000,
+                fs.in_flight,
+                fs.samples_per_sec / 1000.0,
+                fs.samples / 1000,
+            );
             if self.options.mine_test {
                 log::info!(
                     "mine test: edits {} | inventory {}",
@@ -827,6 +859,7 @@ impl State {
             vsync: self.vsync,
             edits: self.world.edits.len(),
             gpu_name: self.renderer.gpu().adapter_info.name.clone(),
+            far: self.far.stats(),
             hot_reload: self.renderer.hot_reload_available(),
         }
     }

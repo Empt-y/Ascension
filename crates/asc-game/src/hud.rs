@@ -3,6 +3,7 @@
 use asc_render::FrameStats;
 use glam::Vec3;
 
+use crate::far::FarStats;
 use crate::streaming::StreamStats;
 
 pub struct HudInfo {
@@ -25,6 +26,7 @@ pub struct HudInfo {
     pub vsync: bool,
     pub edits: usize,
     pub gpu_name: String,
+    pub far: FarStats,
     pub hot_reload: bool,
 }
 
@@ -74,7 +76,17 @@ pub fn draw(ctx: &egui::Context, info: &HudInfo) {
                 "on gpu {}  tracked {}  queued {}  building {}",
                 info.gpu_chunks, s.loaded, s.queued, s.in_flight
             ));
-            ui.label(format!("triangles {}k", info.frame.triangles / 1000));
+            ui.label(format!(
+                "triangles {}k near + {}k far",
+                info.frame.triangles / 1000,
+                info.frame.far_triangles / 1000
+            ));
+            ui.label(format!(
+                "far levels {}/7  updating {}  {:.0}k samples/s",
+                info.frame.far_levels,
+                info.far.in_flight,
+                info.far.samples_per_sec / 1000.0
+            ));
             ui.label(format!("build {:.2} ms  mesh {:.2} ms", s.avg_build_ms, s.avg_mesh_ms));
             ui.label(format!(
                 "edits {}  last edit visible in {}",

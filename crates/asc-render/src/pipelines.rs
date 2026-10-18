@@ -12,6 +12,8 @@ pub struct Layouts {
     pub shadow: wgpu::BindGroupLayout,
     /// Two filterable textures and a linear sampler, for post-processing passes.
     pub textures: wgpu::BindGroupLayout,
+    /// Far terrain: the clipmap height array and the per-level table.
+    pub far: wgpu::BindGroupLayout,
 }
 
 fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -79,6 +81,31 @@ impl Layouts {
                 label: Some("shadow"),
                 entries: &[uniform_entry(0), storage_entry(1)],
             }),
+            far: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("far"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            }),
             textures: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("textures"),
                 entries: &[
@@ -99,6 +126,8 @@ pub struct Pipelines {
     pub bloom_down: wgpu::RenderPipeline,
     pub bloom_up: wgpu::RenderPipeline,
     pub post: wgpu::RenderPipeline,
+    pub far: wgpu::RenderPipeline,
+    pub water: wgpu::RenderPipeline,
 }
 
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] =
@@ -170,12 +199,15 @@ impl Pipelines {
         let sky_src = shaders.module(device, "sky")?;
         let bloom_src = shaders.module(device, "bloom")?;
         let post_src = shaders.module(device, "post")?;
+        let far_src = shaders.module(device, "far")?;
+        let water_src = shaders.module(device, "water")?;
 
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let b = Builder { device };
         let scene = b.layout(&[&layouts.scene]);
         let shadow_layout = b.layout(&[&layouts.shadow]);
         let textures = b.layout(&[&layouts.scene, &layouts.textures]);
+        let far_layout = b.layout(&[&layouts.scene, &layouts.far]);
         let vertex = [Some(wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<asc_world::Vertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -270,9 +302,46 @@ impl Pipelines {
             None,
             replace(surface_format),
         );
+        let far = b.pipeline(
+            "far terrain",
+            &far_layout,
+            &far_src,
+            ("vs_main", Some("fs_main")),
+            &[],
+            // Seen from above almost always; skipping culling avoids caring about grid winding.
+            wgpu::PrimitiveState::default(),
+            Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Greater),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            replace(HDR_FORMAT),
+        );
+        let water = b.pipeline(
+            "water",
+            &far_layout,
+            &water_src,
+            ("vs_main", Some("fs_main")),
+            &[],
+            wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
+            Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Greater),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            Some(wgpu::ColorTargetState {
+                format: HDR_FORMAT,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            }),
+        );
         if let Some(err) = pollster::block_on(scope.pop()) {
             bail!("building pipelines: {err}");
         }
-        Ok(Self { terrain, shadow, sky, bloom_prefilter, bloom_down, bloom_up, post })
+        Ok(Self { terrain, shadow, sky, bloom_prefilter, bloom_down, bloom_up, post, far, water })
     }
 }

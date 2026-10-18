@@ -2,6 +2,7 @@
 
 mod app;
 mod content;
+mod far;
 mod hud;
 mod input;
 mod inventory;

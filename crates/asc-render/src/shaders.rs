@@ -11,6 +11,8 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("sky", include_str!("../../../assets/shaders/sky.wgsl")),
     ("post", include_str!("../../../assets/shaders/post.wgsl")),
     ("bloom", include_str!("../../../assets/shaders/bloom.wgsl")),
+    ("far", include_str!("../../../assets/shaders/far.wgsl")),
+    ("water", include_str!("../../../assets/shaders/water.wgsl")),
 ];
 
 pub struct ShaderLib {

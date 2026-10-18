@@ -6,6 +6,8 @@
 
 mod arena;
 mod camera;
+pub mod clipmap;
+mod far;
 mod gpu;
 mod pipelines;
 mod shaders;
@@ -22,10 +24,15 @@ use winit::window::Window;
 
 use arena::Arena;
 pub use camera::{Camera, Frustum};
+use far::FarTerrain;
 pub use gpu::Gpu;
 use pipelines::{Layouts, Pipelines};
 pub use shaders::ShaderLib;
 use targets::{BLOOM_LEVELS, SHADOW_SIZE, Targets};
+
+/// With far terrain on, everything has faded into the sky by this distance (metres).
+pub const FAR_RANGE: f32 = 14_000.0;
+const DEFAULT_FOG_DENSITY: f32 = 0.00045;
 
 /// Half-width of the area around the camera covered by the sun's shadow map (metres).
 const SHADOW_RADIUS: f32 = 110.0;
@@ -42,6 +49,7 @@ struct Globals {
     fog: [f32; 4],
     screen: [f32; 4],
     brush: [f32; 4],
+    far: [f32; 4],
 }
 
 /// Build every pipeline against an sRGB target without a window. Used by tests.
@@ -71,6 +79,8 @@ pub struct UiFrame<'a> {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameStats {
     pub chunks_drawn: usize,
+    pub far_levels: usize,
+    pub far_triangles: usize,
     pub shadow_chunks: usize,
     pub triangles: usize,
     /// CPU time blocked acquiring the swapchain image, submitting, and presenting.
@@ -110,6 +120,8 @@ pub struct Renderer {
     chunks: AHashMap<ChunkCoord, GpuChunk>,
     vertices: Arena,
     indices: Arena,
+    far: FarTerrain,
+    pub fog_density: f32,
     // Per-frame scratch, kept to avoid allocating every frame.
     draw_list: Vec<(f32, ChunkCoord)>,
     shadow_list: Vec<ChunkCoord>,
@@ -161,6 +173,7 @@ impl Renderer {
         let vertex_size = std::mem::size_of::<asc_world::Vertex>() as u64;
         let vertices = Arena::new(device, "chunk vertices", wgpu::BufferUsages::VERTEX, vertex_size, 2 << 20);
         let indices = Arena::new(device, "chunk indices", wgpu::BufferUsages::INDEX, 4, 12 << 20);
+        let far = FarTerrain::new(device, &layouts.far);
         let egui = egui_wgpu::Renderer::new(device, gpu.ui_format(), egui_wgpu::RendererOptions::default());
 
         let (scene_bg, shadow_bg) =
@@ -187,6 +200,8 @@ impl Renderer {
             chunks: AHashMap::new(),
             vertices,
             indices,
+            far,
+            fog_density: DEFAULT_FOG_DENSITY,
             draw_list: Vec::new(),
             shadow_list: Vec::new(),
             offset_data: Vec::new(),
@@ -333,6 +348,19 @@ impl Renderer {
         }
     }
 
+    /// New samples for one far-terrain level; it switches to the window centred on `to`.
+    pub fn far_upload(&mut self, level: usize, to: glam::IVec2, rects: &[(clipmap::GridRect, Vec<f32>)]) {
+        self.far.upload(&self.gpu.queue, level, to, rects);
+    }
+
+    pub fn set_far_enabled(&mut self, enabled: bool) {
+        self.far.enabled = enabled;
+    }
+
+    pub fn far_enabled(&self) -> bool {
+        self.far.enabled
+    }
+
     pub fn chunk_count(&self) -> usize {
         self.chunks.len()
     }
@@ -384,16 +412,20 @@ impl Renderer {
             shadow_view_proj: shadow_view_proj.to_cols_array_2d(),
             camera: cam.position.extend(self.start.elapsed().as_secs_f32()).into(),
             sun: frame.sun_dir.extend(daylight).into(),
-            fog: [0.0022, 0.012, frame.view_distance, exposure],
+            fog: [self.fog_density, 0.012, frame.view_distance, exposure],
             screen: [width as f32, height as f32, 1.0 / width as f32, 1.0 / height as f32],
             brush: match frame.brush {
                 Some((center, radius)) => (center - cam.position).extend(radius).into(),
                 None => Vec4::ZERO.into(),
             },
+            far: [if self.far.enabled { FAR_RANGE } else { frame.view_distance }, 0.0, 0.0, 0.0],
         };
         let queue = &self.gpu.queue;
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
         queue.write_buffer(&self.offsets, 0, bytemuck::cast_slice(&self.offset_data));
+        self.far.write_levels(queue);
+        stats.far_levels = if self.far.enabled { self.far.ready_levels() } else { 0 };
+        stats.far_triangles = self.far.triangles();
 
         let device = &self.gpu.device;
         let mut encoder =
@@ -558,8 +590,14 @@ impl Renderer {
         for (i, (_, coord)) in self.draw_list.iter().enumerate() {
             self.draw_chunk(&mut pass, *coord, i as u32);
         }
+        // Far terrain after the chunks, so the depth test lets chunks win wherever they exist.
+        pass.set_pipeline(&self.pipelines.far);
+        self.far.draw(&mut pass);
         pass.set_pipeline(&self.pipelines.sky);
         pass.draw(0..3, 0..1);
+        // Water last: it blends over terrain and sky and doesn't write depth.
+        pass.set_pipeline(&self.pipelines.water);
+        self.far.draw_water(&mut pass);
     }
 
     fn bloom_passes(&self, encoder: &mut wgpu::CommandEncoder) {

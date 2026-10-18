@@ -12,8 +12,11 @@ use crate::chunk::{CHUNK, ChunkCoord, ChunkData, SAMPLES};
 use crate::edit::DENSITY_CLAMP;
 use crate::material::Material;
 
-/// Surfaces below this height are beaches.
+/// Surfaces within a few metres of this height are sandy shores. Deeper basins are lowland
+/// meadows rather than vast sand plains (there is no water yet to make them seas).
 const SEA_LEVEL: f32 = 2.0;
+const SHORE_BELOW: f32 = 4.0;
+const SHORE_ABOVE: f32 = 1.0;
 const SNOW_LINE: f32 = 140.0;
 
 pub struct WorldGen {
@@ -169,7 +172,7 @@ impl WorldGen {
 
     fn material(&self, p: Vec3, col: &Column) -> Material {
         let depth = col.height - p.y;
-        let beach = col.height < SEA_LEVEL + 1.5;
+        let beach = col.height < SEA_LEVEL + SHORE_ABOVE && col.height > SEA_LEVEL - SHORE_BELOW;
         if depth > 5.0 {
             if self.ore.get_noise_3d(p.x, p.y, p.z) > 0.72 {
                 return Material::CopperOre;

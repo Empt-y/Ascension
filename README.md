@@ -4,9 +4,10 @@ A GTNH-style progression and factory game in a custom Rust engine. It plays like
 crafting, a deep tech tree) but the world isn't made of blocks: it's a smooth, diggable density field,
 closer to No Man's Sky. Single-player.
 
-**Status: Milestone 2.** You walk an infinite procedural world. You mine it at a speed set by each
-material's hardness, collect what you dig into an inventory, place it back, and your world saves.
-It renders with sky, sun shadows, fog, bloom and day/night.
+**Status: Milestone 2.5.** You walk an infinite procedural world that you can see kilometres into,
+with lakes and seas in the lowlands. You mine it at a speed set by each material's hardness,
+collect what you dig into an inventory, place it back, and your world saves. It renders with sky,
+sun shadows, haze, bloom and day/night.
 
 ## Running
 
@@ -46,6 +47,8 @@ Command-line options:
 - `--walk-test`: sprint and jump across the terrain, logging collision clearance
 - `--mine-test`: mine and then place unattended, logging the inventory
 - `--show-inventory`: start with the inventory open
+- `--far on|off`: far terrain and water (default on)
+- `--fog <density>`: haze density (default 0.00045)
 - `--exit-after <s>`: quit after that many seconds
 - `--time <0..1>`: start time of day (0 midnight, 0.5 noon)
 - `--camera x,y,z,yaw,pitch`: starting pose
@@ -119,6 +122,21 @@ tools/             check.sh (fmt + clippy + tests), fg_check.py, screenshot.py, 
 ## Rendering
 
 - Everything is drawn camera-relative with reversed-Z depth.
+- **Far terrain** is a geometry clipmap of the height field: 7 nested rings with spacing 2 m to
+  128 m, 253×253 vertices each, so the world reaches about 12 km before it fades into the sky.
+  - Heights live in a toroidal texture array that one low-priority worker refreshes as you move.
+    Coarse levels go first, a level switches window only once its whole update is ready, and a
+    hysteresis rule stops re-centring when you stand on a snap boundary.
+  - The outer band of each ring morphs into the next coarser one, so edges meet without cracks.
+  - Inside the 320 m chunk radius only the full-detail chunks are drawn. In a 24 m overlap band
+    the far surface sits 0.4 m lower so chunks always win.
+  - It uses the same material rules and lighting (`shade_terrain` in `common.wgsl`), so near and
+    far match.
+  - It ignores edits and cave mouths. Beyond 320 m they're too small to matter.
+- **Water** is one flat surface at sea level (2 m) with ripples, sky reflection with Fresnel and a
+  sun glint. Its depth comes from the far height textures, which gives shore fades and deep-water
+  colour, and dry land (including pits dug below sea level) gets no water. It's visual only for
+  now: there's no swimming yet.
 - **Scene pass (HDR):** triplanar procedural terrain with GGX specular, a hemisphere ambient term
   and moonlight.
 - **Shadows:** a 2048² texel-snapped sun shadow map, filtered with 3×3 PCF.
@@ -131,17 +149,20 @@ tools/             check.sh (fmt + clippy + tests), fg_check.py, screenshot.py, 
 
 Measured on an RTX 3070 Laptop at 1920×991, release build, view radius 10 chunks (320 m):
 
-- **Frame rate:** about 350–420 fps flying at 40 m/s while streaming, and about 300–440 fps
-  walking or mining.
-- **Worst frame:** about 5–11 ms per 2 s window, once the first load is done.
+- **Frame rate:** about 270–330 fps flying at 40 m/s with far terrain and water (889k far
+  triangles). That's about 0.4 ms more than `--far off` (330–350 fps).
+- **Worst frame:** about 5–7 ms in most 2 s windows, with spikes up to about 24 ms where chunk
+  streaming is heaviest; `--far off` shows similar spikes in the same spots.
+- **Far terrain:** a full refresh is about 455k height samples (0.15 s at about 3 M samples/s on
+  one worker). Moving costs a few thousand samples per second.
 - **Chunk build:** about 4–6 ms each on a worker, plus about 0.5 ms to mesh. A chunk with 1000
   mining bites rebuilds in about 8 ms.
-- **Physics:** 0.05–0.25 ms per 60 Hz step. `density_at` costs about 1.75 µs per call.
+- **Physics:** 0.05–0.25 ms per 60 Hz step.
 - **Edits:** a bite is visible 7–15 ms after it completes. A save takes 2–5 ms.
 
 ## Next
 
-- **M2.5, level of detail:** clipmap or octree LOD with seam stitching, so mountains are visible
-  beyond 320 m.
 - **M3, building:** machines placed on grid-snapped foundations, and connection detection.
-- **Later:** per-material textures, grass and rock scatter, and tool tiers that change mining speed.
+- **Water gameplay:** swimming, and an underwater view.
+- **Later:** per-material textures, grass and rock scatter, tool tiers that change mining speed,
+  and showing edits in far terrain.

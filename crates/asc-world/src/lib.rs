@@ -23,7 +23,7 @@ pub use worldgen::WorldGen;
 use std::sync::Arc;
 
 /// Bumped whenever worldgen changes what a seed produces, so saves can warn about mismatched terrain.
-pub const WORLDGEN_VERSION: u32 = 2;
+pub const WORLDGEN_VERSION: u32 = 3;
 
 use glam::Vec3;
 
