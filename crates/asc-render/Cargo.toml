@@ -18,6 +18,7 @@ egui-wgpu.workspace = true
 log.workspace = true
 anyhow.workspace = true
 ahash.workspace = true
+gltf.workspace = true
 pollster.workspace = true
 
 [dev-dependencies]

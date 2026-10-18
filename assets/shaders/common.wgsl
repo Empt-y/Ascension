@@ -22,6 +22,9 @@ struct Globals {
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;
+// Sun shadow map, used by anything drawn in the scene pass with the scene layout.
+@group(0) @binding(2) var shadow_map: texture_depth_2d;
+@group(0) @binding(3) var shadow_sampler: sampler_comparison;
 
 const PI: f32 = 3.14159265;
 
@@ -85,7 +88,11 @@ fn sun_light() -> vec3<f32> {
     let warm = vec3(1.0, 0.55, 0.28);
     let white = vec3(1.0, 0.95, 0.86);
     let c = mix(white, warm, sunset_amount());
-    return c * 3.2 * smoothstep(-0.05, 0.12, sun_dir().y);
+    let y = sun_dir().y;
+    // A low sun shines through far more air, so it dims well before it sets (atmospheric
+    // extinction); otherwise walls facing a sunset blow out to white.
+    let extinction = mix(0.3, 1.0, smoothstep(0.0, 0.5, y));
+    return c * 3.2 * extinction * smoothstep(-0.05, 0.12, y);
 }
 
 // Stylised sky: gradient from horizon to zenith, warm glow around the sun at dusk, no sun disk.
@@ -238,7 +245,8 @@ fn terrain_surface(wa: vec4<f32>, wb: vec4<f32>, world: vec3<f32>, n: vec3<f32>,
     return s;
 }
 
-fn ggx_specular(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, roughness: f32) -> f32 {
+// GGX specular lobe times n.l, without Fresnel (the caller applies it, so metals can tint it).
+fn ggx_lobe(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, roughness: f32) -> f32 {
     let h = normalize(v + l);
     let a = roughness * roughness;
     let a2 = a * a;
@@ -248,13 +256,33 @@ fn ggx_specular(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, roughness: f32) -> f32
     let ndv = max(dot(n, v), 1e-3);
     let k = a * 0.5;
     let g = (ndl / (ndl * (1.0 - k) + k)) * (ndv / (ndv * (1.0 - k) + k));
-    let fresnel = 0.04 + 0.96 * pow(1.0 - max(dot(h, v), 0.0), 5.0);
-    return d * g * fresnel / max(4.0 * ndl * ndv, 1e-3) * ndl;
+    return d * g / max(4.0 * ndl * ndv, 1e-3) * ndl;
 }
 
-// Sun, sky ambient and moonlight on a terrain surface. Shared by near chunks and far terrain so the
-// two match where they meet.
-fn shade_terrain(s: Surface, n: vec3<f32>, rel: vec3<f32>, occlusion: f32, shadow: f32) -> vec3<f32> {
+fn fresnel_schlick(f0: vec3<f32>, v: vec3<f32>, h: vec3<f32>) -> vec3<f32> {
+    return f0 + (1.0 - f0) * pow(1.0 - max(dot(h, v), 0.0), 5.0);
+}
+
+fn shadow_factor(rel: vec3<f32>, n: vec3<f32>) -> f32 {
+    // Normal offset hides acne on slopes facing away from the sun.
+    let p = globals.shadow_view_proj * vec4(rel + n * 0.35, 1.0);
+    let uv = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+    if any(uv < vec2(0.0)) || any(uv > vec2(1.0)) || p.z > 1.0 {
+        return 1.0;
+    }
+    let texel = 1.0 / f32(textureDimensions(shadow_map).x);
+    var lit = 0.0;
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2(f32(x), f32(y)) * texel, p.z - 0.0015);
+        }
+    }
+    return lit / 9.0;
+}
+
+// Sun, sky ambient and moonlight on any opaque surface (metallic-roughness PBR, stylised ambient).
+// Shared by terrain, far terrain and building parts so they all sit in the same light.
+fn shade_pbr(albedo: vec3<f32>, roughness: f32, metallic: f32, n: vec3<f32>, rel: vec3<f32>, occlusion: f32, shadow: f32) -> vec3<f32> {
     let l = sun_dir();
     let v = normalize(-rel);
     let ndl = max(dot(n, l), 0.0);
@@ -267,9 +295,18 @@ fn shade_terrain(s: Surface, n: vec3<f32>, rel: vec3<f32>, occlusion: f32, shado
     let ambient = mix(ground_amb, sky_amb, n.y * 0.5 + 0.5) * occlusion;
     // Faint, unshadowed moonlight from opposite the sun so nights aren't black.
     let moon = vec3(0.05, 0.065, 0.12) * (1.0 - daylight()) * max(dot(n, -l), 0.0);
-    var color = s.albedo * (sun * ndl + ambient + moon);
-    color += sun * ggx_specular(n, v, l, s.roughness);
+    let diffuse = albedo * (1.0 - metallic);
+    let f0 = mix(vec3(0.04), albedo, metallic);
+    let fres = fresnel_schlick(f0, v, normalize(v + l));
+    var color = diffuse * (sun * ndl + ambient + moon);
+    // Metals have no diffuse, so give them a dim reflection of the ambient instead.
+    color += f0 * ambient * metallic * 0.8;
+    color += sun * fres * ggx_lobe(n, v, l, roughness);
     return color;
+}
+
+fn shade_terrain(s: Surface, n: vec3<f32>, rel: vec3<f32>, occlusion: f32, shadow: f32) -> vec3<f32> {
+    return shade_pbr(s.albedo, s.roughness, 0.0, n, rel, occlusion, shadow);
 }
 
 // Full-screen triangle from the vertex index.

@@ -14,6 +14,8 @@ pub struct Layouts {
     pub textures: wgpu::BindGroupLayout,
     /// Far terrain: the clipmap height array and the per-level table.
     pub far: wgpu::BindGroupLayout,
+    /// One building-part material (uniform).
+    pub material: wgpu::BindGroupLayout,
 }
 
 fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -81,6 +83,10 @@ impl Layouts {
                 label: Some("shadow"),
                 entries: &[uniform_entry(0), storage_entry(1)],
             }),
+            material: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("part material"),
+                entries: &[uniform_entry(0)],
+            }),
             far: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("far"),
                 entries: &[
@@ -128,6 +134,9 @@ pub struct Pipelines {
     pub post: wgpu::RenderPipeline,
     pub far: wgpu::RenderPipeline,
     pub water: wgpu::RenderPipeline,
+    pub parts: wgpu::RenderPipeline,
+    pub parts_shadow: wgpu::RenderPipeline,
+    pub ghost: wgpu::RenderPipeline,
 }
 
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] =
@@ -203,6 +212,7 @@ impl Pipelines {
         let post_src = shaders.module(device, "post")?;
         let far_src = shaders.module(device, "far")?;
         let water_src = shaders.module(device, "water")?;
+        let parts_src = shaders.module(device, "parts")?;
 
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let b = Builder { device, samples: 1 };
@@ -212,6 +222,7 @@ impl Pipelines {
         let shadow_layout = b.layout(&[&layouts.shadow]);
         let textures = b.layout(&[&layouts.scene, &layouts.textures]);
         let far_layout = b.layout(&[&layouts.scene, &layouts.far]);
+        let parts_layout = b.layout(&[&layouts.scene, &layouts.material]);
         let vertex = [Some(wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<asc_world::Vertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -343,9 +354,75 @@ impl Pipelines {
                 write_mask: wgpu::ColorWrites::ALL,
             }),
         );
+        let part_buffers = crate::parts::vertex_layouts();
+        let parts = scene_builder.pipeline(
+            "parts",
+            &parts_layout,
+            &parts_src,
+            ("vs_main", Some("fs_main")),
+            &part_buffers,
+            back_culled,
+            Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Greater),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            replace(HDR_FORMAT),
+        );
+        let parts_shadow = b.pipeline(
+            "parts shadow",
+            &shadow_layout,
+            &parts_src,
+            ("vs_shadow", None),
+            &part_buffers,
+            wgpu::PrimitiveState::default(),
+            Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
+            }),
+            None,
+        );
+        let ghost = scene_builder.pipeline(
+            "ghost",
+            &parts_layout,
+            &parts_src,
+            ("vs_main", Some("fs_ghost")),
+            &part_buffers,
+            wgpu::PrimitiveState::default(),
+            Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Greater),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            Some(wgpu::ColorTargetState {
+                format: HDR_FORMAT,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            }),
+        );
         if let Some(err) = pollster::block_on(scope.pop()) {
             bail!("building pipelines: {err}");
         }
-        Ok(Self { terrain, shadow, sky, bloom_prefilter, bloom_down, bloom_up, post, far, water })
+        Ok(Self {
+            terrain,
+            shadow,
+            sky,
+            bloom_prefilter,
+            bloom_down,
+            bloom_up,
+            post,
+            far,
+            water,
+            parts,
+            parts_shadow,
+            ghost,
+        })
     }
 }

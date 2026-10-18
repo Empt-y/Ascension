@@ -9,6 +9,8 @@ mod camera;
 pub mod clipmap;
 mod far;
 mod gpu;
+pub mod models;
+mod parts;
 mod pipelines;
 mod shaders;
 mod targets;
@@ -26,6 +28,8 @@ use arena::Arena;
 pub use camera::{Camera, Frustum};
 use far::FarTerrain;
 pub use gpu::Gpu;
+use parts::Parts;
+pub use parts::{Ghost, ModelId, PartInstance};
 use pipelines::{Layouts, Pipelines};
 pub use shaders::ShaderLib;
 use targets::{BLOOM_LEVELS, SHADOW_SIZE, Targets};
@@ -81,6 +85,7 @@ pub struct UiFrame<'a> {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameStats {
     pub chunks_drawn: usize,
+    pub parts_drawn: usize,
     pub far_levels: usize,
     pub far_triangles: usize,
     pub shadow_chunks: usize,
@@ -123,6 +128,7 @@ pub struct Renderer {
     vertices: Arena,
     indices: Arena,
     far: FarTerrain,
+    parts: Parts,
     pub fog_density: f32,
     msaa: u32,
     // Per-frame scratch, kept to avoid allocating every frame.
@@ -178,6 +184,7 @@ impl Renderer {
         let vertices = Arena::new(device, "chunk vertices", wgpu::BufferUsages::VERTEX, vertex_size, 2 << 20);
         let indices = Arena::new(device, "chunk indices", wgpu::BufferUsages::INDEX, 4, 12 << 20);
         let far = FarTerrain::new(device, &layouts.far);
+        let parts = Parts::new(device);
         let egui = egui_wgpu::Renderer::new(device, gpu.ui_format(), egui_wgpu::RendererOptions::default());
 
         let (scene_bg, shadow_bg) =
@@ -205,6 +212,7 @@ impl Renderer {
             vertices,
             indices,
             far,
+            parts,
             fog_density: DEFAULT_FOG_DENSITY,
             msaa,
             draw_list: Vec::new(),
@@ -384,6 +392,24 @@ impl Renderer {
         self.far.upload(&self.gpu.queue, level, to, rects);
     }
 
+    /// Upload a model for drawing as building parts.
+    pub fn add_model(&mut self, model: &models::ModelData) -> ModelId {
+        self.parts.add_model(&self.gpu.device, &self.layouts.material, model)
+    }
+
+    /// Every placed part. Call when the set changes.
+    pub fn set_parts(&mut self, instances: &[PartInstance]) {
+        self.parts.set_instances(instances);
+    }
+
+    pub fn parts_count(&self) -> usize {
+        self.parts.count()
+    }
+
+    pub fn set_ghost(&mut self, ghost: Option<Ghost>) {
+        self.parts.set_ghost(ghost);
+    }
+
     pub fn set_far_enabled(&mut self, enabled: bool) {
         self.far.enabled = enabled;
     }
@@ -436,7 +462,9 @@ impl Renderer {
         stats.acquire_ms = t_acquire.elapsed().as_secs_f32() * 1e3;
 
         let daylight = smoothstep(-0.08, 0.25, frame.sun_dir.y);
-        let exposure = 1.0 + (1.0 - daylight) * 1.0;
+        // Open the exposure up only once it's actually getting dark, not while a low sun is still up.
+        let night = 1.0 - smoothstep(-0.15, 0.03, frame.sun_dir.y);
+        let exposure = 1.0 + night;
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             inv_view_proj: view_proj.inverse().to_cols_array_2d(),
@@ -455,6 +483,8 @@ impl Renderer {
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
         queue.write_buffer(&self.offsets, 0, bytemuck::cast_slice(&self.offset_data));
         self.far.write_levels(queue);
+        self.parts.prepare(&self.gpu.device, queue, cam.position, view_proj, SHADOW_RADIUS * 1.5 + 8.0);
+        stats.parts_drawn = self.parts.drawn;
         stats.far_levels = if self.far.enabled { self.far.ready_levels() } else { 0 };
         stats.far_triangles = self.far.triangles();
 
@@ -589,6 +619,8 @@ impl Renderer {
         for (i, coord) in self.shadow_list.iter().enumerate() {
             self.draw_chunk(&mut pass, *coord, base + i as u32);
         }
+        pass.set_pipeline(&self.pipelines.parts_shadow);
+        self.parts.draw_shadows(&mut pass);
     }
 
     fn scene_pass(&self, encoder: &mut wgpu::CommandEncoder) {
@@ -633,6 +665,8 @@ impl Renderer {
         for (i, (_, coord)) in self.draw_list.iter().enumerate() {
             self.draw_chunk(&mut pass, *coord, i as u32);
         }
+        pass.set_pipeline(&self.pipelines.parts);
+        self.parts.draw(&mut pass);
         // Far terrain after the chunks, so the depth test lets chunks win wherever they exist.
         pass.set_pipeline(&self.pipelines.far);
         self.far.draw(&mut pass);
@@ -641,6 +675,10 @@ impl Renderer {
         // Water last: it blends over terrain and sky and doesn't write depth.
         pass.set_pipeline(&self.pipelines.water);
         self.far.draw_water(&mut pass);
+        // The placement ghost blends over everything, including water.
+        pass.set_bind_group(0, &self.scene_bg, &[]);
+        pass.set_pipeline(&self.pipelines.ghost);
+        self.parts.draw_ghost(&mut pass);
     }
 
     fn bloom_passes(&self, encoder: &mut wgpu::CommandEncoder) {

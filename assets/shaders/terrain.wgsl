@@ -2,8 +2,6 @@
 
 // Camera-relative origin of each drawn chunk, indexed by instance.
 @group(0) @binding(1) var<storage, read> chunk_offsets: array<vec4<f32>>;
-@group(0) @binding(2) var shadow_map: texture_depth_2d;
-@group(0) @binding(3) var shadow_sampler: sampler_comparison;
 
 struct VsIn {
     @location(0) position: vec3<f32>,
@@ -33,23 +31,6 @@ fn vs_main(in: VsIn) -> VsOut {
     out.weights_a = in.weights_a;
     out.weights_b = in.weights_b;
     return out;
-}
-
-fn shadow_factor(rel: vec3<f32>, n: vec3<f32>) -> f32 {
-    // Normal offset hides acne on slopes facing away from the sun.
-    let p = globals.shadow_view_proj * vec4(rel + n * 0.35, 1.0);
-    let uv = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
-    if any(uv < vec2(0.0)) || any(uv > vec2(1.0)) || p.z > 1.0 {
-        return 1.0;
-    }
-    let texel = 1.0 / f32(textureDimensions(shadow_map).x);
-    var lit = 0.0;
-    for (var y = -1; y <= 1; y++) {
-        for (var x = -1; x <= 1; x++) {
-            lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2(f32(x), f32(y)) * texel, p.z - 0.0015);
-        }
-    }
-    return lit / 9.0;
 }
 
 @fragment

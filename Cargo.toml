@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/asc-world", "crates/asc-render", "crates/asc-game"]
+members = ["crates/asc-world", "crates/asc-render", "crates/asc-build", "crates/asc-game"]
 
 [workspace.package]
 version = "0.1.0"
@@ -16,6 +16,7 @@ all = { level = "warn", priority = -1 }
 [workspace.dependencies]
 asc-world = { path = "crates/asc-world" }
 asc-render = { path = "crates/asc-render" }
+asc-build = { path = "crates/asc-build" }
 wgpu = "30"
 winit = "0.30"
 glam = { version = "0.30", features = ["bytemuck", "serde"] }
@@ -33,6 +34,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 postcard = { version = "1", features = ["use-std"] }
 dirs = "6"
+gltf = { version = "1.4", default-features = false, features = ["import", "utils"] }
 pollster = "0.4"
 thread-priority = "3"
 

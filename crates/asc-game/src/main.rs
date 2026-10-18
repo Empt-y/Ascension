@@ -1,6 +1,7 @@
 //! Ascension game binary.
 
 mod app;
+mod assets;
 mod content;
 mod far;
 mod hud;

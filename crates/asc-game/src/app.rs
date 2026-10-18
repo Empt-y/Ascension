@@ -12,6 +12,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
+use crate::assets::PartModels;
 use crate::content::Content;
 use crate::far::FarStreamer;
 use crate::hud::{self, HudInfo};
@@ -61,6 +62,8 @@ pub struct Options {
     pub fog_density: Option<f32>,
     /// Scene MSAA samples (1 or 4).
     pub msaa: Option<u32>,
+    /// Lay out every building part near spawn (for screenshots).
+    pub showcase: bool,
 }
 
 impl Options {
@@ -84,6 +87,7 @@ impl Options {
                 }
                 "--fog" => opts.fog_density = Some(value("--fog")?.parse()?),
                 "--msaa" => opts.msaa = Some(value("--msaa")?.parse()?),
+                "--showcase" => opts.showcase = true,
                 "--world" => opts.world = value("--world")?,
                 "--saves-dir" => opts.saves_dir = Some(value("--saves-dir")?.into()),
                 "--seed" => opts.seed = Some(value("--seed")?.parse()?),
@@ -133,6 +137,7 @@ struct State {
     player: Player,
     spawn: Vec3,
     content: Content,
+    parts: PartModels,
     inventory: Inventory,
     mining: Mining,
     held: Option<Stack>,
@@ -210,6 +215,7 @@ impl State {
         }
         let streamer = Streamer::new(world.worldgen.clone(), options.view_radius.unwrap_or(10));
         let far = FarStreamer::new(world.worldgen.clone());
+        let parts = PartModels::load(&mut renderer)?;
         renderer.set_far_enabled(options.far);
         if let Some(samples) = options.msaa {
             renderer.set_msaa(samples)?;
@@ -265,6 +271,7 @@ impl State {
             player,
             spawn,
             content,
+            parts,
             inventory,
             mining: Mining::default(),
             held: None,
@@ -828,6 +835,31 @@ impl State {
         self.last_edit = Instant::now();
     }
 
+    /// Every tier (rows) and part (columns) laid out in front of the spawn point.
+    fn showcase(&mut self) {
+        use asc_build::PartKind;
+        let mut instances = Vec::new();
+        let origin = self.spawn + Vec3::new(6.0, 0.0, -4.5);
+        for tier in 0..self.parts.spec.tiers.len() {
+            for (col, kind) in PartKind::ALL.into_iter().enumerate() {
+                let x = origin.x + col as f32 * 3.0;
+                let z = origin.z + tier as f32 * 3.0;
+                let ground = find_ground(&self.world, x, z).y;
+                let y = match kind {
+                    PartKind::Ceiling => ground + 1.4,
+                    _ => ground,
+                };
+                instances.push(asc_render::PartInstance {
+                    model: self.parts.model(tier, kind),
+                    position: Vec3::new(x, y, z),
+                    rotation: 3,
+                });
+            }
+        }
+        log::info!("showcase: {} parts", instances.len());
+        self.renderer.set_parts(&instances);
+    }
+
     fn inventory_summary(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
         for (i, item) in self.content.items.iter().enumerate() {
@@ -885,8 +917,11 @@ impl ApplicationHandler for App {
             .map_err(anyhow::Error::from)
             .and_then(|window| State::new(Arc::new(window), self.options.clone()));
         match result {
-            Ok(state) => {
+            Ok(mut state) => {
                 log::info!("inventory: {} | player at {:.1}", state.inventory_summary(), state.player.feet);
+                if state.options.showcase {
+                    state.showcase();
+                }
                 self.state = Some(state);
             }
             Err(err) => {

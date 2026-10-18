@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 asc-world.workspace = true
 asc-render.workspace = true
+asc-build.workspace = true
 winit.workspace = true
 glam.workspace = true
 crossbeam-channel.workspace = true
