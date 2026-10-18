@@ -158,6 +158,7 @@ struct State {
     spawn: Vec3,
     content: Content,
     parts: PartModels,
+    nature: crate::assets::NatureModels,
     building: Building,
     build_tool: Option<BuildTool>,
     previews: Option<Vec<[egui::TextureHandle; 3]>>,
@@ -243,6 +244,7 @@ impl State {
         let streamer = Streamer::new(world.worldgen.clone(), options.view_radius.unwrap_or(10));
         let far = FarStreamer::new(world.worldgen.clone());
         let parts = PartModels::load(&mut renderer)?;
+        let nature = crate::assets::NatureModels::load(&mut renderer)?;
         let lattice = asc_build::Lattice::new(&parts.spec);
         let structures = match &loaded {
             Some(game) => asc_build::Structures::from_pieces(lattice, game.structures.iter().copied()),
@@ -306,6 +308,7 @@ impl State {
             spawn,
             content,
             parts,
+            nature,
             building,
             build_tool: None,
             previews: None,
@@ -1264,7 +1267,27 @@ impl State {
                 });
             }
         }
-        log::info!("showcase: {} parts", instances.len());
+        // Nature models in a row per kind behind the parts, spaced by how big that kind is.
+        let mut z = origin.z + self.parts.spec.tiers.len() as f32 * 3.0 + 4.0;
+        for (kind, spacing) in
+            [("tree", 9.0), ("shrub", 3.0), ("plant", 1.6), ("grass", 1.2), ("rock", 3.0), ("debris", 4.0)]
+        {
+            let all: Vec<_> = self.nature.models.iter().filter(|(s, _)| s.kind == kind).collect();
+            for row in all.chunks(8) {
+                z += spacing * 0.5;
+                for (i, (_, model)) in row.iter().enumerate() {
+                    let x = origin.x + (i as f32 - row.len() as f32 / 2.0) * spacing;
+                    let ground = find_ground(&self.world, x, z).y;
+                    instances.push(asc_render::PartInstance {
+                        model: *model,
+                        position: Vec3::new(x, ground, z),
+                        rotation: (i % 4) as u8,
+                    });
+                }
+                z += spacing * 0.5;
+            }
+        }
+        log::info!("showcase: {} parts and nature models", instances.len());
         self.renderer.set_parts(&instances);
     }
 

@@ -1,4 +1,4 @@
-//! Finding the `assets` directory and loading the building-part models from it.
+//! Finding the `assets` directory and loading the building-part and nature models from it.
 
 use std::path::PathBuf;
 
@@ -64,6 +64,47 @@ impl PartModels {
     pub fn model(&self, tier: usize, kind: PartKind) -> ModelId {
         let slot = PartKind::ALL.iter().position(|k| *k == kind).unwrap_or(0);
         self.models[tier][slot]
+    }
+}
+
+/// One entry of `nature.toml`: a scatter model and where it grows.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct NatureSpec {
+    pub id: String,
+    pub kind: String,
+}
+
+#[derive(serde::Deserialize)]
+struct NatureFile {
+    model: Vec<NatureSpec>,
+}
+
+/// The natural scatter models (trees, plants, rocks...) and their renderer ids, in spec order.
+pub struct NatureModels {
+    pub models: Vec<(NatureSpec, ModelId)>,
+}
+
+impl NatureModels {
+    pub fn load(renderer: &mut Renderer) -> Result<Self> {
+        let root = root()?;
+        let spec_path = root.join("data").join("nature.toml");
+        let file: NatureFile = toml::from_str(
+            &std::fs::read_to_string(&spec_path)
+                .with_context(|| format!("reading {}", spec_path.display()))?,
+        )
+        .with_context(|| format!("parsing {}", spec_path.display()))?;
+        let mut models = Vec::new();
+        let mut triangles = 0;
+        for spec in file.model {
+            let path = root.join("models").join("nature").join(format!("{}.glb", spec.id));
+            let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            let data = asc_render::models::load_glb(&bytes)
+                .with_context(|| format!("loading {}", path.display()))?;
+            triangles += data.triangles();
+            models.push((spec, renderer.add_model(&data)));
+        }
+        log::info!("loaded {} nature models ({triangles} triangles)", models.len());
+        Ok(Self { models })
     }
 }
 
