@@ -46,14 +46,33 @@ pub fn gradient(density: &impl Fn(Vec3) -> f32, p: Vec3, eps: f32) -> Vec3 {
     K.iter().map(|k| *k * density(p + *k * eps)).sum()
 }
 
+/// Estimated true distance to the surface: density divided by its gradient's length.
+pub fn distance_estimate(density: &impl Fn(Vec3) -> f32, p: Vec3) -> f32 {
+    const EPS: f32 = 0.1;
+    let len = (gradient(density, p, EPS) / (4.0 * EPS)).length();
+    density(p) / len.max(0.1)
+}
+
 /// If a sphere overlaps the ground, how to push it out.
+///
+/// Worldgen density is only roughly a distance: near caves its gradient can be 1.5x steeper, and deep
+/// inside the ground it is clamped flat. Dividing by the gradient's length turns it into a proper
+/// distance estimate; a flat (clamped) field means "deep inside", reported with `depth > radius`.
 pub fn push_sphere(density: &impl Fn(Vec3) -> f32, center: Vec3, radius: f32) -> Option<Contact> {
+    const EPS: f32 = 0.1;
     let d = density(center);
-    if d >= radius {
+    // Cheap early out, assuming the field is never less than half as steep as a true distance.
+    if d >= radius * 2.0 {
         return None;
     }
-    let normal = gradient(density, center, 0.1).normalize_or(Vec3::Y);
-    Some(Contact { normal, depth: radius - d })
+    let g = gradient(density, center, EPS) / (4.0 * EPS);
+    let len = g.length();
+    if len < 0.1 {
+        // Clamped region: far inside solid ground (or far out in air, which the early out caught).
+        return (d < 0.0).then_some(Contact { normal: Vec3::Y, depth: radius + 1.0 });
+    }
+    let distance = d / len;
+    (distance < radius).then(|| Contact { normal: g / len, depth: radius - distance })
 }
 
 /// Push a capsule out of the ground. Returns the corrected feet position and the contacts found

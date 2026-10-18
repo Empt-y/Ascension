@@ -1,0 +1,32 @@
+# Items. `color` (linear RGB) stands in for an icon until there is art.
+# `places` names the terrain material the item fills with when placed; omit it for items that can't
+# be placed. `stack` defaults to 64.
+
+[[item]]
+id = "soil"
+name = "Soil"
+color = [0.30, 0.19, 0.10]
+places = "soil"
+
+[[item]]
+id = "rock"
+name = "Rock"
+color = [0.36, 0.34, 0.33]
+places = "rock"
+
+[[item]]
+id = "sand"
+name = "Sand"
+color = [0.80, 0.70, 0.46]
+places = "sand"
+
+[[item]]
+id = "snow"
+name = "Snow"
+color = [0.88, 0.90, 0.96]
+places = "snow"
+
+[[item]]
+id = "copper_ore"
+name = "Copper Ore"
+color = [0.85, 0.42, 0.18]

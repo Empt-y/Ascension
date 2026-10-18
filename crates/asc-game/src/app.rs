@@ -14,19 +14,23 @@ use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 use crate::hud::{self, HudInfo};
 use crate::input::Input;
+use crate::player::{self, Mode, MoveInput, Player};
 use crate::sim::Sim;
 use crate::streaming::Streamer;
 
 const SEED: i32 = 1337;
 const TICK: Duration = Duration::from_millis(50);
 const MAX_TICKS_PER_FRAME: u32 = 5;
-const REACH: f32 = 64.0;
+const FLY_REACH: f32 = 64.0;
+const WALK_REACH: f32 = 5.0;
 const EDIT_REPEAT: Duration = Duration::from_millis(110);
 
 #[derive(Clone, Debug, Default)]
 pub struct Options {
     /// Fly a fixed route, dig once, log stats and quit. For unattended performance checks.
     pub autopilot: bool,
+    /// Walk and jump across the terrain, logging collision clearance. For unattended checks.
+    pub walk_test: bool,
     pub time_of_day: Option<f32>,
     pub exit_after: Option<f32>,
     pub view_radius: Option<i32>,
@@ -44,6 +48,7 @@ impl Options {
             let mut value = |name: &str| args.next().ok_or_else(|| anyhow::anyhow!("{name} needs a value"));
             match arg.as_str() {
                 "--autopilot" => opts.autopilot = true,
+                "--walk-test" => opts.walk_test = true,
                 "--vsync" => opts.vsync = true,
                 "--hide-hud" => opts.hide_hud = true,
                 "--time" => opts.time_of_day = Some(value("--time")?.parse()?),
@@ -86,6 +91,9 @@ struct State {
     world: World,
     streamer: Streamer,
     sim: Sim,
+    player: Player,
+    spawn: Vec3,
+    /// Derived from the player every frame.
     camera: Camera,
     input: Input,
     egui_ctx: egui::Context,
@@ -114,6 +122,14 @@ struct State {
     last_stats: FrameStats,
     last_log: Instant,
     autopilot_dug: bool,
+    worst_physics_ms: f32,
+    /// Walk test: lowest clearance between the capsule and the ground, and grounded step counts.
+    min_clearance: f32,
+    grounded_steps: (u32, u32),
+    walk_test_anchor: Vec3,
+    walk_test_check: Instant,
+    walk_test_turn: f32,
+    walk_test_blocked: u32,
 }
 
 impl State {
@@ -130,13 +146,22 @@ impl State {
         if let Some(t) = options.time_of_day {
             sim.time_of_day = t.rem_euclid(1.0);
         }
-        let ground = world.worldgen.height(0.0, 0.0);
-        let mut camera =
-            Camera { position: Vec3::new(0.0, ground + 25.0, 0.0), pitch: -0.25, ..Default::default() };
-        if let Some([x, y, z, yaw, pitch]) = options.camera {
-            camera = Camera { position: Vec3::new(x, y, z), yaw, pitch, ..camera };
+        let spawn = find_ground(&world, 0.0, 0.0);
+        let mut player = Player::new(spawn);
+        player.pitch = -0.15;
+        if options.autopilot {
+            player.mode = Mode::Fly;
+            player.teleport(spawn + Vec3::Y * 25.0);
+            player.pitch = -0.3;
         }
-        log::info!("camera starts at {} (ground at origin {ground:.1})", camera.position);
+        if let Some([x, y, z, yaw, pitch]) = options.camera {
+            player.mode = Mode::Fly;
+            player.teleport(Vec3::new(x, y, z) - Vec3::Y * player::EYE_HEIGHT);
+            (player.yaw, player.pitch) = (yaw, pitch);
+        }
+        let camera =
+            Camera { position: player.eye(), yaw: player.yaw, pitch: player.pitch, ..Default::default() };
+        log::info!("player starts at {} ({:?})", player.feet, player.mode);
         let egui_ctx = egui::Context::default();
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(),
@@ -153,6 +178,8 @@ impl State {
             world,
             streamer,
             sim,
+            player,
+            spawn,
             camera,
             input: Input::default(),
             egui_ctx,
@@ -176,6 +203,13 @@ impl State {
             last_stats: FrameStats::default(),
             last_log: now,
             autopilot_dug: false,
+            worst_physics_ms: 0.0,
+            min_clearance: f32::MAX,
+            grounded_steps: (0, 0),
+            walk_test_anchor: Vec3::ZERO,
+            walk_test_check: now,
+            walk_test_turn: 0.0,
+            walk_test_blocked: 0,
         })
     }
 
@@ -222,11 +256,18 @@ impl State {
         if self.options.autopilot {
             self.autopilot(dt.as_secs_f32());
         } else {
-            self.fly(dt.as_secs_f32());
+            self.move_player(dt.as_secs_f32());
         }
+        self.camera = Camera {
+            position: self.player.eye(),
+            yaw: self.player.yaw,
+            pitch: self.player.pitch,
+            ..self.camera
+        };
 
-        self.hit = raycast(|p| self.world.density_at(p), self.camera.position, self.camera.forward(), REACH);
-        if self.captured {
+        let reach = if self.player.mode == Mode::Fly { FLY_REACH } else { WALK_REACH };
+        self.hit = raycast(|p| self.world.density_at(p), self.camera.position, self.camera.forward(), reach);
+        if self.captured && self.player.mode == Mode::Fly {
             self.edit_terrain();
         }
 
@@ -271,6 +312,18 @@ impl State {
             let render_ms = std::mem::take(&mut self.worst_render_ms);
             let [acq, sub, pre] = std::mem::take(&mut self.worst_gpu_wait);
             let s = self.streamer.stats();
+            let physics_ms = std::mem::take(&mut self.worst_physics_ms);
+            if self.options.walk_test {
+                let (g, n) = std::mem::take(&mut self.grounded_steps);
+                log::info!(
+                    "walk test: feet {:.1} | grounded {:.0}% | min clearance {:.3} m | blocked turns {} | worst physics {:.2} ms",
+                    self.player.feet,
+                    100.0 * g as f32 / n.max(1) as f32,
+                    std::mem::replace(&mut self.min_clearance, f32::MAX),
+                    self.walk_test_blocked,
+                    physics_ms,
+                );
+            }
             log::info!(
                 "fps {:.0} ({:.2} ms, worst {:.1}) | chunks drawn {} / gpu {} / loaded {} / queued {} | tris {}k | build {:.2} ms mesh {:.2} ms | edit {} | worst retarget {:.1} upload {:.1} update {:.1} render {:.1} (acquire {:.1} submit {:.1} present {:.1}) ms",
                 1000.0 / self.frame_ms.max(0.01),
@@ -309,6 +362,13 @@ impl State {
             } else {
                 event_loop.exit();
             }
+        }
+        if self.input.pressed(KeyCode::KeyF) {
+            self.player.mode = match self.player.mode {
+                Mode::Walk => Mode::Fly,
+                Mode::Fly => Mode::Walk,
+            };
+            self.player.velocity = Vec3::ZERO;
         }
         if self.input.pressed(KeyCode::F3) {
             self.show_hud = !self.show_hud;
@@ -349,32 +409,74 @@ impl State {
         }
     }
 
-    fn fly(&mut self, dt: f32) {
+    fn move_player(&mut self, dt: f32) {
         if self.captured {
             let sensitivity = 0.0022;
-            self.camera.yaw += self.input.mouse_delta.x * sensitivity;
-            self.camera.pitch =
-                (self.camera.pitch - self.input.mouse_delta.y * sensitivity).clamp(-1.55, 1.55);
+            self.player.yaw += self.input.mouse_delta.x * sensitivity;
+            self.player.pitch =
+                (self.player.pitch - self.input.mouse_delta.y * sensitivity).clamp(-1.55, 1.55);
         }
         let i = &self.input;
         let axis =
             |pos: KeyCode, neg: KeyCode| f32::from(u8::from(i.held(pos))) - f32::from(u8::from(i.held(neg)));
-        let forward = self.camera.forward();
-        let right = self.camera.right();
-        let mut wish = forward * axis(KeyCode::KeyW, KeyCode::KeyS)
-            + right * axis(KeyCode::KeyD, KeyCode::KeyA)
-            + Vec3::Y * axis(KeyCode::Space, KeyCode::ControlLeft);
-        if wish != Vec3::ZERO {
-            wish = wish.normalize();
+        let mut input = MoveInput {
+            forward: axis(KeyCode::KeyW, KeyCode::KeyS),
+            right: axis(KeyCode::KeyD, KeyCode::KeyA),
+            up: axis(KeyCode::Space, KeyCode::ControlLeft),
+            sprint: i.held(KeyCode::ShiftLeft),
+            fly_speed: self.fly_speed,
+        };
+        if self.options.walk_test {
+            input = self.walk_test_input();
         }
-        let boost = if i.held(KeyCode::ShiftLeft) { 5.0 } else { 1.0 };
-        self.camera.position += wish * self.fly_speed * boost * dt;
+        let t = Instant::now();
+        let world = &self.world;
+        let steps = self.player.update(dt, &input, &|p| world.density_at(p));
+        if steps > 0 {
+            self.worst_physics_ms = self.worst_physics_ms.max(t.elapsed().as_secs_f32() * 1e3 / steps as f32);
+        }
+        if self.options.walk_test && steps > 0 && self.player.mode == Mode::Walk {
+            let r = asc_world::Capsule::PLAYER.radius;
+            let low = self.player.feet + Vec3::Y * r;
+            let world = &self.world;
+            let clearance = asc_world::distance_estimate(&|p| world.density_at(p), low) - r;
+            self.min_clearance = self.min_clearance.min(clearance);
+            self.grounded_steps.0 += u32::from(self.player.grounded);
+            self.grounded_steps.1 += 1;
+        }
+        if self.player.feet.y < player::KILL_Y {
+            log::warn!("fell out of the world at {}; respawning", self.player.feet);
+            self.player.teleport(self.spawn);
+        }
+    }
+
+    /// Walk test: sprint along a slowly turning heading, jumping every few seconds, and turning away
+    /// when blocked (as a player would).
+    fn walk_test_input(&mut self) -> MoveInput {
+        let t = self.started.elapsed().as_secs_f32();
+        if self.walk_test_check.elapsed() > Duration::from_secs(1) {
+            let moved = (self.player.feet - self.walk_test_anchor).truncate().length();
+            if t > 4.0 && moved < 1.0 {
+                self.walk_test_turn += 1.6;
+                self.walk_test_blocked += 1;
+            }
+            self.walk_test_anchor = self.player.feet;
+            self.walk_test_check = Instant::now();
+        }
+        self.player.yaw = 0.2 + t * 0.05 + self.walk_test_turn;
+        self.player.pitch = -0.1;
+        MoveInput {
+            forward: if t > 3.0 { 1.0 } else { 0.0 },
+            up: if t > 3.0 && (t % 3.0) < 0.1 { 1.0 } else { 0.0 },
+            sprint: true,
+            ..Default::default()
+        }
     }
 
     /// Scripted flight for unattended checks: settle, dig once in view, then cruise forward.
     fn autopilot(&mut self, dt: f32) {
         let t = self.started.elapsed().as_secs_f32();
-        self.camera.pitch = -0.3;
+        self.player.pitch = -0.3;
         if t > 6.0
             && !self.autopilot_dug
             && let Some(hit) = self.hit
@@ -383,9 +485,10 @@ impl State {
             self.autopilot_dug = true;
         }
         if t > 10.0 {
-            self.camera.position += Vec3::new(1.0, 0.0, 0.2).normalize() * 40.0 * dt;
-            let ground = self.world.worldgen.height(self.camera.position.x, self.camera.position.z);
-            self.camera.position.y += ((ground + 30.0) - self.camera.position.y) * (dt * 1.5).min(1.0);
+            let mut feet = self.player.feet + Vec3::new(1.0, 0.0, 0.2).normalize() * 40.0 * dt;
+            let ground = self.world.worldgen.height(feet.x, feet.z);
+            feet.y += ((ground + 30.0) - feet.y) * (dt * 1.5).min(1.0);
+            self.player.teleport(feet);
         }
     }
 
@@ -502,5 +605,14 @@ impl ApplicationHandler for App {
         if let Some(state) = &self.state {
             state.window.request_redraw();
         }
+    }
+}
+
+/// Feet position standing on the ground in column (x, z).
+fn find_ground(world: &World, x: f32, z: f32) -> Vec3 {
+    let top = Vec3::new(x, 400.0, z);
+    match raycast(|p| world.density_at(p), top, -Vec3::Y, 800.0) {
+        Some(hit) => hit.point + Vec3::Y * 0.05,
+        None => Vec3::new(x, world.worldgen.height(x, z) + 2.0, z),
     }
 }

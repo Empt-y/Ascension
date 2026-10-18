@@ -1,0 +1,28 @@
+# Terrain materials. Keys are the material names used by the engine (see asc_world::Material).
+#
+# hardness: seconds of holding the mine button per bite (one 0.9 m sphere).
+# drop:     item id (items.toml) that mining yields, 1 item per cubic metre removed.
+
+[grass]
+hardness = 0.5
+drop = "soil"
+
+[soil]
+hardness = 0.4
+drop = "soil"
+
+[rock]
+hardness = 1.5
+drop = "rock"
+
+[sand]
+hardness = 0.3
+drop = "sand"
+
+[snow]
+hardness = 0.2
+drop = "snow"
+
+[copper_ore]
+hardness = 2.5
+drop = "copper_ore"

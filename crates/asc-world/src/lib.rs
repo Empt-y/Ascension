@@ -13,7 +13,7 @@ mod raycast;
 mod worldgen;
 
 pub use chunk::{CHUNK, ChunkCoord, ChunkData, SAMPLES, chunk_of, chunk_origin};
-pub use collide::{Capsule, Contact, push_sphere, resolve_capsule};
+pub use collide::{Capsule, Contact, distance_estimate, push_sphere, resolve_capsule};
 pub use edit::{EditKind, EditLog, EditOp};
 pub use material::Material;
 pub use mesh::{ChunkMesh, MATERIAL_SLOTS, Vertex, mesh_chunk};
