@@ -5,7 +5,8 @@ struct Globals {
     // Camera-relative: world positions are offset by -camera before projection.
     view_proj: mat4x4<f32>,
     inv_view_proj: mat4x4<f32>,
-    shadow_view_proj: mat4x4<f32>,
+    // Sun shadow cascades, nearest first: two sets of three (layer = set * 3 + cascade).
+    shadow_view_proj: array<mat4x4<f32>, 6>,
     // xyz = camera world position, w = seconds since start.
     camera: vec4<f32>,
     // xyz = direction towards the sun, w = 0..1 how far above the horizon it is.
@@ -19,11 +20,16 @@ struct Globals {
     // x = distance at which everything has faded into the sky (far terrain range, or the chunk radius
     // when far terrain is off).
     far: vec4<f32>,
+    // x = the layer being rendered (shadow passes only), y = 1 if shadows are on, z = wind strength,
+    // w = how far the current set has faded in over the previous one.
+    shadow: vec4<f32>,
+    // xyz = half-width in metres of each cascade, w = the current set.
+    shadow_radii: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;
 // Sun shadow map, used by anything drawn in the scene pass with the scene layout.
-@group(0) @binding(2) var shadow_map: texture_depth_2d;
+@group(0) @binding(2) var shadow_map: texture_depth_2d_array;
 @group(0) @binding(3) var shadow_sampler: sampler_comparison;
 
 const PI: f32 = 3.14159265;
@@ -272,31 +278,90 @@ fn fresnel_schlick(f0: vec3<f32>, v: vec3<f32>, h: vec3<f32>) -> vec3<f32> {
     return f0 + (1.0 - f0) * pow(1.0 - max(dot(h, v), 0.0), 5.0);
 }
 
-fn shadow_factor(rel: vec3<f32>, n: vec3<f32>) -> f32 {
-    // Normal offset hides acne on slopes facing away from the sun.
-    let p = globals.shadow_view_proj * vec4(rel + n * 0.35, 1.0);
-    let uv = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
-    if any(uv < vec2(0.0)) || any(uv > vec2(1.0)) || p.z > 1.0 {
-        return 1.0;
-    }
-    let texel = 1.0 / f32(textureDimensions(shadow_map).x);
-    var lit = 0.0;
-    for (var y = -1; y <= 1; y++) {
-        for (var x = -1; x <= 1; x++) {
-            lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2(f32(x), f32(y)) * texel, p.z - 0.0015);
-        }
-    }
-    return lit / 9.0;
+// Depth range of every cascade, metres (matches SHADOW_DEPTH in the renderer).
+const SHADOW_DEPTH: f32 = 500.0;
+// Shadow edges are this soft in the world (metres), whichever cascade draws them.
+const PENUMBRA: f32 = 0.07;
+
+// The matrix of the layer a shadow pass is rendering.
+fn shadow_caster_matrix() -> mat4x4<f32> {
+    return globals.shadow_view_proj[u32(globals.shadow.x)];
 }
 
-// One hardware-filtered tap instead of 3x3 PCF, for surfaces drawn many layers deep (foliage).
-fn shadow_factor_fast(rel: vec3<f32>, n: vec3<f32>) -> f32 {
-    let p = globals.shadow_view_proj * vec4(rel + n * 0.35, 1.0);
-    let uv = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
-    if any(uv < vec2(0.0)) || any(uv > vec2(1.0)) || p.z > 1.0 {
+// A point's place in cascade c of layer `layer`: xy = map coordinates, z = depth, w = how far out
+// (1 = edge).
+fn cascade_coords(layer: u32, c: u32, rel: vec3<f32>, n: vec3<f32>) -> vec4<f32> {
+    let texel = 2.0 * globals.shadow_radii[c] / f32(textureDimensions(shadow_map).x);
+    // Normal offset of a couple of texels hides acne without detaching shadows from their casters.
+    let p = globals.shadow_view_proj[layer] * vec4(rel + n * texel * 2.5, 1.0);
+    return vec4(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5, p.z, max(abs(p.x), abs(p.y)));
+}
+
+// Percentage-closer filtering over a Poisson disc sized to PENUMBRA, each tap itself bilinear.
+fn cascade_pcf(layer: u32, c: u32, s: vec4<f32>, taps: u32) -> f32 {
+    if s.z > 1.0 {
         return 1.0;
     }
-    return textureSampleCompareLevel(shadow_map, shadow_sampler, uv, p.z - 0.0015);
+    var disc = array<vec2<f32>, 12>(
+        vec2(-0.326, -0.406), vec2(0.962, -0.195), vec2(-0.840, -0.074), vec2(0.519, 0.767),
+        vec2(-0.696, 0.457), vec2(0.185, -0.893), vec2(0.507, 0.064), vec2(-0.321, -0.933),
+        vec2(-0.203, 0.621), vec2(0.896, 0.412), vec2(0.473, -0.480), vec2(-0.792, -0.598),
+    );
+    let size = f32(textureDimensions(shadow_map).x);
+    let texel = 2.0 * globals.shadow_radii[c] / size;
+    let bias = texel * 1.5 / SHADOW_DEPTH;
+    let radius = max(1.0, PENUMBRA / texel) / size;
+    var lit = 0.0;
+    for (var i = 0u; i < taps; i++) {
+        lit += textureSampleCompareLevel(shadow_map, shadow_sampler, s.xy + disc[i] * radius, i32(layer), s.z - bias);
+    }
+    return lit / f32(taps);
+}
+
+// Sun visibility from one set of cascades: the nearest cascade that covers the point, blended into
+// the next one over its outer edge (and into no shadow past the last), so there are no seams.
+fn shadow_lookup_set(group: u32, rel: vec3<f32>, n: vec3<f32>, taps: u32) -> f32 {
+    for (var c = 0u; c < 3u; c++) {
+        let layer = group * 3u + c;
+        let s = cascade_coords(layer, c, rel, n);
+        if s.w < 1.0 {
+            var lit = cascade_pcf(layer, c, s, taps);
+            let blend = smoothstep(0.8, 1.0, s.w);
+            if blend > 0.0 {
+                if c < 2u {
+                    lit = mix(lit, cascade_pcf(layer + 1u, c + 1u, cascade_coords(layer + 1u, c + 1u, rel, n), taps), blend);
+                } else {
+                    lit = mix(lit, 1.0, blend);
+                }
+            }
+            return lit;
+        }
+    }
+    return 1.0;
+}
+
+// Sun visibility at a point: the current cascade set, dissolving in over the previous one after
+// each step of the sun.
+fn shadow_lookup(rel: vec3<f32>, n: vec3<f32>, taps: u32) -> f32 {
+    if globals.shadow.y < 0.5 {
+        return 1.0;
+    }
+    let current = u32(globals.shadow_radii.w);
+    var lit = shadow_lookup_set(current, rel, n, taps);
+    let fade = globals.shadow.w;
+    if fade < 1.0 {
+        lit = mix(shadow_lookup_set(1u - current, rel, n, taps), lit, fade);
+    }
+    return lit;
+}
+
+fn shadow_factor(rel: vec3<f32>, n: vec3<f32>) -> f32 {
+    return shadow_lookup(rel, n, 8u);
+}
+
+// Fewer taps, for surfaces drawn many layers deep (foliage).
+fn shadow_factor_fast(rel: vec3<f32>, n: vec3<f32>) -> f32 {
+    return shadow_lookup(rel, n, 4u);
 }
 
 // Sun, sky ambient and moonlight on any opaque surface (metallic-roughness PBR, stylised ambient).

@@ -18,6 +18,7 @@ use wgpu::util::DeviceExt;
 
 use crate::camera::Frustum;
 use crate::models::{ModelData, PartVertex, TextureData};
+use crate::targets::CASCADES;
 
 /// Instances beyond this distance aren't drawn (fog has hidden them by then).
 const DRAW_DISTANCE: f32 = 600.0;
@@ -53,6 +54,8 @@ impl PartInstance {
 /// Distant instances of a model switch to a cheaper one (an impostor) around this distance,
 /// cross-fading over `LOD_BAND` metres.
 const LOD_BAND: f32 = 12.0;
+/// In the shadow pass, impostors take over from this distance.
+const SHADOW_LOD: f32 = 40.0;
 
 /// A group of scatter instances (one terrain column of one kind) drawn and culled together.
 #[derive(Clone, Debug, PartialEq)]
@@ -62,7 +65,8 @@ pub struct ScatterBatch {
     pub distance: f32,
     /// ...fading out over this last stretch of it.
     pub fade: f32,
-    pub shadows: bool,
+    /// Instances cast sun shadows out to this distance (0 for none).
+    pub shadow_distance: f32,
 }
 
 struct StoredBatch {
@@ -128,9 +132,9 @@ pub struct Parts {
     lods: Vec<Option<(ModelId, f32)>>,
     /// Per-model buckets reused each frame while sorting instances.
     buckets: Vec<Vec<InstanceData>>,
-    shadow_buckets: Vec<Vec<InstanceData>>,
+    shadow_buckets: [Vec<Vec<InstanceData>>; CASCADES],
     visible: Vec<Range>,
-    shadow: Vec<Range>,
+    shadow: [Vec<Range>; CASCADES],
     ghost_slot: Option<(ModelId, u32)>,
     textures: wgpu::Texture,
     texture_view: wgpu::TextureView,
@@ -183,9 +187,9 @@ impl Parts {
             scatter: HashMap::new(),
             lods: Vec::new(),
             buckets: Vec::new(),
-            shadow_buckets: Vec::new(),
+            shadow_buckets: Default::default(),
             visible: Vec::new(),
-            shadow: Vec::new(),
+            shadow: Default::default(),
             ghost_slot: None,
             textures,
             texture_view,
@@ -353,15 +357,21 @@ impl Parts {
         queue: &wgpu::Queue,
         camera: Vec3,
         view_proj: Mat4,
-        shadow_reach: f32,
+        shadow_reach: [f32; CASCADES],
     ) {
         let frustum = Frustum::from_view_proj(view_proj);
         let n = self.models.len();
         self.buckets.resize_with(n, Vec::new);
-        self.shadow_buckets.resize_with(n, Vec::new);
-        for b in self.buckets.iter_mut().chain(self.shadow_buckets.iter_mut()) {
+        for b in &mut self.buckets {
             b.clear();
         }
+        for cascade in &mut self.shadow_buckets {
+            cascade.resize_with(n, Vec::new);
+            for b in cascade.iter_mut() {
+                b.clear();
+            }
+        }
+        let farthest = shadow_reach[CASCADES - 1];
 
         // Placed parts: culled one by one.
         for i in &self.instances {
@@ -371,8 +381,10 @@ impl Parts {
             if rel.length() < DRAW_DISTANCE + radius && frustum.intersects_box(rel - radius, rel + radius) {
                 self.buckets[m].push(instance_data(i, camera, 0, 1.0));
             }
-            if rel.length() < shadow_reach + radius {
-                self.shadow_buckets[m].push(instance_data(i, camera, 0, 1.0));
+            for (c, reach) in shadow_reach.iter().enumerate() {
+                if rel.length() < reach + radius {
+                    self.shadow_buckets[c][m].push(instance_data(i, camera, 0, 1.0));
+                }
             }
         }
         // Scatter: whole batches culled by their bounds, then instances by distance.
@@ -381,7 +393,8 @@ impl Parts {
             let nearest = camera.clamp(stored.min, stored.max).distance(camera);
             let in_view =
                 nearest < b.distance && frustum.intersects_box(stored.min - camera, stored.max - camera);
-            let casts = b.shadows && nearest < shadow_reach;
+            let shadow_reach_here = farthest.min(b.shadow_distance);
+            let casts = nearest < shadow_reach_here;
             if !in_view && !casts {
                 continue;
             }
@@ -408,13 +421,19 @@ impl Parts {
                         None => self.buckets[m].push(instance_data(i, camera, 0, fade)),
                     }
                 }
-                if casts && dist < shadow_reach {
+                if casts && dist < shadow_reach_here {
+                    // Shadows don't need the full model nearly as far out: switch much sooner.
                     let model = match lod {
-                        Some((far, at)) if dist > at => far,
+                        Some((far, at)) if dist > at.min(SHADOW_LOD) => far,
                         _ => i.model,
                     };
                     let shadow_i = PartInstance { model, ..*i };
-                    self.shadow_buckets[model.0 as usize].push(instance_data(&shadow_i, camera, 0, 1.0));
+                    let data = instance_data(&shadow_i, camera, 0, 1.0);
+                    for (c, reach) in shadow_reach.iter().enumerate() {
+                        if dist < *reach {
+                            self.shadow_buckets[c][model.0 as usize].push(data);
+                        }
+                    }
                 }
             }
         }
@@ -431,7 +450,9 @@ impl Parts {
                 .collect()
         };
         self.visible = flatten(&self.buckets, &mut self.scratch);
-        self.shadow = flatten(&self.shadow_buckets, &mut self.scratch);
+        for c in 0..CASCADES {
+            self.shadow[c] = flatten(&self.shadow_buckets[c], &mut self.scratch);
+        }
         self.drawn = self.visible.iter().map(|r| r.count as usize).sum();
         self.ghost_slot = self.ghost.map(|g| {
             self.scratch.push(instance_data(&g.instance, camera, if g.valid { 1 } else { 2 }, 1.0));
@@ -467,10 +488,10 @@ impl Parts {
         self.draw_ranges(pass, &self.visible);
     }
 
-    /// Shadow casters in the shadow pass (pipeline and group 0 already set). Materials are bound
-    /// so leaf cards cut their shadows out too.
-    pub fn draw_shadows(&self, pass: &mut wgpu::RenderPass<'_>) {
-        self.draw_ranges(pass, &self.shadow);
+    /// Shadow casters for one cascade (pipeline and group 0 already set). Materials are bound so
+    /// leaf cards cut their shadows out too.
+    pub fn draw_shadows(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize) {
+        self.draw_ranges(pass, &self.shadow[cascade]);
     }
 
     /// The placement ghost (ghost pipeline and group 0 already set).

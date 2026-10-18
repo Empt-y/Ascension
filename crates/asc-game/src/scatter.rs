@@ -47,7 +47,7 @@ struct Kind {
     scale: [f32; 2],
     sway: f32,
     max_slope: f32,
-    shadows: bool,
+    shadow_distance: f32,
     collide: Collide,
     /// Side of a candidate cell: one candidate per cell at the kind's highest density.
     cell: f32,
@@ -98,7 +98,7 @@ impl Config {
                     scale: spec.scale,
                     sway: spec.sway,
                     max_slope: spec.max_slope,
-                    shadows: spec.shadows,
+                    shadow_distance: spec.shadow_distance,
                     collide: spec.collide,
                     cell: if max > 0.0 { 1.0 / max.sqrt() } else { 0.0 },
                     density,
@@ -186,6 +186,14 @@ pub fn generate(config: &Config, worldgen: &WorldGen, column: IVec2, kind: usize
                 continue;
             }
             let m = models[((pick * models.len() as f32) as usize).min(models.len() - 1)];
+            // The height field is the surface except where caves break through it (cave mouths):
+            // check the real density, and leave out anything that would float or be buried.
+            let base = Vec3::new(x, g.height, z);
+            if worldgen.sample(base + Vec3::Y * 0.25).0 <= 0.0
+                || worldgen.sample(base - Vec3::Y * 0.25).0 >= 0.0
+            {
+                continue;
+            }
             out.push(Placed {
                 model: m.id,
                 position: Vec3::new(x, g.height, z),
@@ -392,7 +400,12 @@ impl Scatter {
             .collect();
         renderer.set_scatter(
             batch_key(key),
-            Some(ScatterBatch { instances, distance: k.distance, fade: k.fade, shadows: k.shadows }),
+            Some(ScatterBatch {
+                instances,
+                distance: k.distance,
+                fade: k.fade,
+                shadow_distance: k.shadow_distance,
+            }),
         );
         if k.collide != Collide::None {
             // Colliders for a column come from every colliding kind there; rebuild them all.
@@ -481,7 +494,7 @@ mod tests {
             scale: [0.8, 1.2],
             sway: 1.0,
             max_slope: 0.8,
-            shadows: true,
+            shadow_distance: 100.0,
             collide,
             lod: None,
         };
@@ -540,6 +553,34 @@ mod tests {
         }
         let per_m2 = grass as f32 / (land as f32 * COLUMN * COLUMN);
         assert!(per_m2 > 0.2 && per_m2 < 1.05, "grass {per_m2}/m^2");
+    }
+
+    #[test]
+    fn instances_stand_on_the_real_surface() {
+        // The placement height is the height field; the terrain is its density field with caves
+        // carved in. Find the surface under each instance by bisection and compare.
+        let config = config();
+        let worldgen = WorldGen::new(1337);
+        let mut worst = 0.0f32;
+        let mut checked = 0;
+        for c in 0..40 {
+            let column = IVec2::new(c * 7 - 140, (c * 13) % 50 - 25);
+            for p in generate(&config, &worldgen, column, config.kind("tree").unwrap()) {
+                let density = |y: f32| worldgen.sample(Vec3::new(p.position.x, y, p.position.z)).0;
+                let (mut lo, mut hi) = (p.position.y - 6.0, p.position.y + 6.0);
+                if density(lo) >= 0.0 || density(hi) <= 0.0 {
+                    continue;
+                }
+                for _ in 0..30 {
+                    let mid = 0.5 * (lo + hi);
+                    if density(mid) < 0.0 { lo = mid } else { hi = mid }
+                }
+                worst = worst.max((lo - p.position.y).abs());
+                checked += 1;
+            }
+        }
+        assert!(checked > 50, "only {checked} checked");
+        assert!(worst < 0.25, "an instance is {worst:.2} m off the surface");
     }
 
     #[test]

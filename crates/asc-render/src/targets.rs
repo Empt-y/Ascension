@@ -70,14 +70,41 @@ pub fn placeholder_texture(device: &wgpu::Device) -> wgpu::TextureView {
 }
 
 pub const SHADOW_SIZE: u32 = 2048;
+/// Sun shadow cascades, nearest first.
+pub const CASCADES: usize = 3;
+/// Two sets of cascades: the current one, and the previous one it is fading in over.
+pub const SHADOW_LAYERS: usize = 2 * CASCADES;
 
-pub fn shadow_map(device: &wgpu::Device) -> wgpu::TextureView {
-    use wgpu::TextureUsages as U;
-    target(
-        device,
-        "shadow map",
-        (SHADOW_SIZE, SHADOW_SIZE),
-        DEPTH_FORMAT,
-        U::RENDER_ATTACHMENT | U::TEXTURE_BINDING,
-    )
+/// The cascaded shadow maps (two sets): an array view for sampling and one view per layer to render
+/// into. Layer = set * CASCADES + cascade.
+pub fn shadow_maps(device: &wgpu::Device) -> (wgpu::TextureView, Vec<wgpu::TextureView>) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("shadow cascades"),
+        size: wgpu::Extent3d {
+            width: SHADOW_SIZE,
+            height: SHADOW_SIZE,
+            depth_or_array_layers: SHADOW_LAYERS as u32,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let array = texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    let layers = (0..SHADOW_LAYERS as u32)
+        .map(|layer| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: layer,
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        })
+        .collect();
+    (array, layers)
 }

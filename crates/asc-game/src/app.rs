@@ -80,6 +80,10 @@ pub struct Options {
     pub showcase: bool,
     /// Grow trees, grass, rocks... over the world (on by default).
     pub scatter: bool,
+    /// Sun shadows (on by default).
+    pub shadows: bool,
+    /// Accessibility: no wind motion in plants.
+    pub reduce_motion: bool,
     /// Flatten a site, build a small house on it, walk inside, and log what happens.
     pub build_test: bool,
     /// Place a large scripted block of pieces near spawn (a building performance test).
@@ -88,7 +92,8 @@ pub struct Options {
 
 impl Options {
     pub fn from_args() -> anyhow::Result<Self> {
-        let mut opts = Self { world: "world1".into(), far: true, scatter: true, ..Self::default() };
+        let mut opts =
+            Self { world: "world1".into(), far: true, scatter: true, shadows: true, ..Self::default() };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             let mut value = |name: &str| args.next().ok_or_else(|| anyhow::anyhow!("{name} needs a value"));
@@ -108,6 +113,14 @@ impl Options {
                 "--fog" => opts.fog_density = Some(value("--fog")?.parse()?),
                 "--msaa" => opts.msaa = Some(value("--msaa")?.parse()?),
                 "--showcase" => opts.showcase = true,
+                "--reduce-motion" => opts.reduce_motion = true,
+                "--shadows" => {
+                    opts.shadows = match value("--shadows")?.as_str() {
+                        "on" => true,
+                        "off" => false,
+                        other => anyhow::bail!("--shadows wants on or off, not {other}"),
+                    }
+                }
                 "--scatter" => {
                     opts.scatter = match value("--scatter")?.as_str() {
                         "on" => true,
@@ -270,6 +283,8 @@ impl State {
         if let Some(samples) = options.msaa {
             renderer.set_msaa(samples)?;
         }
+        renderer.set_shadows(options.shadows);
+        renderer.set_wind(if options.reduce_motion { 0.0 } else { 1.0 });
         if let Some(d) = options.fog_density {
             renderer.fog_density = d;
         }

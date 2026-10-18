@@ -63,5 +63,5 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 @vertex
 fn vs_shadow(in: VsIn) -> @builtin(position) vec4<f32> {
     let rel = in.position + chunk_offsets[in.instance].xyz;
-    return globals.shadow_view_proj * vec4(rel, 1.0);
+    return shadow_caster_matrix() * vec4(rel, 1.0);
 }

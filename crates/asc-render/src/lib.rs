@@ -32,7 +32,7 @@ use parts::Parts;
 pub use parts::{Ghost, ModelId, PartInstance, ScatterBatch};
 use pipelines::{Layouts, Pipelines};
 pub use shaders::ShaderLib;
-use targets::{BLOOM_LEVELS, SHADOW_SIZE, Targets};
+use targets::{BLOOM_LEVELS, CASCADES, SHADOW_LAYERS, SHADOW_SIZE, Targets};
 
 /// With far terrain on, everything has faded into the sky by this distance (metres).
 pub const FAR_RANGE: f32 = 14_000.0;
@@ -40,22 +40,35 @@ const DEFAULT_FOG_DENSITY: f32 = 0.00045;
 /// Samples per pixel for the scene pass (4x MSAA smooths silhouettes and geometric edges).
 pub const DEFAULT_MSAA: u32 = 4;
 
-/// Half-width of the area around the camera covered by the sun's shadow map (metres).
-const SHADOW_RADIUS: f32 = 110.0;
-const SHADOW_DEPTH: f32 = 400.0;
+/// Half-width of the area around the camera covered by each sun shadow cascade (metres), nearest
+/// first: centimetre-sharp shadows close up, still shadowed out past 100 m.
+const CASCADE_RADII: [f32; CASCADES] = [16.0, 50.0, 120.0];
+/// Depth range of every cascade (matches SHADOW_DEPTH in common.wgsl).
+const SHADOW_DEPTH: f32 = 500.0;
+/// The sun direction used for shadows only moves in steps of this angle (radians, half a degree).
+/// Rotating the shadow maps a little every frame re-rasterises every leaf and edge onto a new
+/// grid, and the result sparkles. Instead each step draws a fresh set of cascades and the old set
+/// dissolves into it over `SHADOW_FADE` seconds, so shadows drift smoothly with the sun.
+const SHADOW_SUN_STEP: f32 = 0.0087;
+const SHADOW_FADE: f32 = 1.2;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Globals {
     view_proj: [[f32; 4]; 4],
     inv_view_proj: [[f32; 4]; 4],
-    shadow_view_proj: [[f32; 4]; 4],
+    shadow_view_proj: [[[f32; 4]; 4]; SHADOW_LAYERS],
     camera: [f32; 4],
     sun: [f32; 4],
     fog: [f32; 4],
     screen: [f32; 4],
     brush: [f32; 4],
     far: [f32; 4],
+    /// x = the layer being rendered (shadow passes), y = 1 if shadows are on, z = wind strength,
+    /// w = how far the current cascade set has faded in over the previous one (0..1).
+    shadow: [f32; 4],
+    /// xyz = each cascade's half-width, w = the current set (0 or 1).
+    shadow_radii: [f32; 4],
 }
 
 /// Build every pipeline against an sRGB target without a window. Used by tests.
@@ -117,11 +130,14 @@ pub struct Renderer {
     offsets: wgpu::Buffer,
     offsets_capacity: usize,
     shadow_map: wgpu::TextureView,
+    shadow_layers: Vec<wgpu::TextureView>,
+    /// A copy of the globals per cascade, differing only in which cascade is being rendered.
+    cascade_globals: Vec<wgpu::Buffer>,
     shadow_sampler: wgpu::Sampler,
     linear_sampler: wgpu::Sampler,
     placeholder: wgpu::TextureView,
     scene_bg: wgpu::BindGroup,
-    shadow_bg: wgpu::BindGroup,
+    shadow_bgs: Vec<wgpu::BindGroup>,
     post_bg: wgpu::BindGroup,
     bloom_bgs: BloomBindGroups,
     chunks: AHashMap<ChunkCoord, GpuChunk>,
@@ -134,6 +150,23 @@ pub struct Renderer {
     // Per-frame scratch, kept to avoid allocating every frame.
     draw_list: Vec<(f32, ChunkCoord)>,
     shadow_list: Vec<ChunkCoord>,
+    /// How many of `shadow_list` (sorted by distance) reach into each cascade.
+    shadow_counts: [usize; CASCADES],
+    shadows: bool,
+    wind: f32,
+    /// Each layer's matrix and the camera position it was rendered from. Layers are only redrawn when
+    /// needed (see `render`); in between they're looked up through these.
+    cascade_state: [(Mat4, Vec3); SHADOW_LAYERS],
+    /// Which layers are redrawn this frame.
+    cascade_update: [bool; SHADOW_LAYERS],
+    /// The current cascade set, and when it started fading in.
+    shadow_set: usize,
+    shadow_fade_start: Instant,
+    frame: u64,
+    /// The sun direction the shadow maps are rendered from (see `SHADOW_SUN_STEP`).
+    shadow_sun: Vec3,
+    /// Something that casts shadows changed since the cascades were last drawn.
+    shadow_world_dirty: bool,
     offset_data: Vec<[f32; 4]>,
     egui: egui_wgpu::Renderer,
     start: Instant,
@@ -165,7 +198,17 @@ impl Renderer {
         });
         let offsets_capacity = 4096;
         let offsets = Self::offsets_buffer(device, offsets_capacity);
-        let shadow_map = targets::shadow_map(device);
+        let (shadow_map, shadow_layers) = targets::shadow_maps(device);
+        let cascade_globals: Vec<wgpu::Buffer> = (0..SHADOW_LAYERS)
+            .map(|_| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("cascade globals"),
+                    size: std::mem::size_of::<Globals>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+            .collect();
         let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("shadow"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -187,8 +230,15 @@ impl Renderer {
         let parts = Parts::new(device);
         let egui = egui_wgpu::Renderer::new(device, gpu.ui_format(), egui_wgpu::RendererOptions::default());
 
-        let (scene_bg, shadow_bg) =
-            Self::scene_bind_groups(device, &layouts, &globals, &offsets, &shadow_map, &shadow_sampler);
+        let (scene_bg, shadow_bgs) = Self::scene_bind_groups(
+            device,
+            &layouts,
+            &globals,
+            &cascade_globals,
+            &offsets,
+            &shadow_map,
+            &shadow_sampler,
+        );
         let (post_bg, bloom_bgs) =
             Self::texture_bind_groups(device, &layouts, &targets, &placeholder, &linear_sampler);
         Ok(Self {
@@ -201,11 +251,13 @@ impl Renderer {
             offsets,
             offsets_capacity,
             shadow_map,
+            shadow_layers,
+            cascade_globals,
             shadow_sampler,
             linear_sampler,
             placeholder,
             scene_bg,
-            shadow_bg,
+            shadow_bgs,
             post_bg,
             bloom_bgs,
             chunks: AHashMap::new(),
@@ -217,6 +269,16 @@ impl Renderer {
             msaa,
             draw_list: Vec::new(),
             shadow_list: Vec::new(),
+            shadow_counts: [0; CASCADES],
+            shadows: true,
+            wind: 1.0,
+            cascade_state: [(Mat4::IDENTITY, Vec3::ZERO); SHADOW_LAYERS],
+            cascade_update: [true; SHADOW_LAYERS],
+            shadow_set: 0,
+            shadow_fade_start: Instant::now(),
+            frame: 0,
+            shadow_sun: Vec3::Y,
+            shadow_world_dirty: true,
             offset_data: Vec::new(),
             egui,
             start: Instant::now(),
@@ -232,14 +294,16 @@ impl Renderer {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn scene_bind_groups(
         device: &wgpu::Device,
         layouts: &Layouts,
         globals: &wgpu::Buffer,
+        cascade_globals: &[wgpu::Buffer],
         offsets: &wgpu::Buffer,
         shadow_map: &wgpu::TextureView,
         shadow_sampler: &wgpu::Sampler,
-    ) -> (wgpu::BindGroup, wgpu::BindGroup) {
+    ) -> (wgpu::BindGroup, Vec<wgpu::BindGroup>) {
         let scene = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scene"),
             layout: &layouts.scene,
@@ -250,14 +314,19 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(shadow_sampler) },
             ],
         });
-        let shadow = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("shadow"),
-            layout: &layouts.shadow,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: offsets.as_entire_binding() },
-            ],
-        });
+        let shadow = cascade_globals
+            .iter()
+            .map(|g| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("shadow"),
+                    layout: &layouts.shadow,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: g.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: offsets.as_entire_binding() },
+                    ],
+                })
+            })
+            .collect();
         (scene, shadow)
     }
 
@@ -354,6 +423,7 @@ impl Renderer {
     }
 
     pub fn upload_chunk(&mut self, coord: ChunkCoord, mesh: &ChunkMesh) {
+        self.shadow_world_dirty = true;
         self.remove_chunk(coord);
         if mesh.is_empty() {
             return;
@@ -381,6 +451,7 @@ impl Renderer {
     }
 
     pub fn remove_chunk(&mut self, coord: ChunkCoord) {
+        self.shadow_world_dirty = true;
         if let Some(chunk) = self.chunks.remove(&coord) {
             self.vertices.free(chunk.first_vertex, chunk.vertex_count);
             self.indices.free(chunk.first_index, chunk.index_count);
@@ -404,6 +475,7 @@ impl Renderer {
 
     /// Every placed part. Call when the set changes.
     pub fn set_parts(&mut self, instances: &[PartInstance]) {
+        self.shadow_world_dirty = true;
         self.parts.set_instances(instances);
     }
 
@@ -413,6 +485,7 @@ impl Renderer {
 
     /// Add, replace or remove a batch of nature scatter (see [`ScatterBatch`]).
     pub fn set_scatter(&mut self, key: u64, batch: Option<ScatterBatch>) {
+        self.shadow_world_dirty = true;
         self.parts.set_scatter(key, batch);
     }
 
@@ -441,22 +514,27 @@ impl Renderer {
         self.chunks.len()
     }
 
-    /// Light-space matrix for camera-relative positions, snapped to shadow texels so it doesn't shimmer.
-    fn shadow_matrix(camera_pos: Vec3, sun: Vec3) -> Mat4 {
+    /// Turn the sun's shadows on or off (off skips the shadow passes entirely).
+    pub fn set_shadows(&mut self, on: bool) {
+        self.shadows = on;
+        self.shadow_world_dirty = true;
+    }
+
+    /// How strongly plants move in the wind: 1 normal, 0 still (reduce motion).
+    pub fn set_wind(&mut self, strength: f32) {
+        self.wind = strength.max(0.0);
+    }
+
+    /// Light-space matrix of one cascade for camera-relative positions, snapped to its texels so
+    /// shadows don't crawl or shimmer as the camera moves.
+    fn shadow_matrix(camera_pos: Vec3, sun: Vec3, radius: f32) -> Mat4 {
         let up = if sun.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
         let light_view = Mat4::look_to_rh(Vec3::ZERO, -sun, up);
         let cam_ls = light_view.transform_point3(camera_pos);
-        let texel = 2.0 * SHADOW_RADIUS / SHADOW_SIZE as f32;
+        let texel = 2.0 * radius / SHADOW_SIZE as f32;
         let snapped = (cam_ls.truncate() / texel).floor() * texel;
         let shift = Vec3::new(cam_ls.x - snapped.x, cam_ls.y - snapped.y, -(SHADOW_DEPTH * 0.5));
-        let proj = Mat4::orthographic_rh(
-            -SHADOW_RADIUS,
-            SHADOW_RADIUS,
-            -SHADOW_RADIUS,
-            SHADOW_RADIUS,
-            0.0,
-            SHADOW_DEPTH,
-        );
+        let proj = Mat4::orthographic_rh(-radius, radius, -radius, radius, 0.0, SHADOW_DEPTH);
         // Rotation of the relative position into light space, then centre on the snapped camera.
         proj * Mat4::from_translation(shift) * light_view
     }
@@ -476,7 +554,40 @@ impl Renderer {
         let aspect = width as f32 / height as f32;
         let cam = &frame.camera;
         let view_proj = cam.view_proj(aspect);
-        let shadow_view_proj = Self::shadow_matrix(cam.position, frame.sun_dir);
+        // Shadows hold still (no wind, a stepped sun), so a cascade is only redrawn when the camera
+        // has moved a fair way across it or something that casts shadows changed; in between it's
+        // looked up through the matrix it was drawn with. When the sun steps, a fresh set of cascades
+        // is drawn and the previous set fades out over it.
+        let first = self.frame == 0;
+        self.frame += 1;
+        let sun_stepped = !first && self.shadow_sun.angle_between(frame.sun_dir) > SHADOW_SUN_STEP;
+        if first || sun_stepped {
+            self.shadow_sun = frame.sun_dir;
+        }
+        if sun_stepped {
+            self.shadow_set ^= 1;
+            self.shadow_fade_start = Instant::now();
+        }
+        self.cascade_update = [false; SHADOW_LAYERS];
+        for (c, radius) in CASCADE_RADII.iter().enumerate() {
+            let layer = self.shadow_set * CASCADES + c;
+            let moved = (cam.position - self.cascade_state[layer].1).length() > radius * 0.08;
+            self.cascade_update[layer] = first || sun_stepped || moved || self.shadow_world_dirty;
+        }
+        self.shadow_world_dirty = false;
+        let fade =
+            if first { 1.0 } else { (self.shadow_fade_start.elapsed().as_secs_f32() / SHADOW_FADE).min(1.0) };
+        for layer in 0..SHADOW_LAYERS {
+            if self.cascade_update[layer] {
+                self.cascade_state[layer] = (
+                    Self::shadow_matrix(cam.position, self.shadow_sun, CASCADE_RADII[layer % CASCADES]),
+                    cam.position,
+                );
+            }
+        }
+        // A layer drawn from an earlier camera position: shift today's camera-relative positions back.
+        let shadow_view_proj =
+            self.cascade_state.map(|(m, from)| m * Mat4::from_translation(cam.position - from));
         let mut stats = self.build_draw_lists(cam.position, view_proj, frame.view_distance);
         stats.acquire_ms = t_acquire.elapsed().as_secs_f32() * 1e3;
 
@@ -487,7 +598,7 @@ impl Renderer {
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             inv_view_proj: view_proj.inverse().to_cols_array_2d(),
-            shadow_view_proj: shadow_view_proj.to_cols_array_2d(),
+            shadow_view_proj: shadow_view_proj.map(|m| m.to_cols_array_2d()),
             camera: cam.position.extend(self.start.elapsed().as_secs_f32()).into(),
             sun: frame.sun_dir.extend(daylight).into(),
             fog: [self.fog_density, 0.012, frame.view_distance, exposure],
@@ -497,12 +608,28 @@ impl Renderer {
                 None => Vec4::ZERO.into(),
             },
             far: [if self.far.enabled { FAR_RANGE } else { frame.view_distance }, 0.0, 0.0, 0.0],
+            shadow: [0.0, f32::from(u8::from(self.shadows)), self.wind, fade],
+            shadow_radii: [CASCADE_RADII[0], CASCADE_RADII[1], CASCADE_RADII[2], self.shadow_set as f32],
         };
         let queue = &self.gpu.queue;
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        if self.shadows {
+            for (layer, buffer) in self.cascade_globals.iter().enumerate() {
+                if self.cascade_update[layer] {
+                    let g = Globals { shadow: [layer as f32, 1.0, self.wind, fade], ..globals };
+                    queue.write_buffer(buffer, 0, bytemuck::bytes_of(&g));
+                }
+            }
+        }
         queue.write_buffer(&self.offsets, 0, bytemuck::cast_slice(&self.offset_data));
         self.far.write_levels(queue, glam::Vec2::new(cam.position.x, cam.position.z), frame.view_distance);
-        self.parts.prepare(&self.gpu.device, queue, cam.position, view_proj, SHADOW_RADIUS * 1.5 + 8.0);
+        let mut reach = [0.0; CASCADES];
+        for c in 0..CASCADES {
+            if self.shadows && self.cascade_update[self.shadow_set * CASCADES + c] {
+                reach[c] = CASCADE_RADII[c] * 1.25 + 6.0;
+            }
+        }
+        self.parts.prepare(&self.gpu.device, queue, cam.position, view_proj, reach);
         stats.parts_drawn = self.parts.drawn;
         stats.far_levels = if self.far.enabled { self.far.ready_levels() } else { 0 };
         stats.far_triangles = self.far.triangles();
@@ -563,14 +690,15 @@ impl Renderer {
         self.draw_list.clear();
         self.shadow_list.clear();
         let mut stats = FrameStats::default();
-        let shadow_reach = SHADOW_RADIUS * 1.5 + 32.0;
+        let reach = CASCADE_RADII.map(|r| r * 1.25 + 32.0);
+        let mut casters: Vec<(f32, ChunkCoord)> = Vec::new();
         for (coord, chunk) in &self.chunks {
             let origin = chunk_origin(*coord) - camera_pos;
             let (min, max) = (origin + chunk.min, origin + chunk.max);
             let nearest = Vec3::ZERO.clamp(min, max);
             let dist = nearest.length();
-            if dist < shadow_reach {
-                self.shadow_list.push(*coord);
+            if self.shadows && dist < reach[CASCADES - 1] {
+                casters.push((dist, *coord));
             }
             if nearest.truncate().length() < view_distance && frustum.intersects_box(min, max) {
                 self.draw_list.push((dist, *coord));
@@ -578,6 +706,10 @@ impl Renderer {
             }
         }
         self.draw_list.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        // Casters nearest first, so each cascade draws a prefix of the list.
+        casters.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        self.shadow_counts = reach.map(|r| casters.partition_point(|(d, _)| *d < r));
+        self.shadow_list.extend(casters.into_iter().map(|(_, c)| c));
         stats.chunks_drawn = self.draw_list.len();
         stats.shadow_chunks = self.shadow_list.len();
 
@@ -589,10 +721,11 @@ impl Renderer {
         if self.offset_data.len() > self.offsets_capacity {
             self.offsets_capacity = self.offset_data.len().next_power_of_two();
             self.offsets = Self::offsets_buffer(&self.gpu.device, self.offsets_capacity);
-            (self.scene_bg, self.shadow_bg) = Self::scene_bind_groups(
+            (self.scene_bg, self.shadow_bgs) = Self::scene_bind_groups(
                 &self.gpu.device,
                 &self.layouts,
                 &self.globals,
+                &self.cascade_globals,
                 &self.offsets,
                 &self.shadow_map,
                 &self.shadow_sampler,
@@ -615,31 +748,41 @@ impl Renderer {
         );
     }
 
+    /// One depth pass per cascade, each drawing only the casters that reach it.
     fn shadow_pass(&self, encoder: &mut wgpu::CommandEncoder) {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("shadow"),
-            color_attachments: &[],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.shadow_map,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_pipeline(&self.pipelines.shadow);
-        pass.set_bind_group(0, &self.shadow_bg, &[]);
-        self.bind_arenas(&mut pass);
-        let base = self.draw_list.len() as u32;
-        for (i, coord) in self.shadow_list.iter().enumerate() {
-            self.draw_chunk(&mut pass, *coord, base + i as u32);
+        if !self.shadows {
+            return;
         }
-        pass.set_pipeline(&self.pipelines.parts_shadow);
-        self.parts.draw_shadows(&mut pass);
+        for (index, layer) in self.shadow_layers.iter().enumerate() {
+            if !self.cascade_update[index] {
+                continue;
+            }
+            let c = index % CASCADES;
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shadow"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: layer,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipelines.shadow);
+            pass.set_bind_group(0, &self.shadow_bgs[index], &[]);
+            self.bind_arenas(&mut pass);
+            let base = self.draw_list.len() as u32;
+            for (i, coord) in self.shadow_list.iter().take(self.shadow_counts[c]).enumerate() {
+                self.draw_chunk(&mut pass, *coord, base + i as u32);
+            }
+            pass.set_pipeline(&self.pipelines.parts_shadow);
+            self.parts.draw_shadows(&mut pass, c);
+        }
     }
 
     fn scene_pass(&self, encoder: &mut wgpu::CommandEncoder) {

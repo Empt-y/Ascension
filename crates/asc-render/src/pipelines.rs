@@ -75,8 +75,23 @@ impl Layouts {
                 entries: &[
                     uniform_entry(0),
                     storage_entry(1),
-                    texture_entry(2, wgpu::TextureSampleType::Depth),
-                    sampler_entry(3, wgpu::SamplerBindingType::Comparison),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        // Vertex too: foliage looks its shadows up per vertex.
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                        count: None,
+                    },
                 ],
             }),
             shadow: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

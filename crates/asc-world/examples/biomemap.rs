@@ -1,8 +1,10 @@
 //! Paint a top-down biome map with hill shading, to check climate and biome layout.
 //!
 //!     cargo run --release -p asc-world --example biomemap -- [seed] [km across] [out.ppm]
+//!     cargo run --release -p asc-world --example biomemap -- [seed] --find
 //!
-//! Writes a binary PPM (convert with any image tool); the world origin is at the centre.
+//! Writes a binary PPM (convert with any image tool); the world origin is at the centre. With
+//! `--find` it instead prints, for each biome, the nearest dry spot well inside it.
 
 use asc_world::{Biome, WorldGen};
 
@@ -24,6 +26,10 @@ fn color(b: Biome) -> [f32; 3] {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let seed: i32 = args.first().and_then(|s| s.parse().ok()).unwrap_or(1337);
+    if args.get(1).is_some_and(|a| a == "--find") {
+        find(&WorldGen::new(seed));
+        return;
+    }
     let km: f32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(40.0);
     let out = args.get(2).cloned().unwrap_or_else(|| "biomes.ppm".into());
     let size = 800usize;
@@ -50,4 +56,28 @@ fn main() {
     file.extend(pixels);
     std::fs::write(&out, file).expect("writing map");
     println!("wrote {out}: {km} km across, seed {seed}");
+}
+
+/// For each biome, the nearest point (searching outwards in rings) whose neighbours 60 m away are
+/// the same biome too, so it's a fair sample rather than an edge.
+fn find(worldgen: &WorldGen) {
+    for biome in Biome::ALL {
+        let inside = |x: f32, z: f32| {
+            let g = worldgen.ground(x, z);
+            g.biome == biome && !g.underwater && g.slope < 0.5
+        };
+        let found = (1..400).find_map(|ring| {
+            let r = ring as f32 * 50.0;
+            (0..ring * 8).find_map(|k| {
+                let a = k as f32 / (ring * 8) as f32 * std::f32::consts::TAU;
+                let (x, z) = (r * a.cos(), r * a.sin());
+                let around = [(60.0, 0.0), (-60.0, 0.0), (0.0, 60.0), (0.0, -60.0)];
+                (inside(x, z) && around.iter().all(|(dx, dz)| inside(x + dx, z + dz))).then_some((x, z))
+            })
+        });
+        match found {
+            Some((x, z)) => println!("{:8} {x:9.0} {:6.1} {z:9.0}", biome.name(), worldgen.height(x, z)),
+            None => println!("{:8} not found within 20 km", biome.name()),
+        }
+    }
 }

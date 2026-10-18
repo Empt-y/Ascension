@@ -413,8 +413,9 @@ def tuft_cards(m, rng, mat, height, width, cards, lean=0.15):
         out = UP.cross(across).normalized() * rng.choice((-1, 1))
         h = height * rng.uniform(0.85, 1.15)
         w = width * rng.uniform(0.85, 1.15)
-        base = out * rng.uniform(0.0, 0.05) - UP * 0.03
-        top = base + UP * h + out * h * lean * rng.uniform(0.3, 1.0)
+        # Sunk well in, so the card's straight bottom edge stays underground on slopes.
+        base = out * rng.uniform(0.0, 0.05) - UP * 0.12
+        top = base + UP * (h + 0.09) + out * h * lean * rng.uniform(0.3, 1.0)
         points = [base, base.lerp(top, 0.5) - out * h * lean * 0.15, top]
         normals = [(UP * 0.8 + out * 0.2), (UP * 0.75 + out * 0.25), (UP * 0.7 + out * 0.3)]
         strip_card(m, points, [w, w, w], [across] * 3, mat, normals)
@@ -475,20 +476,33 @@ def maple(m, rng):
 
 def birch(m, rng):
     white = bark("birch", (0.72, 0.70, 0.65), 0.75)
-    mark = bark("birch_mark", (0.06, 0.055, 0.05))
+    dark = bark("birch_mark", (0.12, 0.11, 0.10))
+    grey = bark("birch_grey", (0.42, 0.40, 0.37), 0.85)
     leaves = card_material("birch", "leaves_round", (0.36, 0.56, 0.15))
     height = rng.uniform(8.5, 10.0)
     sway = horizontal(rng.uniform(0, TAU)) * rng.uniform(0.2, 0.5)
-    n = 14
+    # A fine trunk (faces ~10-18 cm) so the bark's marks are small dashes, not panels.
+    n, sides = 48, 12
     pts = [Vector((0, -0.3, 0)) + sway * math.sin(math.pi * i / n) + UP * ((height * 0.85 + 0.3) * i / n) for i in range(n + 1)]
     radii = [lerp(0.2, 0.05, i / n) for i in range(n + 1)]
-    marks = {(i, k) for i in range(n) for k in range(7) if rng.random() < 0.16}
-    tube(m, pts, radii, 7, white, mat_fn=lambda i, k: mark if (i, k) in marks else white)
+    # Birch marks: short horizontal dashes, one or two faces wide, darker low down.
+    marks = {}
+    for i in range(n):
+        for k in range(sides):
+            r = rng.random()
+            if r < 0.05 + 0.05 * (1 - i / n):
+                tone = dark if rng.random() < 0.7 else grey
+                marks[(i, k)] = tone
+                if rng.random() < 0.5:
+                    marks[(i, (k + 1) % sides)] = tone
+    tube(m, pts, radii, sides, white, mat_fn=lambda i, k: marks.get((i, k), white))
     twigs = [(pts[-1], UP)]
-    for i in range(n // 3, n):
-        for _ in range(2 if i > n // 2 else 1):
+    coarse = 14
+    for j in range(coarse // 3, coarse):
+        i = j * n // coarse
+        for _ in range(2 if j > coarse // 2 else 1):
             d = (horizontal(rng.uniform(0, TAU)) + UP * rng.uniform(0.4, 1.0)).normalized()
-            reach = lerp(1.9, 0.8, (i - n // 3) / (n - n // 3)) * rng.uniform(0.8, 1.1)
+            reach = lerp(1.9, 0.8, (j - coarse // 3) / (coarse - coarse // 3)) * rng.uniform(0.8, 1.1)
             grow(m, rng, pts[i], d, reach, 0.045, 1, white, twigs, spread=0.6, rise=-0.15, children=(2, 3))
     center, crown = bounds_of([p for p, _ in twigs], 0.6)
     hang_cards(m, rng, twigs, leaves, 1.15, 4, center, crown)
@@ -856,8 +870,8 @@ def cattails(m, rng):
 
 
 def grass(m, rng):
-    tint = rng.choice([(0.36, 0.6, 0.17), (0.32, 0.56, 0.16), (0.4, 0.62, 0.18)])
-    tuft_cards(m, rng, card_material(f"grass_{tint[0]}", "grass_tuft", tint), rng.uniform(0.32, 0.45), 0.7, 3)
+    tint = rng.choice([(0.25, 0.48, 0.11), (0.22, 0.44, 0.1), (0.28, 0.5, 0.12)])
+    tuft_cards(m, rng, card_material(f"grass_{tint[0]}", "grass_tuft", tint), rng.uniform(0.32, 0.45), 0.55, 3)
 
 
 def tall_grass(m, rng):

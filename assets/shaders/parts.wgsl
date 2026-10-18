@@ -41,6 +41,12 @@ struct VsOut {
     // 0..1 per instance, for colour variation.
     @location(5) @interpolate(flat) variety: f32,
     @location(6) @interpolate(flat) fade: f32,
+    // Foliage only, lit per vertex (it's drawn many layers deep, so per-pixel work is precious):
+    // sky and ground ambient plus moonlight, sun colour (already shadowed), and fog colour (rgb)
+    // and amount (a).
+    @location(7) ambient: vec3<f32>,
+    @location(8) sun: vec3<f32>,
+    @location(9) fog: vec4<f32>,
 }
 
 fn rotate_y(v: vec3<f32>, yaw: f32) -> vec3<f32> {
@@ -49,11 +55,12 @@ fn rotate_y(v: vec3<f32>, yaw: f32) -> vec3<f32> {
     return vec3(v.x * c + v.z * s, v.y, -v.x * s + v.z * c);
 }
 
-// Camera-relative position of a vertex: scaled, turned, placed, and pushed by the wind.
-fn place(in: VsIn) -> vec3<f32> {
+// Camera-relative position of a vertex: scaled, turned, placed, and (with `wind`) pushed by the
+// wind. Shadows are cast without wind: moving leaves are fine, flickering shadow patches aren't.
+fn place(in: VsIn, wind: bool) -> vec3<f32> {
     let local = in.position * in.params.x;
     var rel = rotate_y(local, in.origin.w) + in.origin.xyz;
-    let sway = in.params.z;
+    let sway = select(0.0, in.params.z * globals.shadow.z, wind);
     if sway > 0.0 {
         let world = in.origin.xyz + globals.camera.xyz;
         let phase = dot(world.xz, vec2(0.37, 0.61));
@@ -78,7 +85,7 @@ fn hash11(x: f32) -> f32 {
 @vertex
 fn vs_main(in: VsIn) -> VsOut {
     var out: VsOut;
-    out.rel = place(in);
+    out.rel = place(in, true);
     out.normal = rotate_y(in.normal, in.origin.w);
     out.clip = globals.view_proj * vec4(out.rel, 1.0);
     out.uv = in.uv;
@@ -87,6 +94,17 @@ fn vs_main(in: VsIn) -> VsOut {
     let world = in.origin.xyz + globals.camera.xyz;
     out.variety = hash11(dot(floor(world * 4.0), vec3(1.0, 57.0, 113.0)));
     out.fade = in.params.w;
+    if material.extra.w > 0.5 {
+        let n = normalize(out.normal);
+        let sky_col = sky_base(normalize(vec3(n.x, max(n.y, 0.2), n.z)));
+        let sky_amb = mix(vec3(dot(sky_col, vec3(0.2126, 0.7152, 0.0722))), sky_col, 0.6) * 0.8;
+        let ground_amb = vec3(0.10, 0.08, 0.06) * (0.15 + 0.85 * daylight());
+        let moon = vec3(0.05, 0.065, 0.12) * (1.0 - daylight()) * max(dot(n, -sun_dir()), 0.0);
+        out.ambient = mix(ground_amb, sky_amb, n.y * 0.5 + 0.5) + moon;
+        out.sun = sun_light() * shadow_factor_fast(out.rel, n);
+        let edge = smoothstep(globals.far.x * 0.75, globals.far.x * 0.97, length(out.rel.xz));
+        out.fog = vec4(sky_base(normalize(out.rel)), max(fog_amount(out.rel), edge));
+    }
     return out;
 }
 
@@ -98,7 +116,7 @@ struct ShadowOut {
 @vertex
 fn vs_shadow(in: VsIn) -> ShadowOut {
     var out: ShadowOut;
-    out.clip = globals.shadow_view_proj * vec4(place(in), 1.0);
+    out.clip = shadow_caster_matrix() * vec4(place(in, false), 1.0);
     out.uv = in.uv;
     return out;
 }
@@ -106,25 +124,26 @@ fn vs_shadow(in: VsIn) -> ShadowOut {
 @fragment
 fn fs_shadow(in: ShadowOut) {
     if material.extra.y >= 0.0 && material.extra.z > 0.0 {
-        let a = textureSample(model_textures, model_sampler, in.uv, i32(material.extra.y)).a;
+        // A blurred mip: leaves cast soft, dappled shadows rather than sharp speckle, which would
+        // shimmer whenever the shadow maps are redrawn.
+        let a = textureSampleLevel(model_textures, model_sampler, in.uv, i32(material.extra.y), 2.5).a;
         if a < material.extra.z {
             discard;
         }
     }
 }
 
-// Sun and sky on foliage: wrapped diffuse (leaves face every way), light transmitted through the
-// leaves when looking towards the sun, and ambient darkened deep inside the crown.
-fn shade_foliage(albedo: vec3<f32>, n: vec3<f32>, rel: vec3<f32>, occlusion: f32, shadow: f32) -> vec3<f32> {
+// Sun and sky on foliage, from the per-vertex light: wrapped diffuse (leaves face every way), light
+// transmitted through the leaves when looking towards the sun, and ambient darkened deep inside
+// the crown. No specular: leaf cards are matte at the sizes they're seen.
+fn shade_foliage(in: VsOut, albedo: vec3<f32>, n: vec3<f32>, occlusion: f32) -> vec3<f32> {
     let l = sun_dir();
-    let v = normalize(-rel);
-    var color = shade_pbr(albedo, 0.85, 0.0, n, rel, occlusion, shadow);
-    let sun = sun_light() * shadow;
-    let ndl = dot(n, l);
-    let wrap = max(ndl + 0.45, 0.0) / 1.45 - max(ndl, 0.0);
+    let v = normalize(-in.rel);
+    let wrap = max(dot(n, l) + 0.45, 0.0) / 1.45;
     let through = pow(max(dot(-v, l), 0.0), 3.0) * 0.55 + 0.12;
-    color += albedo * sun * (wrap * 0.8 + through * vec3(1.0, 1.08, 0.75)) * mix(0.35, 1.0, occlusion);
-    return color;
+    let sun = in.sun * (wrap + through * vec3(1.0, 1.08, 0.75)) * mix(0.35, 1.0, occlusion);
+    let color = albedo * (sun + in.ambient * occlusion);
+    return mix(color, in.fog.rgb, in.fog.a);
 }
 
 @fragment
@@ -144,12 +163,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
     let occlusion = in.color.a;
     var color: vec3<f32>;
-    if material.extra.w > 0.5 {
+    let foliage = material.extra.w > 0.5;
+    if foliage {
         let shift = in.variety - 0.5;
         albedo *= vec3(1.0 + shift * 0.25, 1.0 + shift * 0.12, 1.0 - shift * 0.2) * (0.9 + 0.2 * hash11(in.variety * 7.0));
-        // Leaves are layered many deep, so they get a single-tap shadow lookup.
-        let shadow = shadow_factor_fast(in.rel, geometric);
-        color = shade_foliage(albedo, geometric, in.rel, occlusion, shadow);
+        // Leaves are layered many deep, so their shadow comes from the vertices (in `in.sun`).
+        color = shade_foliage(in, albedo, geometric, occlusion);
     } else {
         // The terrain's procedural detail, toned down: a little grain and relief so flat faces read
         // as material rather than plastic. Polished metal shows bump noise as blotchy glints, so
@@ -162,7 +181,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         if dot(geometric, sun_dir()) > 0.0 {
             shadow = shadow_factor(in.rel, geometric);
         }
-        color = shade_pbr(albedo, material.base.a, material.extra.x, n, in.rel, occlusion, shadow);
+        color = apply_fog(shade_pbr(albedo, material.base.a, material.extra.x, n, in.rel, occlusion, shadow), in.rel);
     }
     // Distance and LOD fades: a screen-space dither. A positive fade keeps pixels whose dither value
     // is below it, a negative one the rest, so a model and its replacement cross-fade exactly.
@@ -173,7 +192,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if !ALPHA_TO_COVERAGE && alpha < 0.5 {
         discard;
     }
-    return vec4(apply_fog(color, in.rel), alpha);
+    return vec4(color, alpha);
 }
 
 // Placement preview: the part tinted blue (fits) or red (doesn't), translucent, with a rim.

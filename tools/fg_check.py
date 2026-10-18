@@ -4,8 +4,8 @@ Live tests open windows and steal focus; never do that while the user is in a ga
 """
 import ctypes, ctypes.wintypes as wt, os, sys
 
-# prismlauncher.exe, discord.exe: fine to take focus from (user, 2026-10-18); games are not.
-ALLOWED = {"claude.exe", "explorer.exe", "ascension.exe", "windowsterminal.exe", "code.exe", "fsh-shell.exe", "prismlauncher.exe", "discord.exe"}
+# prismlauncher.exe, discord.exe, chrome.exe: fine to take focus from (user, 2026-10-18); games are not.
+ALLOWED = {"claude.exe", "explorer.exe", "ascension.exe", "windowsterminal.exe", "code.exe", "fsh-shell.exe", "prismlauncher.exe", "discord.exe", "chrome.exe"}
 
 user32, kernel32, psapi = ctypes.windll.user32, ctypes.windll.kernel32, ctypes.windll.psapi
 hwnd = user32.GetForegroundWindow()

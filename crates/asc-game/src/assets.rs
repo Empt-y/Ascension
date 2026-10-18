@@ -83,7 +83,8 @@ pub struct KindSpec {
     pub scale: [f32; 2],
     pub sway: f32,
     pub max_slope: f32,
-    pub shadows: bool,
+    /// Casts sun shadows out to this distance (0 for none).
+    pub shadow_distance: f32,
     pub collide: Collide,
     /// Beyond this distance the kind is drawn as its impostor (`<id>_far.glb`), if it has one.
     #[serde(default)]

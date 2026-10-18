@@ -16,7 +16,7 @@
 #   scale      random uniform scale range
 #   sway       how much it moves in the wind
 #   max_slope  not placed on ground steeper than this (rise over run)
-#   shadows    whether it casts sun shadows
+#   shadow_distance  casts sun shadows out to this far (0 for none); small things only need them close
 #   collide    "trunk" (a capsule up the trunk), "rock" (a sphere), or "none"
 #   lod        beyond this distance draw the model's impostor (<id>_far.glb, two crossed cards
 #              rendered by tools/blender/nature.py) instead of the model
@@ -27,9 +27,9 @@ fade = 40.0
 scale = [0.8, 1.2]
 sway = 1.0
 max_slope = 0.7
-shadows = true
+shadow_distance = 200.0
 collide = "trunk"
-lod = 90.0
+lod = 70.0
 
 [kinds.shrub]
 distance = 160.0
@@ -37,7 +37,7 @@ fade = 30.0
 scale = [0.75, 1.3]
 sway = 0.6
 max_slope = 0.9
-shadows = true
+shadow_distance = 30.0
 collide = "none"
 
 [kinds.plant]
@@ -46,7 +46,7 @@ fade = 20.0
 scale = [0.8, 1.25]
 sway = 0.8
 max_slope = 0.9
-shadows = false
+shadow_distance = 0.0
 collide = "none"
 
 [kinds.grass]
@@ -55,7 +55,7 @@ fade = 15.0
 scale = [0.8, 1.3]
 sway = 1.0
 max_slope = 1.0
-shadows = false
+shadow_distance = 0.0
 collide = "none"
 
 [kinds.rock]
@@ -64,7 +64,7 @@ fade = 30.0
 scale = [0.6, 1.5]
 sway = 0.0
 max_slope = 1.6
-shadows = true
+shadow_distance = 80.0
 collide = "rock"
 
 [kinds.debris]
@@ -73,7 +73,7 @@ fade = 25.0
 scale = [0.8, 1.2]
 sway = 0.0
 max_slope = 0.5
-shadows = true
+shadow_distance = 25.0
 collide = "none"
 
 # Instances of each kind per square metre, by biome. Trees in woodland biomes are also thinned
