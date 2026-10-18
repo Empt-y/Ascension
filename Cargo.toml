@@ -18,7 +18,7 @@ asc-world = { path = "crates/asc-world" }
 asc-render = { path = "crates/asc-render" }
 wgpu = "30"
 winit = "0.30"
-glam = { version = "0.30", features = ["bytemuck"] }
+glam = { version = "0.30", features = ["bytemuck", "serde"] }
 bytemuck = { version = "1", features = ["derive"] }
 fastnoise-lite = "1.1"
 crossbeam-channel = "0.5"
@@ -29,6 +29,10 @@ egui-winit = { version = "0.36", default-features = false, features = ["links", 
 log = "0.4"
 env_logger = "0.11"
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+postcard = { version = "1", features = ["use-std"] }
+dirs = "6"
 pollster = "0.4"
 thread-priority = "3"
 

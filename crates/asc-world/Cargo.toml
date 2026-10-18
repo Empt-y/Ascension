@@ -12,6 +12,7 @@ glam.workspace = true
 fastnoise-lite.workspace = true
 ahash.workspace = true
 bytemuck.workspace = true
+serde.workspace = true
 
 [dev-dependencies]
 ahash.workspace = true

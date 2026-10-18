@@ -6,6 +6,7 @@
 
 use ahash::AHashMap;
 use glam::{IVec3, Vec3};
+use serde::{Deserialize, Serialize};
 
 use crate::chunk::{CHUNK, ChunkCoord, ChunkData, chunk_of};
 use crate::material::Material;
@@ -13,13 +14,13 @@ use crate::material::Material;
 /// Densities are clamped to this distance from the surface (metres).
 pub const DENSITY_CLAMP: f32 = 4.0;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EditKind {
     Dig,
     Fill,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EditOp {
     pub center: Vec3,
     pub radius: f32,
@@ -89,6 +90,20 @@ impl EditLog {
     /// Ops that may affect point `p`, in application order.
     pub fn ops_near(&self, p: Vec3) -> impl Iterator<Item = &EditOp> {
         self.ops_for(chunk_of(p))
+    }
+
+    /// Every op in the order it was made, for saving.
+    pub fn ops(&self) -> &[EditOp] {
+        &self.ops
+    }
+
+    /// Rebuild a log (and its chunk index) from saved ops.
+    pub fn from_ops(ops: impl IntoIterator<Item = EditOp>) -> Self {
+        let mut log = Self::default();
+        for op in ops {
+            log.push(op);
+        }
+        log
     }
 
     pub fn is_edited(&self, coord: ChunkCoord) -> bool {

@@ -61,24 +61,35 @@ impl ChunkData {
 
     pub fn build(worldgen: &WorldGen, coord: ChunkCoord, ops: &[EditOp]) -> Self {
         let mut chunk = worldgen.generate(coord);
-        if !ops.is_empty() {
-            for z in 0..SAMPLES {
-                for y in 0..SAMPLES {
-                    for x in 0..SAMPLES {
-                        let p = Self::sample_pos(coord, x, y, z);
+        chunk.apply_ops(ops);
+        chunk.update_uniform();
+        chunk
+    }
+
+    /// Replay edits in order. Each op only visits the samples within its reach; beyond that it is an
+    /// exact no-op (densities are clamped), so this matches applying every op to every sample.
+    pub fn apply_ops(&mut self, ops: &[EditOp]) {
+        let (lo_bound, _) = Self::sample_bounds(self.coord);
+        let last = (SAMPLES - 1) as f32;
+        for op in ops {
+            let reach = Vec3::splat(op.reach());
+            let lo = (op.center - reach - lo_bound).ceil().clamp(Vec3::ZERO, Vec3::splat(last)).as_uvec3();
+            let hi = (op.center + reach - lo_bound).floor().clamp(Vec3::ZERO, Vec3::splat(last)).as_uvec3();
+            if (op.center - reach - lo_bound).cmpgt(Vec3::splat(last)).any()
+                || (op.center + reach - lo_bound).cmplt(Vec3::ZERO).any()
+            {
+                continue;
+            }
+            for z in lo.z as usize..=hi.z as usize {
+                for y in lo.y as usize..=hi.y as usize {
+                    for x in lo.x as usize..=hi.x as usize {
+                        let p = Self::sample_pos(self.coord, x, y, z);
                         let i = Self::index(x, y, z);
-                        let (mut d, mut m) = (chunk.density[i], chunk.material[i]);
-                        for op in ops {
-                            (d, m) = op.apply(p, d, m);
-                        }
-                        chunk.density[i] = d;
-                        chunk.material[i] = m;
+                        (self.density[i], self.material[i]) = op.apply(p, self.density[i], self.material[i]);
                     }
                 }
             }
         }
-        chunk.update_uniform();
-        chunk
     }
 
     pub fn update_uniform(&mut self) {

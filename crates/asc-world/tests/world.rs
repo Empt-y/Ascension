@@ -193,3 +193,67 @@ fn raycast_finds_the_terrain_surface() {
     // Overhangs and caves can shift the surface a little from the height field.
     assert!((hit.point.y - h).abs() < 8.0, "hit {} vs height {h}", hit.point.y);
 }
+
+#[test]
+fn bounding_box_replay_matches_full_replay() {
+    let world = World::new(SEED);
+    let h = world.worldgen.height(12.0, -7.0);
+    let coord = chunk_of(Vec3::new(12.0, h, -7.0));
+    let base = chunk_origin(coord);
+    // A spread of digs and fills, some straddling the chunk border, one well outside it.
+    let ops: Vec<EditOp> = (0..40)
+        .map(|i| {
+            let t = i as f32;
+            let center = base
+                + Vec3::new((t * 7.3) % 40.0 - 4.0, h - base.y + (t % 5.0) - 2.0, (t * 3.1) % 38.0 - 3.0);
+            let kind = if i % 3 == 0 { EditKind::Fill } else { EditKind::Dig };
+            EditOp { center, radius: 1.0 + (t % 4.0), kind, material: Material::Rock }
+        })
+        .chain([EditOp {
+            center: base + Vec3::splat(200.0),
+            radius: 3.0,
+            kind: EditKind::Dig,
+            material: Material::Air,
+        }])
+        .collect();
+    let fast = ChunkData::build(&world.worldgen, coord, &ops);
+    let mut slow = world.worldgen.generate(coord);
+    for z in 0..SAMPLES {
+        for y in 0..SAMPLES {
+            for x in 0..SAMPLES {
+                let p = ChunkData::sample_pos(coord, x, y, z);
+                let i = ChunkData::index(x, y, z);
+                for op in &ops {
+                    (slow.density[i], slow.material[i]) = op.apply(p, slow.density[i], slow.material[i]);
+                }
+            }
+        }
+    }
+    assert_eq!(fast.density, slow.density);
+    assert_eq!(fast.material, slow.material);
+}
+
+#[test]
+fn census_measures_a_filled_sphere() {
+    let mut world = World::new(SEED);
+    let center = Vec3::new(0.0, 600.0, 0.0);
+    let empty = world.census(center, 2.0, 0.25);
+    let expected = 4.0 / 3.0 * std::f32::consts::PI * 8.0;
+    assert!(empty.total_solid() == 0.0);
+    assert!((empty.air - expected).abs() / expected < 0.06, "air {} vs {expected}", empty.air);
+
+    world.edits.push(EditOp { center, radius: 4.0, kind: EditKind::Fill, material: Material::Rock });
+    let full = world.census(center, 2.0, 0.25);
+    assert!(full.air == 0.0);
+    let rock = full.solid[Material::Rock as usize];
+    assert!((rock - expected).abs() / expected < 0.06, "rock {rock} vs {expected}");
+    assert_eq!(rock, full.total_solid());
+}
+
+#[test]
+fn material_names_round_trip() {
+    for m in Material::ALL {
+        assert_eq!(Material::from_name(m.name()), Some(m));
+        assert_eq!(Material::from_u8(m as u8), m);
+    }
+}
