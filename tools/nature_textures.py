@@ -270,6 +270,59 @@ def tuft(rng, blades, height, width, base_color=(195, 220, 160), heads=0, spread
     return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), "RGBA")
 
 
+def large_leaf(rng, base_color=(200, 225, 165)):
+    """One big tropical leaf along the texture's vertical axis (stalk at the bottom): a broad blade
+    with a pale midrib, side veins and a few tears towards the edges."""
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    x0 = S * 0.5
+    steps = 60
+    left, right = [], []
+    for i in range(steps + 1):
+        t = i / steps
+        y = S * (0.99 - 0.97 * t)
+        w = S * 0.46 * math.sin(math.pi * min(1.0, 0.04 + t * 0.98)) ** 0.75
+        left.append((x0 - w, y))
+        right.append((x0 + w, y))
+    color = shade(rng, base_color, 0.05)
+    draw.polygon(left + right[::-1], fill=color + (255,))
+    # Veins, alternately darker and lighter bands.
+    for i in range(1, 26):
+        t = i / 26
+        y = S * (0.99 - 0.97 * t)
+        for side in (-1, 1):
+            w = S * 0.46 * math.sin(math.pi * min(1.0, 0.04 + t * 0.98)) ** 0.75
+            end = (x0 + side * w, y - S * 0.06)
+            draw.line([(x0, y), end], fill=tuple(int(c * 0.88) for c in color) + (255,), width=int(S * 0.006))
+    draw.line([(x0, S * 0.995), (x0, S * 0.03)], fill=(225, 235, 190, 255), width=int(S * 0.014))
+    # Tears: thin transparent wedges from the edge in towards the rib.
+    for _ in range(7):
+        t = rng.uniform(0.2, 0.85)
+        y = S * (0.99 - 0.97 * t)
+        side = rng.choice((-1, 1))
+        w = S * 0.46 * math.sin(math.pi * min(1.0, 0.04 + t * 0.98)) ** 0.75
+        depth = rng.uniform(0.35, 0.8)
+        draw.polygon(
+            [(x0 + side * w * 1.02, y + S * 0.012), (x0 + side * w * 1.02, y - S * 0.004), (x0 + side * w * (1 - depth), y - S * 0.03)],
+            fill=(0, 0, 0, 0),
+        )
+    return img
+
+
+def cotton(rng):
+    """Tundra cotton grass: thin blades with white tufts on top of a few stalks."""
+    img = tuft(rng, 40, 0.75, 0.02, base_color=(190, 205, 140))
+    draw = ImageDraw.Draw(img)
+    for _ in range(9):
+        x0 = S * (0.5 + rng.uniform(-0.28, 0.28))
+        h = S * rng.uniform(0.75, 0.98)
+        top = (x0 + rng.uniform(-0.08, 0.08) * h, S - h)
+        draw.line([(x0, S * 0.999), top], fill=(140, 150, 100, 255), width=int(S * 0.004))
+        r = S * rng.uniform(0.025, 0.035)
+        draw.ellipse([top[0] - r, top[1] - r * 1.2, top[0] + r, top[1] + r], fill=(250, 250, 245, 255))
+    return img
+
+
 def main():
     finish(leaf_cluster(random.Random(1), 3, 9, 0.17, 0.05, lobes=3, lobe_depth=0.45), "leaves_oak")
     finish(leaf_cluster(random.Random(2), 3, 11, 0.13, 0.045), "leaves_round")
@@ -282,6 +335,8 @@ def main():
     finish(tuft(random.Random(9), 70, 0.95, 0.035), "grass_tuft")
     finish(tuft(random.Random(10), 45, 0.98, 0.028, base_color=(200, 215, 150), heads=6), "grass_tall")
     finish(tuft(random.Random(11), 40, 0.95, 0.018, base_color=(225, 220, 165), spread=0.3), "grass_thin")
+    finish(large_leaf(random.Random(12)), "leaf_large")
+    finish(cotton(random.Random(13)), "grass_cotton")
 
 
 if __name__ == "__main__":

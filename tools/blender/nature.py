@@ -148,9 +148,10 @@ def perpendicular(t):
     return t.cross(a).normalized()
 
 
-def tube(m, points, radii, sides, mat, cap_end=True, cap_start=False, cap_mat=None, smooth=True, mat_fn=None):
+def tube(m, points, radii, sides, mat, cap_end=True, cap_start=False, cap_mat=None, smooth=True, mat_fn=None, ribs=0.0):
     """A tube through `points` with a radius per point, framed by parallel transport so it doesn't
-    twist. `mat_fn(segment, side)` can vary the material per face."""
+    twist. `mat_fn(segment, side)` can vary the material per face; `ribs` pulls every other side in
+    by that fraction (cactus ribs)."""
     pts = [Vector(p) for p in points]
     n = len(pts)
     tangents = [(pts[min(i + 1, n - 1)] - pts[max(i - 1, 0)]).normalized() for i in range(n)]
@@ -161,7 +162,10 @@ def tube(m, points, radii, sides, mat, cap_end=True, cap_start=False, cap_mat=No
         normal = (normal - t * normal.dot(t)).normalized()
         binormal = t.cross(normal)
         ring = [
-            pts[i] + (normal * math.cos(TAU * k / sides) + binormal * math.sin(TAU * k / sides)) * radii[i]
+            pts[i]
+            + (normal * math.cos(TAU * k / sides) + binormal * math.sin(TAU * k / sides))
+            * radii[i]
+            * (1.0 - ribs * (k % 2))
             for k in range(sides)
         ]
         rings.append(m.verts(ring))
@@ -192,6 +196,8 @@ def blob(
     top=0.6,
     mat2=None,
     mix=0.0,
+    bands=0.0,
+    basis=None,
 ):
     """A noise-displaced ellipsoid. `floor` flattens it at a height; `top_mat` paints faces whose
     normal points up past `top` (snow, moss); `mat2` paints a noise-chosen share `mix` of faces."""
@@ -203,7 +209,11 @@ def blob(
     for v in tmp.verts:
         d = v.co.normalized()
         r = 1.0 + amp * noise.noise(d * freq + off) + amp * 0.5 * noise.noise(d * freq * 2.3 + off * 1.7)
-        p = Vector((d.x * radii[0], d.y * radii[1], d.z * radii[2])) * r + c
+        if basis is None:
+            p = Vector((d.x * radii[0], d.y * radii[1], d.z * radii[2])) * r + c
+        else:
+            # Axes of a right-handed frame, so the winding survives.
+            p = (basis[0] * d.x * radii[0] + basis[1] * d.y * radii[1] + basis[2] * d.z * radii[2]) * r + c
         if floor is not None:
             p.y = max(p.y, floor)
         made[v] = m.bm.verts.new(g2b(p))
@@ -214,7 +224,11 @@ def blob(
         face.smooth = smooth
         face.normal_update()
         chosen = mat
-        if mat2 is not None and noise.noise(face.calc_center_median() * 1.7 + off) > 1.0 - 2.0 * mix:
+        if mat2 is not None and bands > 0.0:
+            # Horizontal strata `bands` metres thick (Blender z is game y).
+            if int(math.floor(face.calc_center_median().z / bands)) % 2:
+                chosen = mat2
+        elif mat2 is not None and noise.noise(face.calc_center_median() * 1.7 + off) > 1.0 - 2.0 * mix:
             chosen = mat2
         if top_mat is not None and face.normal.z > top:
             chosen = top_mat
@@ -923,6 +937,197 @@ def stump(m, rng):
         d = horizontal(TAU * k / 5 + rng.uniform(-0.3, 0.3))
         tube(m, [d * 0.2 + UP * 0.28, d * 0.45 + UP * 0.06, d * 0.72 - UP * 0.1, d * 0.85 - UP * 0.2], [0.17, 0.12, 0.07, 0.04], 6, bark_mat)
 
+# ---------------------------------------------------------------------------------------------
+# Desert, savanna, jungle, tundra and arctic
+
+
+def saguaro(m, rng):
+    skin = material("cactus", (0.10, 0.22, 0.08), 0.6)
+    height = rng.uniform(4.0, 5.5)
+    lean = horizontal(rng.uniform(0, TAU)) * 0.15
+    trunk = [Vector((0, -0.3, 0)) + lean * (i / 6) ** 2 + UP * ((height + 0.3) * i / 6) for i in range(7)]
+    radius = rng.uniform(0.3, 0.36)
+    tube(m, trunk, [radius] * 6 + [radius * 0.95], 16, skin, cap_end=False, ribs=0.1)
+    blob(m, trunk[-1], (radius * 0.95, radius * 0.75, radius * 0.95), skin, rng, subdiv=2, amp=0.02)
+    for k in range(rng.randint(1, 3)):
+        a = rng.uniform(0, TAU)
+        out = horizontal(a)
+        y = rng.uniform(1.4, height * 0.6)
+        reach = rng.uniform(0.5, 0.8)
+        rise = rng.uniform(1.0, height - y - 0.4)
+        r = radius * 0.75
+        base = Vector((0, y, 0))
+        elbow = base + out * reach
+        arm = [base, base + out * reach * 0.6, elbow + UP * 0.25, elbow + UP * rise * 0.5, elbow + UP * rise]
+        tube(m, arm, [r] * 5, 14, skin, cap_end=False, ribs=0.1)
+        blob(m, arm[-1], (r * 0.95, r * 0.75, r * 0.95), skin, rng, subdiv=2, amp=0.02)
+
+
+def barrel_cactus(m, rng):
+    skin = material("cactus", (0.10, 0.22, 0.08), 0.6)
+    bloom = material("cactus_flower", (0.7, 0.45, 0.04), 0.5)
+    for k in range(rng.randint(1, 3)):
+        c = horizontal(rng.uniform(0, TAU)) * (0.0 if k == 0 else rng.uniform(0.35, 0.55))
+        h = rng.uniform(0.35, 0.7) * (1.0 if k == 0 else 0.7)
+        r = h * rng.uniform(0.55, 0.7)
+        n = 8
+        pts = [c + UP * (-0.1 + (h + 0.1) * i / n) for i in range(n + 1)]
+        radii = [max(0.02, r * math.sin(math.pi * (0.25 + 0.75 * i / n)) ** 0.6) for i in range(n + 1)]
+        tube(m, pts, radii, 18, skin, ribs=0.12)
+        for j in range(5):
+            blob(m, pts[-1] + horizontal(TAU * j / 5) * radii[-1] * 0.6, (0.04, 0.03, 0.04), bloom, rng, subdiv=1, amp=0.0)
+
+
+def prickly_pear(m, rng):
+    skin = material("prickly_pear", (0.16, 0.3, 0.1), 0.6)
+    fruit = material("prickly_fruit", (0.55, 0.05, 0.12), 0.5)
+
+    def paddle(base, d, size, depth):
+        c = base + d * size * 0.9
+        side = UP.cross(d)
+        side = side.normalized() if side.length > 1e-3 else Vector((1, 0, 0))
+        # A flat oval: wide across the paddle, long along it, thin through it.
+        basis = (side, d, side.cross(d).normalized())
+        blob(m, c, (size * 0.62, size * 0.95, size * 0.18), skin, rng, subdiv=2, amp=0.05, basis=basis)
+        if depth == 0:
+            for _ in range(rng.randint(0, 2)):
+                blob(m, c + d * size * 0.9 + random_unit(rng) * 0.04, (0.05, 0.06, 0.05), fruit, rng, subdiv=1, amp=0.0)
+            return
+        for _ in range(rng.randint(1, 2)):
+            nd = (d + horizontal(rng.uniform(0, TAU)) * 0.7).normalized()
+            paddle(c + d * size * 0.7, nd, size * 0.85, depth - 1)
+
+    for _ in range(rng.randint(2, 3)):
+        d = (UP + horizontal(rng.uniform(0, TAU)) * 0.5).normalized()
+        paddle(Vector((0, -0.05, 0)), d, rng.uniform(0.22, 0.28), 2)
+
+
+def tumbleweed(m, rng):
+    twig = bark("tumbleweed", (0.36, 0.28, 0.17), 0.95)
+    r = rng.uniform(0.35, 0.5)
+    c = Vector((0, r * 0.85, 0))
+    # Twigs wound round the surface of a ball: each runs roughly tangent to it.
+    for _ in range(75):
+        d = random_unit(rng)
+        start = c + d * r * rng.uniform(0.55, 0.95)
+        tangent = d.cross(random_unit(rng)).normalized()
+        branch(m, start, tangent, r * rng.uniform(0.5, 0.8), 0.01, twig, rng, segments=3, sides=3, curl=-0.3)
+
+
+def sandstone_rock(m, rng):
+    light = material("sandstone_a", (0.48, 0.31, 0.18), 0.85)
+    dark = material("sandstone_b", (0.30, 0.16, 0.08), 0.9)
+    rx = rng.uniform(0.9, 1.5)
+    ry = rx * rng.uniform(0.6, 0.9)
+    blob(m, (0, ry * 0.6, 0), (rx, ry, rx * rng.uniform(0.7, 1.0)), light, rng, subdiv=4, amp=0.18, freq=0.9, mat2=dark, bands=0.22)
+    m.root_shade = (ry * 0.6, 0.35)
+
+
+def acacia(m, rng):
+    bark_mat = bark("acacia", (0.16, 0.11, 0.07))
+    leaves = card_material("acacia", "leaves_round", (0.34, 0.44, 0.14))
+    lean = horizontal(rng.uniform(0, TAU)) * rng.uniform(0.3, 0.7)
+    split = rng.uniform(2.0, 2.8)
+    trunk = [Vector((0, -0.4, 0)), Vector((0, split * 0.5, 0)) + lean * 0.3, Vector((0, split, 0)) + lean]
+    tube(m, trunk, [0.32, 0.25, 0.22], 8, bark_mat, cap_end=False)
+    twigs = []
+    for k in range(rng.randint(3, 4)):
+        d = (horizontal(TAU * k / 3.5 + rng.uniform(-0.4, 0.4)) * 0.8 + UP * rng.uniform(0.9, 1.3)).normalized()
+        end = branch(m, trunk[-1], d, rng.uniform(2.0, 2.8), 0.14, bark_mat, rng, curl=-0.2)
+        # Then out flat: the umbrella.
+        for _ in range(rng.randint(2, 3)):
+            flat = (horizontal(rng.uniform(0, TAU)) + UP * rng.uniform(-0.05, 0.15)).normalized()
+            grow(m, rng, end, flat, rng.uniform(1.4, 2.2), 0.07, 1, bark_mat, twigs, spread=0.5, rise=-0.05, children=(2, 3))
+    center, radii = bounds_of([p for p, _ in twigs], 0.6)
+    radii = (radii[0], max(radii[1], 0.6), radii[2])
+    # Cards lie nearly flat, so the crown reads as a thin, wide canopy.
+    for point, direction in twigs:
+        for _ in range(5):
+            out = Vector((point.x - center.x, 0.0, point.z - center.z))
+            out = out.normalized() if out.length > 1e-3 else horizontal(rng.uniform(0, TAU))
+            up = (out + random_unit(rng) * 0.5 + UP * 0.1).normalized()
+            across = up.cross(UP)
+            if across.length < 1e-3:
+                continue
+            across.normalize()
+            tilt = rng.uniform(-0.35, 0.35)
+            across = across * math.cos(tilt) + up.cross(across) * math.sin(tilt)
+            size = rng.uniform(1.1, 1.5)
+            corners = quad(point - up * size * 0.15 + UP * rng.uniform(-0.15, 0.15), up, across, size, size)
+            m.card(corners, leaves, [crown_normal(c, center, radii) * 0.5 + UP * 0.5 for c in corners])
+    m.occluders.append((center, radii))
+
+
+def jungle_tree(m, rng):
+    bark_mat = bark("jungle", (0.2, 0.16, 0.11))
+    leaves = card_material(f"jungle_{rng.randint(0, 1)}", "leaves_round", rng.choice([(0.14, 0.36, 0.08), (0.18, 0.4, 0.1)]))
+    height = rng.uniform(14.0, 17.0)
+    top = height * 0.68
+    pts = [Vector((0, -0.4, 0)), Vector((0, 2.0, 0)), Vector((0.2, top * 0.6, 0.1)), Vector((0, top, 0))]
+    tube(m, pts, [0.55, 0.45, 0.38, 0.32], 9, bark_mat, cap_end=False)
+    # Buttress roots: flattened fins flaring from the base.
+    for k in range(rng.randint(4, 6)):
+        d = horizontal(TAU * k / 5 + rng.uniform(-0.3, 0.3))
+        fin = [Vector((0, 2.2, 0)) + d * 0.25, d * 0.8 + UP * 0.9, d * 1.6 - UP * 0.15]
+        tube(m, fin, [0.3, 0.22, 0.08], 5, bark_mat)
+    twigs = []
+    for k in range(rng.randint(4, 6)):
+        d = (horizontal(TAU * k / 5 + rng.uniform(-0.4, 0.4)) + UP * rng.uniform(0.5, 0.9)).normalized()
+        grow(m, rng, pts[-1] - UP * rng.uniform(0, 1.5), d, rng.uniform(2.6, 3.4), 0.2, 2, bark_mat, twigs, rise=0.2, children=(3, 4))
+    center, radii = bounds_of([p for p, _ in twigs], 1.0)
+    hang_cards(m, rng, twigs, leaves, 2.2, 5, center, radii)
+    m.occluders.append((center, radii))
+
+
+def banana_plant(m, rng):
+    stem = material("banana_stem", (0.18, 0.28, 0.1), 0.6)
+    leaf_mat = card_material("banana", "leaf_large", (0.3, 0.55, 0.14))
+    h = rng.uniform(1.6, 2.4)
+    tube(m, [Vector((0, -0.1, 0)), Vector((0, h * 0.5, 0)), Vector((0, h, 0))], [0.14, 0.12, 0.1], 8, stem)
+    top = Vector((0, h, 0))
+    for k in range(rng.randint(6, 8)):
+        a = TAU * k / 7 + rng.uniform(-0.3, 0.3)
+        d = horizontal(a)
+        length = rng.uniform(1.6, 2.2)
+        rise = rng.uniform(0.7, 1.1)
+        steps = 6
+        spine = [top + d * length * (i / steps) + UP * length * (rise * i / steps - 1.05 * (i / steps) ** 2) for i in range(steps + 1)]
+        side = UP.cross(d).normalized()
+        widths = [0.62 * length * 0.5] * (steps + 1)
+        normals = [UP * 0.6 + d * 0.4 for _ in spine]
+        strip_card(m, spine, widths, [(side + DOWN * 0.2).normalized()] * (steps + 1), leaf_mat, normals)
+    m.root_shade = (h, 0.3)
+
+
+def cotton_grass(m, rng):
+    tuft_cards(m, rng, card_material("cotton_grass", "grass_cotton", (0.55, 0.62, 0.36)), rng.uniform(0.35, 0.45), 0.6, 3)
+
+
+def savanna_grass(m, rng):
+    tuft_cards(m, rng, card_material("savanna_grass", "grass_tall", (0.78, 0.66, 0.32)), rng.uniform(0.7, 0.95), 0.85, 4, lean=0.25)
+
+
+def desert_grass(m, rng):
+    tuft_cards(m, rng, card_material("desert_grass", "grass_thin", (0.72, 0.6, 0.36)), rng.uniform(0.3, 0.45), 0.55, 3, lean=0.35)
+
+
+def arctic_shrub(m, rng):
+    shrub(m, rng, card_material("arctic_shrub", "needles", (0.26, 0.3, 0.18)), stems=(5, 7), reach=(0.35, 0.55), card=0.45, per_twig=5, rise=0.15, spread=1.5)
+
+
+def ice_chunk(m, rng):
+    ice = material("ice", (0.52, 0.72, 0.9), 0.08)
+    for k in range(rng.randint(1, 3)):
+        c = horizontal(rng.uniform(0, TAU)) * (0.0 if k == 0 else rng.uniform(0.6, 1.0))
+        r = rng.uniform(0.5, 1.0) * (1.0 if k == 0 else 0.6)
+        blob(m, c + UP * r * 0.3, (r, r * rng.uniform(0.6, 1.0), r * 0.8), ice, rng, subdiv=2, amp=0.3, freq=0.9, smooth=False)
+    m.root_shade = (0.5, 0.2)
+
+
+def lichen_rock(m, rng):
+    rock(m, rng, top_mat=material("lichen", (0.42, 0.4, 0.22), 0.9), top=0.45, size=(0.7, 1.2))
+
+
 
 BUILDERS = {
     f.__name__: f
@@ -932,6 +1137,8 @@ BUILDERS = {
         fern, daisies, poppies, bluebells, alpine_flowers, red_mushroom, brown_mushrooms, cattails,
         grass, tall_grass, beach_grass, alpine_grass,
         boulder, mossy_rock, snow_rock, pebbles, log, stump, driftwood,
+        saguaro, barrel_cactus, prickly_pear, tumbleweed, sandstone_rock, acacia, jungle_tree,
+        banana_plant, cotton_grass, savanna_grass, desert_grass, arctic_shrub, ice_chunk, lichen_rock,
     )
 }  # fmt: skip
 

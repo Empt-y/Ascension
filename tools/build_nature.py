@@ -21,7 +21,7 @@ OUT = os.path.join(ROOT, "assets", "models", "nature")
 DEFAULT_BLENDER = r"C:\Users\theas\tools\blender-5.2.2\blender.exe"
 # Scatter models are drawn by the thousand, so small things get small budgets.
 BUDGETS = {
-    "tree": (200, 4500),
+    "tree": (200, 7000),
     "shrub": (100, 2500),
     "plant": (40, 2000),
     "grass": (8, 600),
@@ -29,7 +29,7 @@ BUDGETS = {
     "debris": (60, 1500),
 }
 MAX_SINK = 0.6
-MAX_HALF_WIDTH = 7.0
+MAX_HALF_WIDTH = 8.0
 
 
 def main():

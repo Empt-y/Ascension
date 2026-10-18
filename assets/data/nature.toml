@@ -4,12 +4,12 @@
 # model with `builder` from `seed`, exports assets/models/nature/<id>.glb and checks its height
 # against `height` (metres, origin at the ground; trunks and rocks sink a little below 0).
 #
-# Biomes, which the worldgen will assign later:
-#   shore   sand and the strip just above the sea
-#   meadow  open lowland grass
-#   forest  wooded lowland and hills
-#   alpine  high slopes and rocky ground below the snow line
-#   snow    above the snow line
+# Biomes (asc_world::Biome, chosen by climate, height and slope):
+#   arctic   frozen: snowfields and ice          tundra   cold and dry: moss, low shrubs
+#   taiga    cold and wet: pine forest           meadow   temperate grassland
+#   forest   temperate broadleaf woods           swamp    temperate, wet and low: mud, willows
+#   desert   hot and dry: dunes, cacti           savanna  hot, seasonal: yellow grass, acacias
+#   jungle   hot and wet: dense broadleaf        shore    beaches and the strip above the sea
 
 # --- Trees -------------------------------------------------------------------------------------
 
@@ -51,7 +51,7 @@ kind = "tree"
 builder = "birch"
 seed = 5
 height = [7.0, 12.0]
-biomes = ["forest", "meadow"]
+biomes = ["forest", "taiga", "meadow"]
 
 [[model]]
 id = "birch_2"
@@ -59,7 +59,7 @@ kind = "tree"
 builder = "birch"
 seed = 6
 height = [7.0, 12.0]
-biomes = ["forest"]
+biomes = ["forest", "taiga"]
 
 [[model]]
 id = "pine_1"
@@ -67,7 +67,7 @@ kind = "tree"
 builder = "pine"
 seed = 7
 height = [8.0, 15.0]
-biomes = ["alpine", "forest"]
+biomes = ["taiga", "tundra"]
 
 [[model]]
 id = "pine_2"
@@ -75,7 +75,7 @@ kind = "tree"
 builder = "pine"
 seed = 8
 height = [8.0, 15.0]
-biomes = ["alpine"]
+biomes = ["taiga"]
 
 [[model]]
 id = "pine_3"
@@ -83,7 +83,7 @@ kind = "tree"
 builder = "pine"
 seed = 9
 height = [8.0, 15.0]
-biomes = ["alpine"]
+biomes = ["taiga"]
 
 [[model]]
 id = "snow_pine_1"
@@ -91,7 +91,7 @@ kind = "tree"
 builder = "snow_pine"
 seed = 10
 height = [7.0, 14.0]
-biomes = ["snow"]
+biomes = ["arctic", "taiga"]
 
 [[model]]
 id = "snow_pine_2"
@@ -99,7 +99,7 @@ kind = "tree"
 builder = "snow_pine"
 seed = 11
 height = [7.0, 14.0]
-biomes = ["snow"]
+biomes = ["arctic"]
 
 [[model]]
 id = "palm_1"
@@ -107,7 +107,7 @@ kind = "tree"
 builder = "palm"
 seed = 12
 height = [5.0, 9.0]
-biomes = ["shore"]
+biomes = ["shore", "jungle"]
 
 [[model]]
 id = "palm_2"
@@ -115,7 +115,7 @@ kind = "tree"
 builder = "palm"
 seed = 13
 height = [5.0, 9.0]
-biomes = ["shore"]
+biomes = ["shore", "jungle"]
 
 [[model]]
 id = "willow_1"
@@ -123,7 +123,7 @@ kind = "tree"
 builder = "willow"
 seed = 14
 height = [6.0, 10.0]
-biomes = ["shore", "meadow"]
+biomes = ["swamp", "shore"]
 
 [[model]]
 id = "dead_tree_1"
@@ -131,7 +131,7 @@ kind = "tree"
 builder = "dead_tree"
 seed = 15
 height = [4.0, 8.0]
-biomes = ["alpine", "meadow"]
+biomes = ["swamp", "savanna", "meadow"]
 
 [[model]]
 id = "dead_tree_2"
@@ -139,7 +139,7 @@ kind = "tree"
 builder = "dead_tree"
 seed = 16
 height = [4.0, 8.0]
-biomes = ["snow", "alpine"]
+biomes = ["arctic", "tundra", "swamp"]
 
 # --- Shrubs ------------------------------------------------------------------------------------
 
@@ -149,7 +149,7 @@ kind = "shrub"
 builder = "bush"
 seed = 20
 height = [0.6, 1.8]
-biomes = ["meadow", "forest"]
+biomes = ["meadow", "forest", "jungle"]
 
 [[model]]
 id = "bush_2"
@@ -157,7 +157,7 @@ kind = "shrub"
 builder = "bush"
 seed = 21
 height = [0.6, 2.0]
-biomes = ["meadow", "forest"]
+biomes = ["meadow", "forest", "savanna"]
 
 [[model]]
 id = "bush_3"
@@ -165,7 +165,7 @@ kind = "shrub"
 builder = "bush"
 seed = 22
 height = [0.6, 1.8]
-biomes = ["forest"]
+biomes = ["forest", "jungle"]
 
 [[model]]
 id = "berry_bush_1"
@@ -173,7 +173,7 @@ kind = "shrub"
 builder = "berry_bush"
 seed = 23
 height = [0.6, 1.8]
-biomes = ["forest", "meadow"]
+biomes = ["forest", "taiga"]
 
 [[model]]
 id = "juniper_1"
@@ -181,7 +181,7 @@ kind = "shrub"
 builder = "juniper"
 seed = 24
 height = [0.4, 1.4]
-biomes = ["alpine"]
+biomes = ["tundra", "taiga"]
 
 [[model]]
 id = "juniper_2"
@@ -189,7 +189,7 @@ kind = "shrub"
 builder = "juniper"
 seed = 25
 height = [0.4, 1.4]
-biomes = ["alpine", "snow"]
+biomes = ["tundra", "arctic"]
 
 [[model]]
 id = "dry_shrub_1"
@@ -197,7 +197,7 @@ kind = "shrub"
 builder = "dry_shrub"
 seed = 26
 height = [0.5, 1.4]
-biomes = ["shore", "alpine"]
+biomes = ["desert", "savanna", "shore"]
 
 # --- Plants ------------------------------------------------------------------------------------
 
@@ -207,7 +207,7 @@ kind = "plant"
 builder = "fern"
 seed = 30
 height = [0.4, 1.2]
-biomes = ["forest"]
+biomes = ["forest", "taiga", "jungle"]
 
 [[model]]
 id = "fern_2"
@@ -215,7 +215,7 @@ kind = "plant"
 builder = "fern"
 seed = 31
 height = [0.4, 1.2]
-biomes = ["forest"]
+biomes = ["forest", "jungle", "swamp"]
 
 [[model]]
 id = "daisies_1"
@@ -247,7 +247,7 @@ kind = "plant"
 builder = "alpine_flowers"
 seed = 35
 height = [0.1, 0.4]
-biomes = ["alpine"]
+biomes = ["tundra"]
 
 [[model]]
 id = "red_mushroom_1"
@@ -255,7 +255,7 @@ kind = "plant"
 builder = "red_mushroom"
 seed = 36
 height = [0.15, 0.5]
-biomes = ["forest"]
+biomes = ["forest", "taiga"]
 
 [[model]]
 id = "brown_mushrooms_1"
@@ -263,7 +263,7 @@ kind = "plant"
 builder = "brown_mushrooms"
 seed = 37
 height = [0.08, 0.35]
-biomes = ["forest"]
+biomes = ["forest", "taiga", "swamp"]
 
 [[model]]
 id = "cattails_1"
@@ -271,7 +271,7 @@ kind = "plant"
 builder = "cattails"
 seed = 38
 height = [1.0, 2.0]
-biomes = ["shore"]
+biomes = ["swamp", "shore"]
 
 # --- Grass -------------------------------------------------------------------------------------
 
@@ -281,7 +281,7 @@ kind = "grass"
 builder = "grass"
 seed = 40
 height = [0.2, 0.6]
-biomes = ["meadow", "forest"]
+biomes = ["meadow", "forest", "taiga"]
 
 [[model]]
 id = "grass_2"
@@ -289,7 +289,7 @@ kind = "grass"
 builder = "grass"
 seed = 41
 height = [0.2, 0.6]
-biomes = ["meadow", "forest"]
+biomes = ["meadow", "forest", "jungle"]
 
 [[model]]
 id = "grass_3"
@@ -305,7 +305,7 @@ kind = "grass"
 builder = "tall_grass"
 seed = 43
 height = [0.6, 1.2]
-biomes = ["meadow"]
+biomes = ["meadow", "swamp"]
 
 [[model]]
 id = "beach_grass_1"
@@ -313,7 +313,7 @@ kind = "grass"
 builder = "beach_grass"
 seed = 44
 height = [0.4, 1.0]
-biomes = ["shore"]
+biomes = ["shore", "desert"]
 
 [[model]]
 id = "alpine_grass_1"
@@ -321,7 +321,7 @@ kind = "grass"
 builder = "alpine_grass"
 seed = 45
 height = [0.1, 0.4]
-biomes = ["alpine"]
+biomes = ["tundra", "taiga"]
 
 # --- Rocks -------------------------------------------------------------------------------------
 
@@ -331,7 +331,7 @@ kind = "rock"
 builder = "boulder"
 seed = 50
 height = [0.6, 2.5]
-biomes = ["alpine", "meadow", "forest"]
+biomes = ["meadow", "forest", "tundra"]
 
 [[model]]
 id = "boulder_2"
@@ -339,7 +339,7 @@ kind = "rock"
 builder = "boulder"
 seed = 51
 height = [0.6, 2.5]
-biomes = ["alpine"]
+biomes = ["tundra", "taiga"]
 
 [[model]]
 id = "boulder_3"
@@ -347,7 +347,7 @@ kind = "rock"
 builder = "boulder"
 seed = 52
 height = [0.6, 2.5]
-biomes = ["alpine", "shore"]
+biomes = ["shore", "tundra"]
 
 [[model]]
 id = "mossy_rock_1"
@@ -355,7 +355,7 @@ kind = "rock"
 builder = "mossy_rock"
 seed = 53
 height = [0.5, 2.0]
-biomes = ["forest"]
+biomes = ["forest", "taiga", "swamp"]
 
 [[model]]
 id = "snow_rock_1"
@@ -363,7 +363,7 @@ kind = "rock"
 builder = "snow_rock"
 seed = 54
 height = [0.5, 2.0]
-biomes = ["snow"]
+biomes = ["arctic"]
 
 [[model]]
 id = "pebbles_1"
@@ -371,7 +371,7 @@ kind = "rock"
 builder = "pebbles"
 seed = 55
 height = [0.05, 0.4]
-biomes = ["shore", "alpine", "meadow"]
+biomes = ["shore", "tundra", "desert"]
 
 # --- Debris ------------------------------------------------------------------------------------
 
@@ -381,7 +381,7 @@ kind = "debris"
 builder = "log"
 seed = 60
 height = [0.3, 1.0]
-biomes = ["forest"]
+biomes = ["forest", "taiga", "swamp"]
 
 [[model]]
 id = "stump_1"
@@ -389,7 +389,7 @@ kind = "debris"
 builder = "stump"
 seed = 61
 height = [0.3, 1.0]
-biomes = ["forest", "meadow"]
+biomes = ["forest", "taiga"]
 
 [[model]]
 id = "driftwood_1"
@@ -398,3 +398,157 @@ builder = "driftwood"
 seed = 62
 height = [0.2, 0.9]
 biomes = ["shore"]
+
+# --- Desert, savanna, jungle, tundra and arctic ---------------------------------------------
+
+[[model]]
+id = "saguaro_1"
+kind = "tree"
+builder = "saguaro"
+seed = 70
+height = [3.5, 6.5]
+biomes = ["desert"]
+
+[[model]]
+id = "saguaro_2"
+kind = "tree"
+builder = "saguaro"
+seed = 71
+height = [3.5, 6.5]
+biomes = ["desert"]
+
+[[model]]
+id = "acacia_1"
+kind = "tree"
+builder = "acacia"
+seed = 72
+height = [4.0, 8.0]
+biomes = ["savanna"]
+
+[[model]]
+id = "acacia_2"
+kind = "tree"
+builder = "acacia"
+seed = 73
+height = [4.0, 8.0]
+biomes = ["savanna"]
+
+[[model]]
+id = "jungle_tree_1"
+kind = "tree"
+builder = "jungle_tree"
+seed = 74
+height = [11.0, 20.0]
+biomes = ["jungle"]
+
+[[model]]
+id = "jungle_tree_2"
+kind = "tree"
+builder = "jungle_tree"
+seed = 75
+height = [11.0, 20.0]
+biomes = ["jungle"]
+
+[[model]]
+id = "barrel_cactus_1"
+kind = "shrub"
+builder = "barrel_cactus"
+seed = 76
+height = [0.25, 0.9]
+biomes = ["desert"]
+
+[[model]]
+id = "prickly_pear_1"
+kind = "shrub"
+builder = "prickly_pear"
+seed = 77
+height = [0.4, 1.8]
+biomes = ["desert", "savanna"]
+
+[[model]]
+id = "banana_plant_1"
+kind = "shrub"
+builder = "banana_plant"
+seed = 78
+height = [1.4, 3.2]
+biomes = ["jungle"]
+
+[[model]]
+id = "arctic_shrub_1"
+kind = "shrub"
+builder = "arctic_shrub"
+seed = 79
+height = [0.2, 1.0]
+biomes = ["tundra", "arctic"]
+
+[[model]]
+id = "cotton_grass_1"
+kind = "grass"
+builder = "cotton_grass"
+seed = 80
+height = [0.25, 0.6]
+biomes = ["tundra", "swamp"]
+
+[[model]]
+id = "savanna_grass_1"
+kind = "grass"
+builder = "savanna_grass"
+seed = 81
+height = [0.5, 1.2]
+biomes = ["savanna"]
+
+[[model]]
+id = "savanna_grass_2"
+kind = "grass"
+builder = "savanna_grass"
+seed = 82
+height = [0.5, 1.2]
+biomes = ["savanna"]
+
+[[model]]
+id = "desert_grass_1"
+kind = "grass"
+builder = "desert_grass"
+seed = 83
+height = [0.2, 0.6]
+biomes = ["desert", "savanna"]
+
+[[model]]
+id = "sandstone_rock_1"
+kind = "rock"
+builder = "sandstone_rock"
+seed = 84
+height = [0.6, 2.5]
+biomes = ["desert", "savanna"]
+
+[[model]]
+id = "sandstone_rock_2"
+kind = "rock"
+builder = "sandstone_rock"
+seed = 85
+height = [0.6, 2.5]
+biomes = ["desert"]
+
+[[model]]
+id = "ice_chunk_1"
+kind = "rock"
+builder = "ice_chunk"
+seed = 86
+height = [0.3, 2.0]
+biomes = ["arctic"]
+
+[[model]]
+id = "lichen_rock_1"
+kind = "rock"
+builder = "lichen_rock"
+seed = 87
+height = [0.5, 2.0]
+biomes = ["tundra", "arctic"]
+
+[[model]]
+id = "tumbleweed_1"
+kind = "debris"
+builder = "tumbleweed"
+seed = 88
+height = [0.3, 1.0]
+biomes = ["desert", "savanna"]
