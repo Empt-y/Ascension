@@ -18,6 +18,55 @@ const SEA_LEVEL: f32 = 2.0;
 const SHORE_BELOW: f32 = 4.0;
 const SHORE_ABOVE: f32 = 1.0;
 const SNOW_LINE: f32 = 140.0;
+/// Mountain ground above this is alpine (pines, junipers, boulders) rather than lowland.
+const ALPINE_LINE: f32 = 75.0;
+
+/// What grows where. Chosen from height, slope and a low-frequency forest noise; the surface
+/// materials follow the same height and slope rules, so biomes line up with sand, grass and snow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Biome {
+    /// Sand and the strip just above the sea.
+    Shore,
+    /// Open lowland grass.
+    Meadow,
+    /// Wooded lowland and hills.
+    Forest,
+    /// High mountain ground below the snow line.
+    Alpine,
+    /// Above the snow line.
+    Snow,
+}
+
+impl Biome {
+    pub const ALL: [Biome; 5] = [Biome::Shore, Biome::Meadow, Biome::Forest, Biome::Alpine, Biome::Snow];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Biome::Shore => "shore",
+            Biome::Meadow => "meadow",
+            Biome::Forest => "forest",
+            Biome::Alpine => "alpine",
+            Biome::Snow => "snow",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|b| b.name() == name)
+    }
+}
+
+/// Everything the scatter needs to know about a surface point.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ground {
+    pub height: f32,
+    /// Rise over run.
+    pub slope: f32,
+    pub biome: Biome,
+    /// 0..1 how wooded: 0 in open meadow, rising through forest edges to 1 deep in a forest.
+    pub forest: f32,
+    /// Whether the surface is under the sea.
+    pub underwater: bool,
+}
 
 pub struct WorldGen {
     seed: i32,
@@ -30,6 +79,8 @@ pub struct WorldGen {
     cavern: FastNoiseLite,
     /// 2D mask choosing the rare places where tunnels may reach the surface.
     entrance: FastNoiseLite,
+    /// Low-frequency woodland mask: forests where it's high.
+    forest: FastNoiseLite,
     ore: FastNoiseLite,
 }
 
@@ -88,6 +139,7 @@ impl WorldGen {
             cavern: noise(seed.wrapping_add(8), OpenSimplex2, 0.007, Some((FBm, 2))),
             entrance: noise(seed.wrapping_add(9), OpenSimplex2, 0.004, None),
             ore: noise(seed.wrapping_add(7), OpenSimplex2, 0.08, None),
+            forest: noise(seed.wrapping_add(10), OpenSimplex2, 0.0028, Some((FBm, 3))),
         }
     }
 
@@ -132,6 +184,29 @@ impl WorldGen {
         let (hx0, hx1) = (self.height(x - 1.0, z), self.height(x + 1.0, z));
         let (hz0, hz1) = (self.height(x, z - 1.0), self.height(x, z + 1.0));
         self.column_from(x, z, h, [hx0, hx1, hz0, hz1])
+    }
+
+    /// The surface at (x, z): height, slope, biome and how wooded it is.
+    pub fn ground(&self, x: f32, z: f32) -> Ground {
+        let col = self.column(x, z);
+        let h = col.height;
+        let underwater = h < SEA_LEVEL - 0.3;
+        let shore = h < SEA_LEVEL + SHORE_ABOVE + 1.5 && h > SEA_LEVEL - SHORE_BELOW;
+        // Woods thin out with height and on steep or high ground.
+        let wood = self.forest.get_noise_2d(x, z) * 0.5 + 0.5;
+        let forest = smoothstep(0.5, 0.68, wood) * (1.0 - smoothstep(0.75, 1.1, col.slope));
+        let biome = if h > SNOW_LINE && col.mountain > 0.5 {
+            Biome::Snow
+        } else if col.mountain > 0.35 && h > ALPINE_LINE {
+            Biome::Alpine
+        } else if shore || underwater {
+            Biome::Shore
+        } else if forest > 0.15 {
+            Biome::Forest
+        } else {
+            Biome::Meadow
+        };
+        Ground { height: h, slope: col.slope, biome, forest, underwater }
     }
 
     /// Density and material at a point, given its column.

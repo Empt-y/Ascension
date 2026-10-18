@@ -18,7 +18,7 @@ pub use edit::{EditKind, EditLog, EditOp};
 pub use material::Material;
 pub use mesh::{ChunkMesh, MATERIAL_SLOTS, Vertex, mesh_chunk};
 pub use raycast::{RayHit, raycast};
-pub use worldgen::WorldGen;
+pub use worldgen::{Biome, Ground, WorldGen};
 
 use std::sync::Arc;
 
