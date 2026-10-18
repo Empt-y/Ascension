@@ -75,8 +75,9 @@ tools/             check.sh (fmt + clippy + tests), fg_check.py, screenshot.py, 
   chunk mesh on its own while its borders still match its neighbours exactly (a test checks this).
 - **Worldgen** is a pure function of seed and position:
   - a continent/hill/ridged-mountain height field
-  - 3D overhang noise on mountains
-  - spaghetti caves that widen near the surface into ravines
+  - spaghetti tunnels and big deep caverns underground; tunnels pinch shut near the surface except
+    at rare hillside entrances (about 0.1% of the surface is open, about 4% of the underground is
+    cave; `cargo run --release -p asc-world --example terrainstats` measures both)
   - materials by depth and slope, plus a placeholder copper ore
 - **Edits** are an ordered log of sphere CSG operations, indexed by the chunks they touch. A chunk
   is rebuilt from worldgen plus its ops whenever it's needed, so only meshes stay resident and

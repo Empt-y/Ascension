@@ -1,8 +1,9 @@
 //! Deterministic procedural terrain.
 //!
 //! A 2D height field (continents, hills, domain-warped ridged mountains) gives the base surface. 3D noise
-//! then adds overhangs on mountains and carves spaghetti caves. Every value is a pure function of the
-//! seed and world position, so any chunk can be regenerated on any thread at any time.
+//! carves spaghetti tunnels and deep caverns underground; tunnels only reach the surface at rare
+//! hillside entrances. Every value is a pure function of the seed and world position, so any chunk
+//! can be regenerated on any thread at any time.
 
 use fastnoise_lite::{DomainWarpType, FastNoiseLite, FractalType, NoiseType};
 use glam::{Vec2, Vec3};
@@ -21,9 +22,11 @@ pub struct WorldGen {
     hills: FastNoiseLite,
     ridges: FastNoiseLite,
     warp: FastNoiseLite,
-    overhang: FastNoiseLite,
     cave_a: FastNoiseLite,
     cave_b: FastNoiseLite,
+    cavern: FastNoiseLite,
+    /// 2D mask choosing the rare places where tunnels may reach the surface.
+    entrance: FastNoiseLite,
     ore: FastNoiseLite,
 }
 
@@ -35,8 +38,10 @@ struct Column {
     slope: f32,
     /// 1 / |∇(y - h)|, which turns `y - h` into an approximate true distance.
     inv_grad: f32,
-    /// 0 on plains, 1 in mountains. Gates overhangs.
+    /// 0 on plains, 1 in mountains.
     mountain: f32,
+    /// 0..1: how freely caves may open to the surface here (1 only in rare entrance regions).
+    entrance: f32,
 }
 
 fn noise(seed: i32, kind: NoiseType, freq: f32, fractal: Option<(FractalType, i32)>) -> FastNoiseLite {
@@ -75,9 +80,10 @@ impl WorldGen {
             hills: noise(seed.wrapping_add(1), OpenSimplex2, 0.005, Some((FBm, 5))),
             ridges: noise(seed.wrapping_add(2), OpenSimplex2, 0.0018, Some((Ridged, 5))),
             warp,
-            overhang: noise(seed.wrapping_add(4), OpenSimplex2, 0.014, Some((FBm, 2))),
             cave_a: noise(seed.wrapping_add(5), OpenSimplex2, 0.012, None),
             cave_b: noise(seed.wrapping_add(6), OpenSimplex2, 0.012, None),
+            cavern: noise(seed.wrapping_add(8), OpenSimplex2, 0.007, Some((FBm, 2))),
+            entrance: noise(seed.wrapping_add(9), OpenSimplex2, 0.004, None),
             ore: noise(seed.wrapping_add(7), OpenSimplex2, 0.08, None),
         }
     }
@@ -112,6 +118,9 @@ impl WorldGen {
             slope,
             inv_grad: 1.0 / (1.0 + slope * slope).sqrt(),
             mountain: Self::mountain_mask(continent),
+            // Cave mouths belong on hillsides; on flat ground a near-horizontal tunnel only skims the
+            // surface and leaves a long slit.
+            entrance: smoothstep(0.55, 0.75, self.entrance.get_noise_2d(x, z)) * smoothstep(0.3, 0.7, slope),
         }
     }
 
@@ -129,19 +138,27 @@ impl WorldGen {
             return (DENSITY_CLAMP, Material::Air as u8);
         }
         let mut d = surface;
-        if col.mountain > 0.0 && surface.abs() < 12.0 {
-            d += self.overhang.get_noise_3d(p.x, p.y, p.z) * 4.5 * col.mountain;
-        }
-        if p.y < col.height + 6.0 {
-            let a = self.cave_a.get_noise_3d(p.x, p.y * 1.6, p.z);
-            let b = self.cave_b.get_noise_3d(p.x, p.y * 1.6, p.z);
-            // Tunnels widen within a few metres of the surface so they break through as an opening
-            // instead of leaving a thin crust that looks like a floating slab.
-            let depth = col.height - p.y;
-            let widen = 0.06 * (1.0 - depth / 6.0).clamp(0.0, 1.0);
-            let cave = (a.abs().max(b.abs()) - 0.075 - widen) * 40.0;
-            // Smooth subtraction rounds off cave mouths, which a 1 m grid can't show as sharp creases.
-            d = smooth_max(d, -cave, 2.5);
+        let depth = col.height - p.y;
+        if depth > 2.0 || col.entrance > 0.0 {
+            // Spaghetti tunnels: where two noise fields are both near zero. They pinch shut over the
+            // last ~14 m below the surface, except in entrance regions, so the surface is only broken
+            // by the occasional cave mouth rather than trenches everywhere.
+            let near_surface = smoothstep(4.0, 14.0, depth);
+            let width = 0.085 * near_surface.max(col.entrance * smoothstep(-2.0, 2.0, depth));
+            if width > 0.0 {
+                let a = self.cave_a.get_noise_3d(p.x, p.y * 1.25, p.z);
+                let b = self.cave_b.get_noise_3d(p.x, p.y * 1.25, p.z);
+                let tunnel = (a.abs().max(b.abs()) - width) * 30.0;
+                // Smooth subtraction rounds off mouths, which a 1 m grid can't show as sharp creases.
+                d = smooth_max(d, -tunnel, 2.0);
+            }
+            // Occasional big caverns, deep down only.
+            if depth > 28.0 {
+                let open = smoothstep(28.0, 45.0, depth);
+                let cavern =
+                    (0.5 - self.cavern.get_noise_3d(p.x, p.y * 1.5, p.z)) * 25.0 + (1.0 - open) * 20.0;
+                d = smooth_max(d, -cavern, 2.0);
+            }
         }
         let d = d.clamp(-DENSITY_CLAMP, DENSITY_CLAMP);
         if d >= 0.0 {
