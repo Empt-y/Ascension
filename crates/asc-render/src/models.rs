@@ -118,6 +118,29 @@ mod tests {
     }
 
     #[test]
+    fn every_nature_model_loads_standing_on_the_ground() {
+        let mut count = 0;
+        for entry in std::fs::read_dir(models_dir().join("nature")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "glb") {
+                let model = load_glb(&std::fs::read(&path).unwrap())
+                    .unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+                assert!(model.triangles() >= 20, "{}", path.display());
+                assert!(model.primitives.iter().all(|p| p.indices.len() % 3 == 0));
+                assert!(
+                    model.min.y > -0.61 && model.max.y > 0.05,
+                    "{}: {}..{}",
+                    path.display(),
+                    model.min,
+                    model.max
+                );
+                count += 1;
+            }
+        }
+        assert_eq!(count, 47);
+    }
+
+    #[test]
     fn wall_bounds_match_the_spec() {
         let model = load_glb(&std::fs::read(models_dir().join("stone_wall.glb")).unwrap()).unwrap();
         let close = |a: Vec3, b: Vec3| (a - b).abs().max_element() < 1e-3;
