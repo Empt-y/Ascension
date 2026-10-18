@@ -29,7 +29,7 @@ pub use camera::{Camera, Frustum};
 use far::FarTerrain;
 pub use gpu::Gpu;
 use parts::Parts;
-pub use parts::{Ghost, ModelId, PartInstance};
+pub use parts::{Ghost, ModelId, PartInstance, ScatterBatch};
 use pipelines::{Layouts, Pipelines};
 pub use shaders::ShaderLib;
 use targets::{BLOOM_LEVELS, SHADOW_SIZE, Targets};
@@ -409,6 +409,15 @@ impl Renderer {
 
     pub fn parts_count(&self) -> usize {
         self.parts.count()
+    }
+
+    /// Add, replace or remove a batch of nature scatter (see [`ScatterBatch`]).
+    pub fn set_scatter(&mut self, key: u64, batch: Option<ScatterBatch>) {
+        self.parts.set_scatter(key, batch);
+    }
+
+    pub fn scatter_count(&self) -> usize {
+        self.parts.scatter_count()
     }
 
     pub fn set_ghost(&mut self, ghost: Option<Ghost>) {

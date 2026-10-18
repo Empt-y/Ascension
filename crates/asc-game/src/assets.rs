@@ -72,16 +72,50 @@ impl PartModels {
 pub struct NatureSpec {
     pub id: String,
     pub kind: String,
+    pub biomes: Vec<String>,
+}
+
+/// How one kind (tree, grass, ...) is scattered and drawn; see `nature.toml`.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct KindSpec {
+    pub distance: f32,
+    pub fade: f32,
+    pub scale: [f32; 2],
+    pub sway: f32,
+    pub max_slope: f32,
+    pub shadows: bool,
+    pub collide: Collide,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Collide {
+    Trunk,
+    Rock,
+    None,
 }
 
 #[derive(serde::Deserialize)]
 struct NatureFile {
+    kinds: std::collections::BTreeMap<String, KindSpec>,
+    density: std::collections::BTreeMap<String, std::collections::BTreeMap<String, f32>>,
     model: Vec<NatureSpec>,
 }
 
-/// The natural scatter models (trees, plants, rocks...) and their renderer ids, in spec order.
+/// A loaded nature model: its spec entry, renderer id and model-space bounds.
+pub struct NatureModel {
+    pub spec: NatureSpec,
+    pub id: ModelId,
+    pub min: glam::Vec3,
+    pub max: glam::Vec3,
+}
+
+/// The natural scatter models (trees, plants, rocks...) plus how each kind is scattered.
 pub struct NatureModels {
-    pub models: Vec<(NatureSpec, ModelId)>,
+    pub models: Vec<NatureModel>,
+    pub kinds: std::collections::BTreeMap<String, KindSpec>,
+    /// Instances per square metre, `density[biome][kind]`.
+    pub density: std::collections::BTreeMap<String, std::collections::BTreeMap<String, f32>>,
 }
 
 impl NatureModels {
@@ -96,15 +130,23 @@ impl NatureModels {
         let mut models = Vec::new();
         let mut triangles = 0;
         for spec in file.model {
+            anyhow::ensure!(file.kinds.contains_key(&spec.kind), "{}: unknown kind {}", spec.id, spec.kind);
+            for b in &spec.biomes {
+                anyhow::ensure!(asc_world::Biome::from_name(b).is_some(), "{}: unknown biome {b}", spec.id);
+            }
             let path = root.join("models").join("nature").join(format!("{}.glb", spec.id));
             let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
             let data = asc_render::models::load_glb(&bytes)
                 .with_context(|| format!("loading {}", path.display()))?;
             triangles += data.triangles();
-            models.push((spec, renderer.add_model(&data)));
+            let id = renderer.add_model(&data);
+            models.push(NatureModel { spec, id, min: data.min, max: data.max });
+        }
+        for biome in file.density.keys() {
+            anyhow::ensure!(asc_world::Biome::from_name(biome).is_some(), "density: unknown biome {biome}");
         }
         log::info!("loaded {} nature models ({triangles} triangles)", models.len());
-        Ok(Self { models })
+        Ok(Self { models, kinds: file.kinds, density: file.density })
     }
 }
 

@@ -27,7 +27,7 @@ struct VsIn {
     @location(3) color: vec4<f32>,
     // xyz = camera-relative origin, w = yaw (radians).
     @location(4) origin: vec4<f32>,
-    // x = scale, y = ghost state (0 none, 1 valid, 2 invalid), z = sway.
+    // x = scale, y = ghost state (0 none, 1 valid, 2 invalid), z = sway, w = fade (1 = solid).
     @location(5) params: vec4<f32>,
 }
 
@@ -40,6 +40,7 @@ struct VsOut {
     @location(4) @interpolate(flat) ghost: u32,
     // 0..1 per instance, for colour variation.
     @location(5) @interpolate(flat) variety: f32,
+    @location(6) @interpolate(flat) fade: f32,
 }
 
 fn rotate_y(v: vec3<f32>, yaw: f32) -> vec3<f32> {
@@ -85,6 +86,7 @@ fn vs_main(in: VsIn) -> VsOut {
     out.ghost = u32(round(in.params.y));
     let world = in.origin.xyz + globals.camera.xyz;
     out.variety = hash11(dot(floor(world * 4.0), vec3(1.0, 57.0, 113.0)));
+    out.fade = in.params.w;
     return out;
 }
 
@@ -161,6 +163,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
         color = shade_pbr(albedo, material.base.a, material.extra.x, n, in.rel, occlusion, shadow);
     }
+    // Distance fade: thins out through MSAA coverage (a dissolve, not a pop).
+    alpha *= in.fade;
     if !ALPHA_TO_COVERAGE && alpha < 0.5 {
         discard;
     }

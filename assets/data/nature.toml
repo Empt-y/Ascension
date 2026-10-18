@@ -11,6 +11,151 @@
 #   desert   hot and dry: dunes, cacti           savanna  hot, seasonal: yellow grass, acacias
 #   jungle   hot and wet: dense broadleaf        shore    beaches and the strip above the sea
 
+# How each kind is scattered and drawn.
+#   distance   drawn out to this far (m); things fade out over the last `fade` metres
+#   scale      random uniform scale range
+#   sway       how much it moves in the wind
+#   max_slope  not placed on ground steeper than this (rise over run)
+#   shadows    whether it casts sun shadows
+#   collide    "trunk" (a capsule up the trunk), "rock" (a sphere), or "none"
+
+[kinds.tree]
+distance = 600.0
+fade = 40.0
+scale = [0.8, 1.2]
+sway = 1.0
+max_slope = 0.7
+shadows = true
+collide = "trunk"
+
+[kinds.shrub]
+distance = 160.0
+fade = 30.0
+scale = [0.75, 1.3]
+sway = 0.6
+max_slope = 0.9
+shadows = true
+collide = "none"
+
+[kinds.plant]
+distance = 70.0
+fade = 20.0
+scale = [0.8, 1.25]
+sway = 0.8
+max_slope = 0.9
+shadows = false
+collide = "none"
+
+[kinds.grass]
+distance = 45.0
+fade = 15.0
+scale = [0.8, 1.3]
+sway = 1.0
+max_slope = 1.0
+shadows = false
+collide = "none"
+
+[kinds.rock]
+distance = 300.0
+fade = 30.0
+scale = [0.6, 1.5]
+sway = 0.0
+max_slope = 1.6
+shadows = true
+collide = "rock"
+
+[kinds.debris]
+distance = 120.0
+fade = 25.0
+scale = [0.8, 1.2]
+sway = 0.0
+max_slope = 0.5
+shadows = true
+collide = "none"
+
+# Instances of each kind per square metre, by biome. Trees in woodland biomes are also thinned
+# towards the edges of woods (asc_world::Ground::forest).
+
+[density.arctic]
+tree = 0.002
+shrub = 0.004
+grass = 0.0
+plant = 0.0
+rock = 0.008
+debris = 0.0005
+
+[density.tundra]
+tree = 0.0015
+shrub = 0.03
+grass = 0.6
+plant = 0.03
+rock = 0.012
+debris = 0.001
+
+[density.taiga]
+tree = 0.045
+shrub = 0.015
+grass = 0.3
+plant = 0.04
+rock = 0.004
+debris = 0.006
+
+[density.meadow]
+tree = 0.0012
+shrub = 0.008
+grass = 1.3
+plant = 0.08
+rock = 0.002
+debris = 0.0008
+
+[density.forest]
+tree = 0.035
+shrub = 0.03
+grass = 0.5
+plant = 0.07
+rock = 0.003
+debris = 0.006
+
+[density.swamp]
+tree = 0.012
+shrub = 0.01
+grass = 0.8
+plant = 0.06
+rock = 0.001
+debris = 0.008
+
+[density.desert]
+tree = 0.0025
+shrub = 0.006
+grass = 0.05
+plant = 0.0
+rock = 0.004
+debris = 0.0015
+
+[density.savanna]
+tree = 0.002
+shrub = 0.006
+grass = 1.1
+plant = 0.0
+rock = 0.002
+debris = 0.001
+
+[density.jungle]
+tree = 0.03
+shrub = 0.06
+grass = 0.4
+plant = 0.06
+rock = 0.002
+debris = 0.004
+
+[density.shore]
+tree = 0.004
+shrub = 0.008
+grass = 0.35
+plant = 0.03
+rock = 0.004
+debris = 0.003
+
 # --- Trees -------------------------------------------------------------------------------------
 
 [[model]]

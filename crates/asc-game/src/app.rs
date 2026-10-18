@@ -78,6 +78,8 @@ pub struct Options {
     pub msaa: Option<u32>,
     /// Lay out every building part near spawn (for screenshots).
     pub showcase: bool,
+    /// Grow trees, grass, rocks... over the world (on by default).
+    pub scatter: bool,
     /// Flatten a site, build a small house on it, walk inside, and log what happens.
     pub build_test: bool,
     /// Place a large scripted block of pieces near spawn (a building performance test).
@@ -86,7 +88,7 @@ pub struct Options {
 
 impl Options {
     pub fn from_args() -> anyhow::Result<Self> {
-        let mut opts = Self { world: "world1".into(), far: true, ..Self::default() };
+        let mut opts = Self { world: "world1".into(), far: true, scatter: true, ..Self::default() };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             let mut value = |name: &str| args.next().ok_or_else(|| anyhow::anyhow!("{name} needs a value"));
@@ -106,6 +108,13 @@ impl Options {
                 "--fog" => opts.fog_density = Some(value("--fog")?.parse()?),
                 "--msaa" => opts.msaa = Some(value("--msaa")?.parse()?),
                 "--showcase" => opts.showcase = true,
+                "--scatter" => {
+                    opts.scatter = match value("--scatter")?.as_str() {
+                        "on" => true,
+                        "off" => false,
+                        other => anyhow::bail!("--scatter wants on or off, not {other}"),
+                    }
+                }
                 "--build-test" => opts.build_test = true,
                 "--build-stress" => opts.build_stress = true,
                 "--world" => opts.world = value("--world")?,
@@ -159,6 +168,9 @@ struct State {
     content: Content,
     parts: PartModels,
     nature: crate::assets::NatureModels,
+    scatter: crate::scatter::Scatter,
+    /// Edit ops and building pieces the scatter has already been re-filtered for.
+    scatter_seen: (usize, usize),
     building: Building,
     build_tool: Option<BuildTool>,
     previews: Option<Vec<[egui::TextureHandle; 3]>>,
@@ -245,6 +257,8 @@ impl State {
         let far = FarStreamer::new(world.worldgen.clone());
         let parts = PartModels::load(&mut renderer)?;
         let nature = crate::assets::NatureModels::load(&mut renderer)?;
+        let scatter =
+            crate::scatter::Scatter::new(crate::scatter::Config::new(seed, &nature), world.worldgen.clone());
         let lattice = asc_build::Lattice::new(&parts.spec);
         let structures = match &loaded {
             Some(game) => asc_build::Structures::from_pieces(lattice, game.structures.iter().copied()),
@@ -309,6 +323,8 @@ impl State {
             content,
             parts,
             nature,
+            scatter,
+            scatter_seen: (0, 0),
             building,
             build_tool: None,
             previews: None,
@@ -415,9 +431,9 @@ impl State {
         } else {
             WALK_REACH
         };
-        let (world, building) = (&self.world, &self.building);
+        let (world, building, scatter) = (&self.world, &self.building, &self.scatter);
         self.hit = raycast(
-            |p| world.density_at(p).min(building.sdf(p)),
+            |p| world.density_at(p).min(building.sdf(p)).min(scatter.sdf(p)),
             self.camera.position,
             self.camera.forward(),
             reach,
@@ -457,6 +473,24 @@ impl State {
         if self.renderer.far_enabled() {
             let p = self.camera.position;
             self.far.update(glam::Vec2::new(p.x, p.z), &mut self.renderer);
+        }
+        if self.options.scatter {
+            // Re-filter scatter where the ground was edited or something was built or dismantled.
+            let ops = self.world.edits.ops();
+            for op in &ops[self.scatter_seen.0.min(ops.len())..] {
+                self.scatter.invalidate(op.center, op.reach() + 1.0);
+            }
+            let pieces = self.building.structures.len();
+            if pieces != self.scatter_seen.1 {
+                self.scatter.invalidate(self.camera.position, BUILD_REACH + 8.0);
+            }
+            self.scatter_seen = (ops.len(), pieces);
+            self.scatter.update(
+                self.camera.position,
+                &self.world,
+                &self.building.structures,
+                &mut self.renderer,
+            );
         }
 
         let raw_input = self.egui_state.take_egui_input(&self.window);
@@ -542,6 +576,16 @@ impl State {
             let s = self.streamer.stats();
             let physics_ms = std::mem::take(&mut self.worst_physics_ms);
             let fs = self.far.stats();
+            let sc = self.scatter.stats();
+            if sc.batches > 0 || sc.in_flight > 0 {
+                log::info!(
+                    "scatter: {} batches, {}k instances, {} in flight | {} drawn",
+                    sc.batches,
+                    sc.instances / 1000,
+                    sc.in_flight,
+                    self.last_stats.parts_drawn,
+                );
+            }
             if !self.building.structures.is_empty() {
                 log::info!(
                     "parts: {} placed, {} instances drawn",
@@ -729,7 +773,9 @@ impl State {
         let t = Instant::now();
         let world = &self.world;
         let building = &self.building;
-        let steps = self.player.update(dt, &input, &|p| world.density_at(p).min(building.sdf(p)));
+        let scatter = &self.scatter;
+        let steps =
+            self.player.update(dt, &input, &|p| world.density_at(p).min(building.sdf(p)).min(scatter.sdf(p)));
         if steps > 0 {
             self.worst_physics_ms = self.worst_physics_ms.max(t.elapsed().as_secs_f32() * 1e3 / steps as f32);
         }
@@ -1272,14 +1318,14 @@ impl State {
         for (kind, spacing) in
             [("tree", 9.0), ("shrub", 3.0), ("plant", 1.6), ("grass", 1.2), ("rock", 3.0), ("debris", 4.0)]
         {
-            let all: Vec<_> = self.nature.models.iter().filter(|(s, _)| s.kind == kind).collect();
+            let all: Vec<_> = self.nature.models.iter().filter(|m| m.spec.kind == kind).collect();
             for row in all.chunks(8) {
                 z += spacing * 0.5;
-                for (i, (_, model)) in row.iter().enumerate() {
+                for (i, model) in row.iter().enumerate() {
                     let x = origin.x + (i as f32 - row.len() as f32 / 2.0) * spacing;
                     let ground = find_ground(&self.world, x, z).y;
                     instances.push(asc_render::PartInstance {
-                        model: *model,
+                        model: model.id,
                         position: Vec3::new(x, ground, z),
                         yaw: i as f32 * 1.3,
                         scale: 1.0,

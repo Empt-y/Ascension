@@ -4,6 +4,10 @@
 //! culls them (distance and frustum), groups them by model and writes one instance buffer laid out
 //! as [visible…, shadow casters…, ghost]. Each model primitive is then one instanced draw.
 //!
+//! Nature scatter arrives separately as batches (one per terrain column and kind), culled as a
+//! whole by their bounds, with each instance fading out over the last stretch of its batch's draw
+//! distance.
+//!
 //! Textured primitives (leaf cards) share one mipmapped texture array, one layer per distinct
 //! texture name, so every model can use the same bind group layout.
 
@@ -46,6 +50,23 @@ impl PartInstance {
     }
 }
 
+/// A group of scatter instances (one terrain column of one kind) drawn and culled together.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScatterBatch {
+    pub instances: Vec<PartInstance>,
+    /// Instances are drawn out to this distance...
+    pub distance: f32,
+    /// ...fading out over this last stretch of it.
+    pub fade: f32,
+    pub shadows: bool,
+}
+
+struct StoredBatch {
+    batch: ScatterBatch,
+    min: Vec3,
+    max: Vec3,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Ghost {
     pub instance: PartInstance,
@@ -66,7 +87,7 @@ struct MaterialUniform {
 struct InstanceData {
     /// xyz = camera-relative origin, w = yaw.
     origin: [f32; 4],
-    /// x = scale, y = ghost state (0 none, 1 valid, 2 invalid), z = sway.
+    /// x = scale, y = ghost state (0 none, 1 valid, 2 invalid), z = sway, w = fade (1 = solid).
     params: [f32; 4],
 }
 
@@ -96,6 +117,10 @@ pub struct Parts {
     buffer: wgpu::Buffer,
     capacity: usize,
     scratch: Vec<InstanceData>,
+    scatter: HashMap<u64, StoredBatch>,
+    /// Per-model buckets reused each frame while sorting instances.
+    buckets: Vec<Vec<InstanceData>>,
+    shadow_buckets: Vec<Vec<InstanceData>>,
     visible: Vec<Range>,
     shadow: Vec<Range>,
     ghost_slot: Option<(ModelId, u32)>,
@@ -106,9 +131,9 @@ pub struct Parts {
     pub drawn: usize,
 }
 
-fn instance_data(i: &PartInstance, camera: Vec3, ghost: u32) -> InstanceData {
+fn instance_data(i: &PartInstance, camera: Vec3, ghost: u32, fade: f32) -> InstanceData {
     let rel = i.position - camera;
-    InstanceData { origin: [rel.x, rel.y, rel.z, i.yaw], params: [i.scale, ghost as f32, i.sway, 0.0] }
+    InstanceData { origin: [rel.x, rel.y, rel.z, i.yaw], params: [i.scale, ghost as f32, i.sway, fade] }
 }
 
 impl Parts {
@@ -147,6 +172,9 @@ impl Parts {
             buffer: Self::buffer(device, capacity),
             capacity,
             scratch: Vec::new(),
+            scatter: HashMap::new(),
+            buckets: Vec::new(),
+            shadow_buckets: Vec::new(),
             visible: Vec::new(),
             shadow: Vec::new(),
             ghost_slot: None,
@@ -272,6 +300,34 @@ impl Parts {
         self.instances.len()
     }
 
+    /// Add, replace (`Some`) or remove (`None`) the scatter batch under `key`.
+    pub fn set_scatter(&mut self, key: u64, batch: Option<ScatterBatch>) {
+        match batch {
+            Some(mut batch) => {
+                batch.instances.retain(|i| (i.model.0 as usize) < self.models.len());
+                let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+                for i in &batch.instances {
+                    let r = self.models[i.model.0 as usize].radius * i.scale;
+                    min = min.min(i.position - r);
+                    max = max.max(i.position + r);
+                }
+                if batch.instances.is_empty() {
+                    self.scatter.remove(&key);
+                } else {
+                    self.scatter.insert(key, StoredBatch { batch, min, max });
+                }
+            }
+            None => {
+                self.scatter.remove(&key);
+            }
+        }
+    }
+
+    /// Scatter instances held (not just drawn).
+    pub fn scatter_count(&self) -> usize {
+        self.scatter.values().map(|b| b.batch.instances.len()).sum()
+    }
+
     /// Cull, sort and upload this frame's instances.
     pub fn prepare(
         &mut self,
@@ -283,40 +339,63 @@ impl Parts {
     ) {
         let frustum = Frustum::from_view_proj(view_proj);
         let n = self.models.len();
-        self.visible = vec![Range::default(); n];
-        self.shadow = vec![Range::default(); n];
-        self.scratch.clear();
+        self.buckets.resize_with(n, Vec::new);
+        self.shadow_buckets.resize_with(n, Vec::new);
+        for b in self.buckets.iter_mut().chain(self.shadow_buckets.iter_mut()) {
+            b.clear();
+        }
 
-        let fill = |ranges: &mut Vec<Range>,
-                    scratch: &mut Vec<InstanceData>,
-                    keep: &dyn Fn(&PartInstance, f32) -> bool| {
-            let mut list: Vec<(ModelId, InstanceData)> = Vec::new();
-            for i in &self.instances {
-                let radius = self.models[i.model.0 as usize].radius * i.scale;
-                if keep(i, radius) {
-                    list.push((i.model, instance_data(i, camera, 0)));
-                }
-            }
-            list.sort_unstable_by_key(|(m, _)| *m);
-            for (model, data) in list {
-                let r = &mut ranges[model.0 as usize];
-                if r.count == 0 {
-                    r.start = scratch.len() as u32;
-                }
-                r.count += 1;
-                scratch.push(data);
-            }
-        };
-        let visible = |i: &PartInstance, radius: f32| {
+        // Placed parts: culled one by one.
+        for i in &self.instances {
+            let m = i.model.0 as usize;
+            let radius = self.models[m].radius * i.scale;
             let rel = i.position - camera;
-            rel.length() < DRAW_DISTANCE + radius && frustum.intersects_box(rel - radius, rel + radius)
+            if rel.length() < DRAW_DISTANCE + radius && frustum.intersects_box(rel - radius, rel + radius) {
+                self.buckets[m].push(instance_data(i, camera, 0, 1.0));
+            }
+            if rel.length() < shadow_reach + radius {
+                self.shadow_buckets[m].push(instance_data(i, camera, 0, 1.0));
+            }
+        }
+        // Scatter: whole batches culled by their bounds, then instances by distance.
+        for stored in self.scatter.values() {
+            let b = &stored.batch;
+            let nearest = camera.clamp(stored.min, stored.max).distance(camera);
+            let in_view =
+                nearest < b.distance && frustum.intersects_box(stored.min - camera, stored.max - camera);
+            let casts = b.shadows && nearest < shadow_reach;
+            if !in_view && !casts {
+                continue;
+            }
+            for i in &b.instances {
+                let m = i.model.0 as usize;
+                let dist = (i.position - camera).length();
+                if in_view && dist < b.distance {
+                    let fade = ((b.distance - dist) / b.fade.max(1e-3)).clamp(0.0, 1.0);
+                    self.buckets[m].push(instance_data(i, camera, 0, fade));
+                }
+                if casts && dist < shadow_reach {
+                    self.shadow_buckets[m].push(instance_data(i, camera, 0, 1.0));
+                }
+            }
+        }
+
+        self.scratch.clear();
+        let flatten = |buckets: &[Vec<InstanceData>], scratch: &mut Vec<InstanceData>| -> Vec<Range> {
+            buckets
+                .iter()
+                .map(|bucket| {
+                    let range = Range { start: scratch.len() as u32, count: bucket.len() as u32 };
+                    scratch.extend_from_slice(bucket);
+                    range
+                })
+                .collect()
         };
-        let casts = |i: &PartInstance, radius: f32| (i.position - camera).length() < shadow_reach + radius;
-        fill(&mut self.visible, &mut self.scratch, &visible);
-        fill(&mut self.shadow, &mut self.scratch, &casts);
+        self.visible = flatten(&self.buckets, &mut self.scratch);
+        self.shadow = flatten(&self.shadow_buckets, &mut self.scratch);
         self.drawn = self.visible.iter().map(|r| r.count as usize).sum();
         self.ghost_slot = self.ghost.map(|g| {
-            self.scratch.push(instance_data(&g.instance, camera, if g.valid { 1 } else { 2 }));
+            self.scratch.push(instance_data(&g.instance, camera, if g.valid { 1 } else { 2 }, 1.0));
             (g.instance.model, self.scratch.len() as u32 - 1)
         });
 

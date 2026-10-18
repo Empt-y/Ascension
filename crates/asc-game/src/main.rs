@@ -12,6 +12,7 @@ mod inventory_ui;
 mod mining;
 mod player;
 mod save;
+mod scatter;
 mod sim;
 mod streaming;
 
