@@ -41,7 +41,7 @@ fn stars(dir: vec3<f32>, pixel: f32) -> vec3<f32> {
         }
         // Angular distance, against a width of at least a pixel (so the star never aliases).
         let d = length(dir - star);
-        let width = max(pixel * 0.9, 0.00035);
+        let width = max(pixel * 1.4, 0.00035);
         let brightness = 0.35 + 0.9 * hash13(cell + 7.0);
         light += brightness * exp(-(d * d) / (width * width)) * min(1.0, 0.0006 / width);
     }

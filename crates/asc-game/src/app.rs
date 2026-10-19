@@ -84,6 +84,9 @@ pub struct Options {
     pub shadows: bool,
     /// Accessibility: no wind motion in plants.
     pub reduce_motion: bool,
+    /// Turn the camera slowly in place at this many radians per second (for testing aliasing:
+    /// a fraction of a pixel per frame, so anything that flickers between frames is aliasing).
+    pub orbit: Option<f32>,
     /// Flatten a site, build a small house on it, walk inside, and log what happens.
     pub build_test: bool,
     /// Place a large scripted block of pieces near spawn (a building performance test).
@@ -114,6 +117,7 @@ impl Options {
                 "--msaa" => opts.msaa = Some(value("--msaa")?.parse()?),
                 "--showcase" => opts.showcase = true,
                 "--reduce-motion" => opts.reduce_motion = true,
+                "--orbit" => opts.orbit = Some(value("--orbit")?.parse()?),
                 "--shadows" => {
                     opts.shadows = match value("--shadows")?.as_str() {
                         "on" => true,
@@ -431,6 +435,9 @@ impl State {
             self.autopilot(dt.as_secs_f32());
         } else {
             self.move_player(dt.as_secs_f32());
+        }
+        if let Some(rate) = self.options.orbit {
+            self.player.yaw += rate * dt.as_secs_f32();
         }
         self.camera = Camera {
             position: self.player.eye(),

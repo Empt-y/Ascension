@@ -537,6 +537,9 @@ def birch(m, rng):
     white = bark("birch", (0.72, 0.70, 0.65), 0.75)
     dark = bark("birch_mark", (0.12, 0.11, 0.10))
     grey = bark("birch_grey", (0.42, 0.40, 0.37), 0.85)
+    # Only the trunk is white: the branches and the thin top are dark grey-brown, as on real
+    # birches. (Thin white lines against dark foliage flickered at a distance.)
+    twig_bark = bark("birch_twig", (0.16, 0.12, 0.1), 0.9)
     leaves = card_material("birch", "leaves_round", (0.36, 0.56, 0.15))
     height = rng.uniform(8.5, 10.0)
     sway = horizontal(rng.uniform(0, TAU)) * rng.uniform(0.2, 0.5)
@@ -554,7 +557,7 @@ def birch(m, rng):
                 marks[(i, k)] = tone
                 if rng.random() < 0.5:
                     marks[(i, (k + 1) % sides)] = tone
-    tube(m, pts, radii, sides, white, mat_fn=lambda i, k: marks.get((i, k), white))
+    tube(m, pts, radii, sides, white, mat_fn=lambda i, k: twig_bark if radii[i] < 0.09 else marks.get((i, k), white))
     twigs = [(pts[-1], UP)]
     coarse = 14
     for j in range(coarse // 3, coarse):
@@ -562,7 +565,7 @@ def birch(m, rng):
         for _ in range(2 if j > coarse // 2 else 1):
             d = (horizontal(rng.uniform(0, TAU)) + UP * rng.uniform(0.4, 1.0)).normalized()
             reach = lerp(1.9, 0.8, (j - coarse // 3) / (coarse - coarse // 3)) * rng.uniform(0.8, 1.1)
-            grow(m, rng, pts[i], d, reach, 0.045, 1, white, twigs, spread=0.6, rise=-0.15, children=(2, 3))
+            grow(m, rng, pts[i], d, reach, 0.045, 1, twig_bark, twigs, spread=0.6, rise=-0.15, children=(2, 3))
     center, crown = bounds_of([p for p, _ in twigs], 0.6)
     hang_cards(m, rng, twigs, leaves, 1.15, 4, center, crown)
     m.occluders.append((center, crown))
@@ -1223,15 +1226,14 @@ IMPOSTORS = os.path.join(TEXTURES, "impostors")
 
 
 def render_impostor(obj, name, bounds):
-    """Render two flat-lit orthographic views of `obj` (from +z and from +x) side by side into
-    `impostors/<name>.png`. Returns the views' centre and their height in metres (each view is
-    half as wide as it is tall)."""
+    """Render three flat-lit orthographic views of `obj` into `impostors/<name>.png`, a 2x2 atlas
+    (texture v up): from +z top-left, from +x top-right, from above bottom-left. Returns the views'
+    centre and their size in metres (every view is a square of that side)."""
     import numpy as np
 
     lo, hi = Vector(bounds["min"]), Vector(bounds["max"])
     center = (lo + hi) / 2
-    width = max(hi.x - lo.x, hi.z - lo.z)
-    height = max(hi.y - lo.y, 2.0 * width) * 1.02
+    size = max(hi.x - lo.x, hi.y - lo.y, hi.z - lo.z) * 1.02
     scene = bpy.context.scene
     for engine in ("BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"):
         try:
@@ -1239,8 +1241,9 @@ def render_impostor(obj, name, bounds):
             break
         except TypeError:
             continue
-    scene.render.resolution_x = IMPOSTOR_SIZE // 2
-    scene.render.resolution_y = IMPOSTOR_SIZE
+    half = IMPOSTOR_SIZE // 2
+    scene.render.resolution_x = half
+    scene.render.resolution_y = half
     scene.render.film_transparent = True
     scene.view_settings.view_transform = "Standard"
     if scene.world is None:
@@ -1256,26 +1259,28 @@ def render_impostor(obj, name, bounds):
             bpy.data.objects.remove(o)
     cam_data = bpy.data.cameras.new("impostor")
     cam_data.type = "ORTHO"
-    cam_data.ortho_scale = height
+    cam_data.ortho_scale = size
     cam_data.clip_end = 1000.0
     cam = bpy.data.objects.new("impostor", cam_data)
     scene.collection.objects.link(cam)
     scene.camera = cam
-    views = []
-    for k, (eye, look_from) in enumerate([((0.0, 0.0, 1.0), "front"), ((1.0, 0.0, 0.0), "side")]):
+    out = np.zeros((IMPOSTOR_SIZE, IMPOSTOR_SIZE, 4), dtype=np.float32)
+    # (eye direction, atlas row offset, column offset); Blender pixel rows run bottom-up.
+    views = [((0.0, 0.0, 1.0), half, 0), ((1.0, 0.0, 0.0), half, half), ((0.0, 1.0, 0.0), 0, 0)]
+    for k, (eye, row, col) in enumerate(views):
         pos = center + Vector(eye) * 100.0
         cam.location = g2b(pos)
+        # From above, the image's up is game -z (Blender +y) and its right game +x.
         cam.rotation_euler = (g2b(center) - g2b(pos)).to_track_quat("-Z", "Y").to_euler()
-        path = os.path.join(IMPOSTORS, f"_{name}_{look_from}.png")
+        path = os.path.join(IMPOSTORS, f"_{name}_{k}.png")
         scene.render.filepath = path
         bpy.ops.render.render(write_still=True)
         img = bpy.data.images.load(path)
         px = np.empty(len(img.pixels), dtype=np.float32)
         img.pixels.foreach_get(px)
-        views.append(px.reshape(IMPOSTOR_SIZE, IMPOSTOR_SIZE // 2, 4))
+        out[row : row + half, col : col + half] = px.reshape(half, half, 4)
         bpy.data.images.remove(img)
         os.remove(path)
-    out = np.concatenate(views, axis=1)
     # Fill transparent texels with the average opaque colour so filtering never pulls in black.
     covered = out[..., 3] > 0.5
     if covered.any():
@@ -1286,15 +1291,17 @@ def render_impostor(obj, name, bounds):
     image.file_format = "PNG"
     image.save()
     bpy.data.images.remove(image)
-    return center, height
+    return center, size
 
 
-def build_impostor(name, center, height):
-    """Two crossed cards showing the impostor views: the front view faces +z, the side view +x."""
+def build_impostor(name, center, size):
+    """Three cards showing the impostor views: crossed vertical cards facing +z and +x, and a
+    horizontal one through the crown seen from above (without it, trees seen from high up are
+    just an X)."""
     m = Mesh(name)
     mat = card_material(name, f"impostors/{name}")
-    w, h = height / 2, height
-    y0, y1 = center.y - h / 2, center.y + h / 2
+    r = size / 2
+    y0, y1 = center.y - r, center.y + r
 
     def normals(corners, facing):
         # Soft: mostly up and out from the trunk, so the flat cards light like a rounded crown.
@@ -1305,12 +1312,17 @@ def build_impostor(name, center, height):
             out.append(UP * 0.45 + side * 0.4 + facing * 0.15)
         return out
 
-    front = [Vector((center.x - w / 2, y0, 0)), Vector((center.x + w / 2, y0, 0)), Vector((center.x + w / 2, y1, 0)), Vector((center.x - w / 2, y1, 0))]
-    m.card(front, mat, normals(front, Vector((0, 0, 1))), uvs=((0.0, 0.0), (0.5, 0.0), (0.5, 1.0), (0.0, 1.0)))
+    front = [Vector((center.x - r, y0, 0)), Vector((center.x + r, y0, 0)), Vector((center.x + r, y1, 0)), Vector((center.x - r, y1, 0))]
+    m.card(front, mat, normals(front, Vector((0, 0, 1))), uvs=((0.0, 0.5), (0.5, 0.5), (0.5, 1.0), (0.0, 1.0)))
     # Seen from +x, the image's right edge is towards -z.
-    side = [Vector((0, y0, center.z + w / 2)), Vector((0, y0, center.z - w / 2)), Vector((0, y1, center.z - w / 2)), Vector((0, y1, center.z + w / 2))]
-    m.card(side, mat, normals(side, Vector((1, 0, 0))), uvs=((0.5, 0.0), (1.0, 0.0), (1.0, 1.0), (0.5, 1.0)))
-    m.root_shade = (height * 0.3, 0.3)
+    side = [Vector((0, y0, center.z + r)), Vector((0, y0, center.z - r)), Vector((0, y1, center.z - r)), Vector((0, y1, center.z + r))]
+    m.card(side, mat, normals(side, Vector((1, 0, 0))), uvs=((0.5, 0.5), (1.0, 0.5), (1.0, 1.0), (0.5, 1.0)))
+    # From above: image bottom is towards +z, right towards +x. At the crown's middle height.
+    crown = center.y + r * 0.3
+    top = [Vector((center.x - r, crown, center.z + r)), Vector((center.x + r, crown, center.z + r)),
+           Vector((center.x + r, crown, center.z - r)), Vector((center.x - r, crown, center.z - r))]
+    m.card(top, mat, [UP * 0.8 + (c - center).normalized() * 0.2 for c in top], uvs=((0.0, 0.0), (0.5, 0.0), (0.5, 0.5), (0.0, 0.5)))
+    m.root_shade = (size * 0.3, 0.3)
     return m.finish()
 
 
@@ -1339,8 +1351,8 @@ def main():
         if model["kind"] == "tree":
             os.makedirs(IMPOSTORS, exist_ok=True)
             far_name = f"{model['id']}_far"
-            center, height = render_impostor(obj, far_name, report[model["id"]])
-            far = build_impostor(far_name, center, height)
+            center, size = render_impostor(obj, far_name, report[model["id"]])
+            far = build_impostor(far_name, center, size)
             export(far, os.path.join(out_dir, f"{far_name}.glb"))
             bpy.data.objects.remove(far)
         render_preview(obj, os.path.join(out_dir, "previews", f"{model['id']}.png"))
