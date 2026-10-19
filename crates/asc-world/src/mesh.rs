@@ -10,6 +10,9 @@ use glam::Vec3;
 
 use crate::chunk::{CHUNK, ChunkData, SAMPLES};
 
+/// Vertex positions are rounded to 1 / this many metres (see the comment where they're made).
+pub const POSITION_GRID: f32 = 1024.0;
+
 /// Materials that can be blended per vertex: slot `i` holds material id `i + 1` (0 is air).
 pub const MATERIAL_SLOTS: usize = 12;
 
@@ -107,7 +110,13 @@ pub fn mesh_chunk(chunk: &ChunkData) -> ChunkMesh {
                 let weights = weight.map(|w| (w / total * 255.0).round() as u8);
 
                 // Cell (x, y, z) has its low corner at sample (x, y, z), which sits at chunk-local x - 1.
-                let position = Vec3::new(x as f32, y as f32, z as f32) - Vec3::ONE + local;
+                // On a 1/1024 m grid, so that chunk offset + local position is exact in f32 and the
+                // two chunks sharing a border vertex put it in bit-identically the same place on the
+                // GPU (otherwise hairline cracks open along chunk seams and sparkle). Only the offset
+                // within the cell is rounded: it comes from the same samples in both chunks, so it
+                // rounds the same way; the whole cell position is then added exactly.
+                let within = (local * POSITION_GRID).round() / POSITION_GRID;
+                let position = (Vec3::new(x as f32, y as f32, z as f32) - Vec3::ONE) + within;
                 let column = (x + local.x.round() as usize) + SAMPLES * (z + local.z.round() as usize);
                 let buried = chunk.surface[column] - (chunk.coord.y * CHUNK) as f32 - position.y;
                 let occlusion = 1.0 - smoothstep(2.0, 12.0, buried) * 0.85;

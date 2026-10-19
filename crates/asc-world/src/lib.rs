@@ -17,7 +17,7 @@ pub use chunk::{CHUNK, ChunkCoord, ChunkData, SAMPLES, chunk_of, chunk_origin};
 pub use collide::{Capsule, Contact, box_distance, distance_estimate, push_sphere, resolve_capsule};
 pub use edit::{EditKind, EditLog, EditOp};
 pub use material::Material;
-pub use mesh::{ChunkMesh, MATERIAL_SLOTS, Vertex, mesh_chunk};
+pub use mesh::{ChunkMesh, MATERIAL_SLOTS, POSITION_GRID, Vertex, mesh_chunk};
 pub use raycast::{RayHit, raycast};
 pub use worldgen::{Biome, Ground, WorldGen};
 

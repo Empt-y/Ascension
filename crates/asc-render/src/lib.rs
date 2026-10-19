@@ -571,7 +571,12 @@ impl Renderer {
         };
         let (width, height) = self.gpu.size();
         let aspect = width as f32 / height as f32;
-        let cam = &frame.camera;
+        // The camera snapped to the same 1/1024 m grid as terrain vertices, so chunk offsets and
+        // vertex positions add exactly and neighbouring chunks meet without cracks. (A millimetre
+        // step is far too small to see.)
+        let mut snapped = frame.camera;
+        snapped.position = (snapped.position * asc_world::POSITION_GRID).round() / asc_world::POSITION_GRID;
+        let cam = &snapped;
         let view_proj = cam.view_proj(aspect);
         // Shadows hold still (no wind, a stepped sun), so a cascade is only redrawn when the camera
         // has moved a fair way across it or something that casts shadows changed; in between it's

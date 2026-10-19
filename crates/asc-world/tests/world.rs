@@ -323,3 +323,33 @@ fn biomes_cover_the_world_in_sensible_shares() {
         assert!(share(b) < 0.4, "{} takes over: {:.1}%", b.name(), 100.0 * share(b));
     }
 }
+
+#[test]
+fn chunk_seams_are_bit_exact_on_the_gpu() {
+    // The renderer adds each vertex's chunk-local position to its chunk's offset from the (snapped)
+    // camera. Two chunks sharing a border vertex must get exactly the same sum, or hairline cracks
+    // open along the seam and the sky sparkles through.
+    let worldgen = WorldGen::new(SEED);
+    let a = surface_chunk(&worldgen, 10.0, 10.0);
+    let snap = |v: f32| (v * POSITION_GRID).round() / POSITION_GRID;
+    let camera = Vec3::new(snap(1234.567), snap(-31.25), snap(-987.654));
+    for b in [a + IVec3::X, a + IVec3::Z, a + IVec3::Y] {
+        let gpu = |coord: ChunkCoord| -> Vec<Vec3> {
+            let offset = chunk_origin(coord) - camera;
+            mesh_chunk(&worldgen.generate(coord))
+                .vertices
+                .iter()
+                .map(|v| Vec3::from(v.position) + offset)
+                .collect()
+        };
+        let (va, vb) = (gpu(a), gpu(b));
+        let mut exact = 0;
+        for p in &va {
+            if let Some(q) = vb.iter().find(|q| q.distance(*p) < 1e-3) {
+                assert_eq!(p.to_array().map(f32::to_bits), q.to_array().map(f32::to_bits), "{p} vs {q}");
+                exact += 1;
+            }
+        }
+        assert!(exact > 10, "only {exact} shared vertices between {a:?} and {b:?}");
+    }
+}
