@@ -24,7 +24,7 @@ use crate::targets::CASCADES;
 const DRAW_DISTANCE: f32 = 600.0;
 /// Every texture is resampled to this size to fit the array.
 pub const TEXTURE_SIZE: u32 = 512;
-const TEXTURE_LAYERS: u32 = 48;
+const TEXTURE_LAYERS: u32 = 64;
 const TEXTURE_MIPS: u32 = TEXTURE_SIZE.ilog2() + 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

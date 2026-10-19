@@ -43,6 +43,7 @@ sway = 0.6
 max_slope = 0.9
 shadow_distance = 50.0
 collide = "none"
+mid_lod = 15.0
 
 [kinds.plant]
 distance = 70.0
@@ -61,6 +62,7 @@ sway = 1.0
 max_slope = 1.0
 shadow_distance = 0.0
 collide = "none"
+mid_lod = 10.0
 
 [kinds.rock]
 distance = 300.0

@@ -65,6 +65,11 @@ class Mesh:
         # is, larger. Thin twigs and many small card edges are what shimmer at a distance.
         self.mid = False
         self.cards = 0
+        # What the mid version drops: tubes thinner than this, and all but every `card_keep`th
+        # card (the rest grow by `card_scale`). Builders whose look depends on them change these.
+        self.min_radius = MID_MIN_RADIUS
+        self.card_keep = 2
+        self.card_scale = MID_CARD_SCALE
         self.uv = self.bm.loops.layers.uv.verify()
         # Baked ambient occlusion (vertex colour alpha): ellipsoids that darken what's deep inside
         # them (crowns), and how much the bottom of the model darkens towards its roots.
@@ -101,10 +106,10 @@ class Mesh:
         given `uvs`), with `normals` (one per corner, game space) used on both sides."""
         if self.mid:
             self.cards += 1
-            if self.cards % 2:
+            if self.cards % self.card_keep:
                 return
             centre = sum(corners, Vector()) / 4
-            corners = [centre + (c - centre) * MID_CARD_SCALE for c in corners]
+            corners = [centre + (c - centre) * self.card_scale for c in corners]
         a, b = corners[1] - corners[0], corners[3] - corners[0]
         front = a.cross(b)
         for facing in (front, -front):
@@ -159,6 +164,10 @@ def perpendicular(t):
 
 
 MID_MIN_RADIUS = 0.07
+# True while a mid model is built: card textures with a `_mid` version (fewer, wider grass blades)
+# use it.
+BUILDING_MID = False
+MID_TEXTURES_USED = []
 MID_CARD_SCALE = 1.4
 
 
@@ -166,7 +175,7 @@ def tube(m, points, radii, sides, mat, cap_end=True, cap_start=False, cap_mat=No
     """A tube through `points` with a radius per point, framed by parallel transport so it doesn't
     twist. `mat_fn(segment, side)` can vary the material per face; `ribs` pulls every other side in
     by that fraction (cactus ribs)."""
-    if m.mid and max(radii) < MID_MIN_RADIUS:
+    if m.mid and max(radii) < m.min_radius:
         return
     pts = [Vector(p) for p in points]
     n = len(pts)
@@ -370,6 +379,9 @@ TEXTURES = os.path.join(
 def card_material(name, texture, tint=(1.0, 1.0, 1.0), roughness=0.75):
     """A cutout material: texels with alpha below 0.5 are discarded (glTF alphaMode MASK). The
     texture is multiplied by `tint`."""
+    if BUILDING_MID and os.path.isfile(os.path.join(TEXTURES, f"{texture}_mid.png")):
+        texture, name = f"{texture}_mid", f"{name}_mid"
+        MID_TEXTURES_USED.append(texture)
     key = f"card_{name}"
     if key in MATERIALS:
         return MATERIALS[key]
@@ -482,6 +494,7 @@ def grow(m, rng, start, direction, length, radius, depth, bark_mat, twigs, sprea
 def tuft_cards(m, rng, mat, height, width, cards, lean=0.15):
     """A grass tuft: vertical cards crossed round the centre, leaning out a little. Normals point
     mostly up so the tuft lights like the ground it grows from; occlusion darkens the roots."""
+    m.card_keep, m.card_scale = 1, 1.0
     rot = rng.uniform(0, TAU)
     for k in range(cards):
         a = rot + math.pi * k / cards + rng.uniform(-0.2, 0.2)
@@ -762,8 +775,12 @@ def juniper(m, rng):
 def dry_shrub(m, rng):
     twig = bark("dry", (0.30, 0.24, 0.16), 0.95)
 
+    thick = 1.6 if m.mid else 1.0
+
     def limb(start, d, length, radius, depth):
-        end = branch(m, start, d, length, radius, twig, rng, segments=2, sides=4, curl=0.15, tip=0.5)
+        # Mid version: the finest twigs aren't drawn (thinner than any limb), the rest thicker.
+        m.min_radius = 1.0 if depth == 0 else 0.0
+        end = branch(m, start, d, length, radius * thick, twig, rng, segments=2, sides=4, curl=0.15, tip=0.5)
         if depth == 0:
             return
         for _ in range(2):
@@ -1372,15 +1389,27 @@ def main():
             center, size = render_impostor(obj, far_name, report[model["id"]])
             far = build_impostor(far_name, center, size)
             export(far, os.path.join(out_dir, f"{far_name}.glb"))
-            # The mid-distance version: the same tree from the same seed, without its twigs.
+        if model["kind"] in ("tree", "shrub", "grass"):
+            # The mid-distance version: the same model from the same seed, without its twigs and
+            # with fewer, larger cards (or coarser grass).
+            global BUILDING_MID
             bpy.ops.wm.read_factory_settings(use_empty=True)
             MATERIALS.clear()
             mid = Mesh(f"{model['id']}_mid")
             mid.mid = True
+            MID_TEXTURES_USED.clear()
+            BUILDING_MID = True
             BUILDERS[model["builder"]](mid, random.Random(model["seed"]))
+            BUILDING_MID = False
             mid_obj = mid.finish()
-            report[f"{model['id']}_mid"] = measure(mid_obj)
-            export(mid_obj, os.path.join(out_dir, f"{model['id']}_mid.glb"))
+            mid_report = measure(mid_obj)
+            mid_path = os.path.join(out_dir, f"{model['id']}_mid.glb")
+            # Nothing to drop (cacti, the banana plant): no mid version.
+            if mid_report["triangles"] < report[model["id"]]["triangles"] or MID_TEXTURES_USED:
+                report[f"{model['id']}_mid"] = mid_report
+                export(mid_obj, mid_path)
+            elif os.path.exists(mid_path):
+                os.remove(mid_path)
         print(f"PART {model['id']}: {report[model['id']]['triangles']} triangles", flush=True)
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2)

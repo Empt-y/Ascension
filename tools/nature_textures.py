@@ -335,6 +335,11 @@ def main():
     finish(tuft(random.Random(9), 70, 0.95, 0.035), "grass_tuft")
     finish(tuft(random.Random(10), 45, 0.98, 0.028, base_color=(200, 215, 150), heads=6), "grass_tall")
     finish(tuft(random.Random(11), 40, 0.95, 0.018, base_color=(225, 220, 165), spread=0.3), "grass_thin")
+    # Mid-distance grass: the same tufts as fewer, wider blades (thin blades become pixel-wide
+    # flicker a few metres out), slightly lower so the silhouette stays as full.
+    finish(tuft(random.Random(9), 26, 0.85, 0.1), "grass_tuft_mid")
+    finish(tuft(random.Random(10), 24, 0.9, 0.075, base_color=(200, 215, 150)), "grass_tall_mid")
+    finish(tuft(random.Random(11), 22, 0.85, 0.055, base_color=(225, 220, 165), spread=0.3), "grass_thin_mid")
     finish(large_leaf(random.Random(12)), "leaf_large")
     finish(cotton(random.Random(13)), "grass_cotton")
 
