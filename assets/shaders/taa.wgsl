@@ -5,8 +5,8 @@
 // Each pixel is reprojected into the previous frame from its depth and the camera's movement
 // (`taa_reproject`), which is exact for everything static. History is clamped to the colour range of
 // this frame's 3x3 neighbourhood, so anything that moved (wind, the player's edits) or was hidden
-// last frame can't leave ghosts. Blending is weighted by 1 / (1 + luma), so a single bright pixel
-// can't keep flickering through the average.
+// last frame can't leave ghosts. Blending and clamping happen on squashed colour (c / (1 + luma)),
+// so a single bright pixel can't keep flickering through the average.
 //
 // `DEPTH_TEXTURE` is replaced with texture_depth_multisampled_2d or texture_depth_2d to match MSAA.
 
@@ -22,6 +22,16 @@ fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
 
 fn luma(c: vec3<f32>) -> f32 {
     return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// A reversible squash of HDR colour: blending and clamping here stops bright outliers dominating
+// without biasing the image darker (blending raw colour with 1 / (1 + luma) weights did).
+fn squash(c: vec3<f32>) -> vec3<f32> {
+    return c / (1.0 + luma(c));
+}
+
+fn unsquash(c: vec3<f32>) -> vec3<f32> {
+    return c / max(1.0 - luma(c), 1e-4);
 }
 
 // History, sharpened by a 9-tap Catmull-Rom filter so repeated resampling doesn't blur it.
@@ -57,7 +67,7 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let px = vec2<i32>(frag.xy);
     let size = vec2<i32>(textureDimensions(current));
     let uv = frag.xy * globals.screen.zw;
-    let now = textureLoad(current, px, 0).rgb;
+    let now = squash(textureLoad(current, px, 0).rgb);
 
     // This frame's neighbourhood: its mean and spread bound what the history may be.
     var m1 = vec3(0.0);
@@ -68,7 +78,7 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     for (var y = -1; y <= 1; y++) {
         for (var x = -1; x <= 1; x++) {
             let q = clamp(px + vec2(x, y), vec2(0), size - 1);
-            let c = textureLoad(current, q, 0).rgb;
+            let c = squash(textureLoad(current, q, 0).rgb);
             m1 += c;
             m2 += c * c;
             depth = max(depth, textureLoad(depth_tex, q, 0));
@@ -76,8 +86,10 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     }
     let mean = m1 / 9.0;
     let sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3(0.0)));
-    let lo = mean - sigma * 1.25;
-    let hi = mean + sigma * 1.25;
+    // Wide enough that a thin feature visible at only some jitter offsets (a far trunk) settles into
+    // its average instead of being reset each frame.
+    let lo = mean - sigma * 1.6;
+    let hi = mean + sigma * 1.6;
 
     // Where this pixel was last frame (without this frame's jitter).
     let ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0) - globals.taa.zw;
@@ -88,16 +100,12 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
         let p = prev.xy / prev.w;
         let puv = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
         if all(puv >= vec2(0.0)) && all(puv <= vec2(1.0)) {
-            past = clamp(sample_history(puv), lo, hi);
+            past = clamp(squash(sample_history(puv)), lo, hi);
         } else {
             feedback = 1.0;
         }
     } else {
         feedback = 1.0;
     }
-    // Blend weighted by 1 / (1 + luma): bright outliers don't dominate.
-    let wn = feedback / (1.0 + luma(now));
-    let wp = (1.0 - feedback) / (1.0 + luma(past));
-    let color = (now * wn + past * wp) / max(wn + wp, 1e-6);
-    return vec4(color, 1.0);
+    return vec4(unsquash(mix(past, now, feedback)), 1.0);
 }

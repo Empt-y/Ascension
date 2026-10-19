@@ -76,7 +76,9 @@ struct Globals {
 }
 
 /// Weight of each new frame in the TAA history (the rest is the history).
-const TAA_FEEDBACK: f32 = 0.1;
+const TAA_FEEDBACK: f32 = 0.08;
+/// How much of a pixel the jitter spans: a little under the whole pixel keeps the image crisper.
+const TAA_JITTER: f32 = 0.8;
 /// The history is thrown away when the camera jumps further than this between frames.
 const TAA_RESET_DISTANCE: f32 = 8.0;
 
@@ -666,8 +668,8 @@ impl Renderer {
         let jitter = if taa {
             let i = (self.frame % 8) as u32 + 1;
             glam::Vec2::new(
-                (halton(i, 2) - 0.5) * 2.0 / width as f32,
-                (halton(i, 3) - 0.5) * 2.0 / height as f32,
+                (halton(i, 2) - 0.5) * 2.0 * TAA_JITTER / width as f32,
+                (halton(i, 3) - 0.5) * 2.0 * TAA_JITTER / height as f32,
             )
         } else {
             glam::Vec2::ZERO

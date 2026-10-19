@@ -33,7 +33,7 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
         let w = textureLoad(hdr, clamp(px + vec2(-1, 0), vec2(0), size - 1), 0).rgb;
         let lo = min(min(min(n, s), min(e, w)), col);
         let hi = max(max(max(n, s), max(e, w)), col);
-        col = clamp(col + (col * 4.0 - n - s - e - w) * 0.12, lo, hi);
+        col = clamp(col + (col * 4.0 - n - s - e - w) * 0.32, lo, hi);
     }
     col += textureSampleLevel(bloom, linear_sampler, uv, 0.0).rgb * 0.06;
     col *= globals.fog.w;
