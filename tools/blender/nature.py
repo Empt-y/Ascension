@@ -587,7 +587,14 @@ def birch(m, rng):
                 marks[(i, k)] = tone
                 if rng.random() < 0.5:
                     marks[(i, (k + 1) % sides)] = tone
-    tube(m, pts, radii, sides, white, mat_fn=lambda i, k: twig_bark if radii[i] < 0.09 else marks.get((i, k), white))
+    if m.mid:
+        # Mid distance: the trunk is a few pixels wide, so its white bark and dark dashes alternate
+        # pixel by pixel and flicker. The mid trunk is a little thicker and one plain tone, the
+        # average of the bark and its marks, toned down against the dark foliage behind it.
+        plain = bark("birch_mid", (0.44, 0.42, 0.39), 0.8)
+        tube(m, pts, [r * 1.35 for r in radii], sides, plain, mat_fn=lambda i, k: twig_bark if radii[i] < 0.09 else plain)
+    else:
+        tube(m, pts, radii, sides, white, mat_fn=lambda i, k: twig_bark if radii[i] < 0.09 else marks.get((i, k), white))
     twigs = [(pts[-1], UP)]
     coarse = 14
     for j in range(coarse // 3, coarse):
