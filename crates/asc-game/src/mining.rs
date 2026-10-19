@@ -1,20 +1,17 @@
-//! Timed mining by material hardness, and placing material back from the inventory.
+//! Timed mining by material hardness, on the client: how long the button has been held on what.
+//! When a bite (or a node) is done the client asks the server, which applies it (`asc_sim::rules`).
 
-use asc_world::{Capsule, Census, EditKind, EditOp, Material, RayHit, World};
+use asc_world::{Material, RayHit, World};
 use glam::Vec3;
 
 use crate::content::Content;
-use crate::inventory::Inventory;
 use crate::scatter::{NodeHit, NodeId};
 
-/// Radius of one bite (and of one placed lump).
-pub const BITE_RADIUS: f32 = 0.9;
-/// How far into the surface a bite is centred (and out of it for placing), as a fraction of the radius.
-const INSET: f32 = 0.3;
+pub use asc_sim::rules::BITE_RADIUS;
+
 /// Moving the crosshair further than this from where mining started restarts the bite.
 const RETARGET_DISTANCE: f32 = 0.5;
 const PLACE_INTERVAL: f32 = 0.2;
-const CENSUS_STEP: f32 = 0.25;
 
 #[derive(Default)]
 pub struct Mining {
@@ -24,25 +21,6 @@ pub struct Mining {
     node: Option<(NodeId, f32, usize)>,
     progress: f32,
     place_cooldown: f32,
-}
-
-/// What one completed bite produced.
-#[derive(Debug)]
-pub struct Bite {
-    pub op: EditOp,
-    pub removed: Census,
-    /// Whole items that didn't fit in the inventory.
-    pub overflow: u32,
-}
-
-#[derive(Debug, PartialEq)]
-pub enum PlaceOutcome {
-    Placed(EditOp),
-    NothingSelected,
-    NotPlaceable,
-    NotEnough,
-    WouldBury,
-    OnCooldown,
 }
 
 impl Mining {
@@ -76,6 +54,10 @@ impl Mining {
         self.progress = 0.0;
     }
 
+    pub fn tick_cooldown(&mut self, dt: f32) {
+        self.place_cooldown = (self.place_cooldown - dt).max(0.0);
+    }
+
     /// Advance mining an ore node while the button is held; true when it breaks.
     pub fn mine_node(&mut self, dt: f32, node: NodeHit, hardness: f32) -> bool {
         if self.node.map(|(id, _, _)| id) != Some(node.id) {
@@ -90,20 +72,8 @@ impl Mining {
         true
     }
 
-    pub fn tick_cooldown(&mut self, dt: f32) {
-        self.place_cooldown = (self.place_cooldown - dt).max(0.0);
-    }
-
-    /// Advance mining while the button is held. Returns a bite when one completes; the edit has
-    /// already been added to the world and its yield to the inventory.
-    pub fn mine(
-        &mut self,
-        dt: f32,
-        hit: Option<RayHit>,
-        world: &mut World,
-        content: &Content,
-        inventory: &mut Inventory,
-    ) -> Option<Bite> {
+    /// Advance mining while the button is held. Returns the hit to bite when a bite completes.
+    pub fn mine(&mut self, dt: f32, hit: Option<RayHit>, world: &World, content: &Content) -> Option<RayHit> {
         let Some(hit) = hit else {
             self.reset();
             return None;
@@ -128,56 +98,16 @@ impl Mining {
             return None;
         }
         self.progress = 0.0;
-
-        let center = hit.point - hit.normal * BITE_RADIUS * INSET;
-        let removed = world.census(center, BITE_RADIUS, CENSUS_STEP);
-        let op = EditOp { center, radius: BITE_RADIUS, kind: EditKind::Dig, material: Material::Air };
-        world.edits.push(op);
-        let mut overflow = 0;
-        for m in Material::ALL.into_iter().filter(|m| *m != Material::Ore) {
-            let volume = removed.solid[m as usize];
-            if volume > 0.0
-                && let Some(item) = content.material(m).drop
-            {
-                overflow += inventory.add_volume(content, item, volume);
-            }
-        }
-        for (ore, &volume) in removed.ores.iter().enumerate() {
-            if volume > 0.0
-                && let Some(item) = content.ores[ore].drop
-            {
-                overflow += inventory.add_volume(content, item, volume);
-            }
-        }
-        Some(Bite { op, removed, overflow })
+        Some(hit)
     }
 
-    /// Place a lump of the selected item's material at the crosshair, paying for the air it fills.
-    pub fn place(
-        &mut self,
-        hit: RayHit,
-        player_feet: Vec3,
-        world: &mut World,
-        content: &Content,
-        inventory: &mut Inventory,
-    ) -> PlaceOutcome {
+    /// Whether placing may happen now (it repeats at a fixed rate while held); starts the cooldown.
+    pub fn try_place(&mut self) -> bool {
         if self.place_cooldown > 0.0 {
-            return PlaceOutcome::OnCooldown;
+            return false;
         }
-        let Some(stack) = inventory.selected_stack() else { return PlaceOutcome::NothingSelected };
-        let Some(material) = content.item(stack.item).places else { return PlaceOutcome::NotPlaceable };
-        let center = hit.point + hit.normal * BITE_RADIUS * INSET;
-        if Capsule::PLAYER.overlaps_sphere(player_feet, center, BITE_RADIUS) {
-            return PlaceOutcome::WouldBury;
-        }
-        let filled = world.census(center, BITE_RADIUS, CENSUS_STEP).air;
-        if !inventory.pay_volume(stack.item, filled) {
-            return PlaceOutcome::NotEnough;
-        }
-        let op = EditOp { center, radius: BITE_RADIUS, kind: EditKind::Fill, material };
-        world.edits.push(op);
         self.place_cooldown = PLACE_INTERVAL;
-        PlaceOutcome::Placed(op)
+        true
     }
 }
 
@@ -186,83 +116,32 @@ mod tests {
     use super::*;
     use asc_world::raycast;
 
-    fn ground_hit(world: &World) -> RayHit {
-        let h = world.worldgen.height(40.0, 40.0);
-        raycast(|p| world.density_at(p), Vec3::new(40.0, h + 3.0, 40.0), -Vec3::Y, 20.0)
-            .expect("ground below")
-    }
-
     #[test]
-    fn bites_take_the_material_hardness_and_yield_items() {
+    fn a_bite_takes_the_material_hardness() {
         let content = Content::load().unwrap();
-        let mut world = World::new(1337);
-        let mut inv = Inventory::default();
+        let world = World::new(1337);
+        let h = world.worldgen.height(40.0, 40.0);
+        let hit = raycast(|p| world.density_at(p), Vec3::new(40.0, h + 3.0, 40.0), -Vec3::Y, 20.0).unwrap();
+        let hardness = content.sample(world.sample_raw(hit.point - hit.normal * 0.3).1).hardness;
         let mut mining = Mining::default();
-        let hit = ground_hit(&world);
-        let material = mining.target_material();
-        assert_eq!(material, None);
-        let hardness = {
-            let (_, m) = world.sample_raw(hit.point - hit.normal * 0.3);
-            content.sample(m).hardness
-        };
         let dt = 1.0 / 60.0;
         let mut elapsed = 0.0;
-        let bite = loop {
+        loop {
             elapsed += dt;
-            if let Some(b) = mining.mine(dt, Some(hit), &mut world, &content, &mut inv) {
-                break b;
+            if mining.mine(dt, Some(hit), &world, &content).is_some() {
+                break;
             }
             assert!(elapsed < 10.0, "never finished a bite");
-        };
+        }
         assert!((elapsed - hardness).abs() < 2.0 * dt, "took {elapsed}s for hardness {hardness}");
-        assert_eq!(world.edits.len(), 1);
-        let gained: f32 = inv.slots.iter().flatten().map(|s| s.count as f32).sum::<f32>()
-            + inv.remainders.values().sum::<f32>();
-        assert!(
-            (gained - bite.removed.total_solid()).abs() < 1e-3,
-            "yield {gained} vs removed {:?}",
-            bite.removed
-        );
-        assert!(bite.removed.total_solid() > 0.5);
     }
 
     #[test]
-    fn placing_costs_the_volume_it_fills() {
-        let content = Content::load().unwrap();
-        let mut world = World::new(1337);
-        let mut inv = Inventory::default();
-        let rock = content.item_id("rock").unwrap();
-        inv.add(&content, rock, 10);
+    fn placing_repeats_at_a_fixed_rate() {
         let mut mining = Mining::default();
-        let hit = ground_hit(&world);
-        let far_away = hit.point + Vec3::new(20.0, 0.0, 0.0);
-        let outcome = mining.place(hit, far_away, &mut world, &content, &mut inv);
-        let PlaceOutcome::Placed(op) = outcome else { panic!("expected to place, got {outcome:?}") };
-        let paid = 10.0 - (inv.count(rock) as f32 + inv.remainders[&rock]);
-        let expected = 0.5 * 4.0 / 3.0 * std::f32::consts::PI * BITE_RADIUS.powi(3);
-        assert!(
-            paid > expected * 0.4 && paid < expected * 1.6,
-            "paid {paid}, roughly half a sphere is {expected}"
-        );
-        assert!(world.density_at(op.center + hit.normal * 0.3) < 0.0, "placed material is solid");
-        assert_eq!(mining.place(hit, far_away, &mut world, &content, &mut inv), PlaceOutcome::OnCooldown);
-    }
-
-    #[test]
-    fn placing_refuses_to_bury_the_player_or_overspend() {
-        let content = Content::load().unwrap();
-        let mut world = World::new(1337);
-        let mut inv = Inventory::default();
-        let mut mining = Mining::default();
-        let hit = ground_hit(&world);
-        assert_eq!(
-            mining.place(hit, hit.point, &mut world, &content, &mut inv),
-            PlaceOutcome::NothingSelected
-        );
-        inv.add(&content, content.item_id("rock").unwrap(), 1);
-        assert_eq!(mining.place(hit, hit.point, &mut world, &content, &mut inv), PlaceOutcome::WouldBury);
-        let far = hit.point + Vec3::X * 20.0;
-        assert_eq!(mining.place(hit, far, &mut world, &content, &mut inv), PlaceOutcome::NotEnough);
-        assert!(world.edits.is_empty());
+        assert!(mining.try_place());
+        assert!(!mining.try_place());
+        mining.tick_cooldown(PLACE_INTERVAL);
+        assert!(mining.try_place());
     }
 }

@@ -11,7 +11,7 @@ use crate::content::{Content, ItemId};
 pub const SLOTS: usize = 36;
 pub const HOTBAR: usize = 9;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Stack {
     pub item: ItemId,
     pub count: u32,
@@ -25,6 +25,29 @@ pub struct Inventory {
     pub remainders: BTreeMap<ItemId, f32>,
 }
 
+/// One thing a player does in their inventory. The client applies it at once (so the screen
+/// responds immediately) and sends it; the server applies the same op and its result wins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum InventoryOp {
+    Click(usize),
+    RightClick(usize),
+    QuickMove(usize),
+    /// Choose hotbar slot `n`.
+    Select(usize),
+    /// Put the stack on the cursor back (closing the screen).
+    ReturnHeld,
+}
+
+/// An inventory as sent to the client: everything in it, and the last op it includes.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct InventorySnapshot {
+    pub seq: u32,
+    pub slots: Vec<Option<Stack>>,
+    pub selected: usize,
+    pub held: Option<Stack>,
+    pub remainders: Vec<(ItemId, f32)>,
+}
+
 impl Default for Inventory {
     fn default() -> Self {
         Self { slots: [None; SLOTS], selected: 0, remainders: BTreeMap::new() }
@@ -32,6 +55,39 @@ impl Default for Inventory {
 }
 
 impl Inventory {
+    /// Apply an op; returns how many items were lost (returning a held stack to a full inventory).
+    pub fn apply(&mut self, content: &Content, op: InventoryOp, held: &mut Option<Stack>) -> u32 {
+        match op {
+            InventoryOp::Click(i) if i < SLOTS => self.click(content, i, held),
+            InventoryOp::RightClick(i) if i < SLOTS => self.right_click(content, i, held),
+            InventoryOp::QuickMove(i) if i < SLOTS => self.quick_move(content, i),
+            InventoryOp::Select(i) if i < HOTBAR => self.selected = i,
+            InventoryOp::ReturnHeld => return self.return_held(content, held),
+            _ => {}
+        }
+        0
+    }
+
+    pub fn snapshot(&self, held: Option<Stack>, seq: u32) -> InventorySnapshot {
+        InventorySnapshot {
+            seq,
+            slots: self.slots.to_vec(),
+            selected: self.selected,
+            held,
+            remainders: self.remainders.iter().map(|(k, v)| (*k, *v)).collect(),
+        }
+    }
+
+    /// Replace this inventory with a snapshot's contents; returns its held stack.
+    pub fn restore(&mut self, s: &InventorySnapshot) -> Option<Stack> {
+        for (slot, saved) in self.slots.iter_mut().zip(s.slots.iter().chain(std::iter::repeat(&None))) {
+            *slot = *saved;
+        }
+        self.selected = s.selected.min(HOTBAR - 1);
+        self.remainders = s.remainders.iter().copied().collect();
+        s.held
+    }
+
     /// Add items, filling existing stacks first and then empty slots (hotbar first). Returns how many
     /// didn't fit.
     pub fn add(&mut self, content: &Content, item: ItemId, mut count: u32) -> u32 {

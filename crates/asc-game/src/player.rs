@@ -7,7 +7,7 @@ use asc_world::{Capsule, push_sphere};
 use glam::Vec3;
 
 pub const STEP: f32 = 1.0 / 60.0;
-pub const EYE_HEIGHT: f32 = 1.62;
+pub use asc_sim::EYE_HEIGHT;
 const WALK_SPEED: f32 = 5.0;
 const SPRINT_SPEED: f32 = 8.0;
 const GROUND_ACCEL: f32 = 60.0;

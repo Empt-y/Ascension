@@ -5,10 +5,16 @@
 pub mod content;
 pub mod inventory;
 pub mod ore_nodes;
+pub mod protocol;
+pub mod rules;
 pub mod save;
+pub mod server;
 pub mod sim;
 
 use serde::{Deserialize, Serialize};
+
+/// Eye height above the feet, metres.
+pub const EYE_HEIGHT: f32 = 1.62;
 
 /// How a player moves: walking with physics, or flying freely.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -3,7 +3,7 @@
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 
 use crate::content::Content;
-use crate::inventory::{HOTBAR, Inventory, SLOTS, Stack};
+use crate::inventory::{HOTBAR, Inventory, InventoryOp, SLOTS, Stack};
 
 const SLOT: f32 = 46.0;
 const GAP: f32 = 4.0;
@@ -96,8 +96,15 @@ pub fn notice(ctx: &egui::Context, text: &str) {
     );
 }
 
-/// The full inventory screen. Clicks move stacks Minecraft-style; `held` is the stack on the cursor.
-pub fn window(ctx: &egui::Context, content: &Content, inventory: &mut Inventory, held: &mut Option<Stack>) {
+/// The full inventory screen; `held` is the stack on the cursor. Returns what was clicked (stacks
+/// move Minecraft-style when the op is applied).
+pub fn window(
+    ctx: &egui::Context,
+    content: &Content,
+    inventory: &Inventory,
+    held: Option<Stack>,
+) -> Option<InventoryOp> {
+    let mut op = None;
     egui::Window::new("Inventory")
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .collapsible(false)
@@ -112,13 +119,9 @@ pub fn window(ctx: &egui::Context, content: &Content, inventory: &mut Inventory,
                     paint_stack(painter, rect, content, stack);
                 }
                 if response.clicked() {
-                    if shift {
-                        inventory.quick_move(content, i);
-                    } else {
-                        inventory.click(content, i, held);
-                    }
+                    op = Some(if shift { InventoryOp::QuickMove(i) } else { InventoryOp::Click(i) });
                 } else if response.secondary_clicked() {
-                    inventory.right_click(content, i, held);
+                    op = Some(InventoryOp::RightClick(i));
                 }
                 if let Some(stack) = inventory.slots[i]
                     && held.is_none()
@@ -145,11 +148,12 @@ pub fn window(ctx: &egui::Context, content: &Content, inventory: &mut Inventory,
             ui.label("Click: pick up / put down   Right click: split   Shift+click: move   E: close");
         });
 
-    if let (Some(stack), Some(pointer)) = (*held, ctx.pointer_latest_pos()) {
+    if let (Some(stack), Some(pointer)) = (held, ctx.pointer_latest_pos()) {
         let painter =
             ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("held stack")));
         paint_stack(&painter, Rect::from_center_size(pointer, Vec2::splat(SLOT)), content, stack);
     }
+    op
 }
 
 /// What was picked in the build menu.

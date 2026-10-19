@@ -41,12 +41,7 @@ struct Model {
     center_y: f32,
 }
 
-/// Which ore nodes a kind places.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NodeKind {
-    Surface,
-    Deep,
-}
+pub use crate::ore_nodes::{NodeId, NodeKind, node_id};
 
 #[derive(Clone, Debug)]
 struct Kind {
@@ -158,7 +153,7 @@ impl Config {
                 kinds.push(node_kind("ore_deep", NodeKind::Deep, 80.0, 0.0));
             }
         }
-        Self { seed: seed as u32 as u64, kinds }
+        Self { seed: crate::ore_nodes::seed_of(seed), kinds }
     }
 
     /// Index of the kind called `name`.
@@ -182,13 +177,6 @@ pub struct Placed {
     pub ore: Option<u16>,
 }
 
-/// A node's identity: its position on a quarter-metre grid (placement is deterministic, so this
-/// names the same node in every session).
-pub type NodeId = glam::IVec3;
-
-pub fn node_id(p: Vec3) -> NodeId {
-    (p * 4.0).round().as_ivec3()
-}
 
 /// The ore node a crosshair is on.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -572,13 +560,6 @@ impl Scatter {
     pub fn remove_node(&mut self, id: NodeId) {
         self.removed.insert(id);
         self.invalidate(id.as_vec3() / 4.0, 1.0);
-    }
-
-    /// The nodes mined so far, for saving.
-    pub fn removed_nodes(&self) -> Vec<NodeId> {
-        let mut v: Vec<NodeId> = self.removed.iter().copied().collect();
-        v.sort_by_key(|n| (n.x, n.y, n.z));
-        v
     }
 
     /// Restore the mined nodes from a save.

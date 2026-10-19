@@ -14,7 +14,7 @@ const EMBEDDED_ITEMS: &str = include_str!("../../../assets/data/items.toml");
 const EMBEDDED_MATERIALS: &str = include_str!("../../../assets/data/materials.toml");
 
 /// Index into [`Content::items`]. Saves store the string id instead, so this may change between runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct ItemId(pub u16);
 
 #[derive(Clone, Debug)]

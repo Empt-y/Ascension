@@ -123,7 +123,10 @@ impl Structures {
         (lo.y..=hi.y).flat_map(move |z| (lo.x..=hi.x).map(move |x| IVec2::new(x, z)))
     }
 
-    fn insert(&mut self, piece: Piece) {
+    /// Add a piece without any checks: for a copy that mirrors pieces already checked elsewhere
+    /// (the client's copy of the server's). Replaces any piece with the same key.
+    pub fn insert(&mut self, piece: Piece) {
+        self.take(&piece.key);
         let cells: Vec<IVec2> = self.cells_of(self.lattice.bounds(&piece.key)).collect();
         for c in cells {
             self.by_cell.entry(c).or_default().push(piece.key);
@@ -131,7 +134,8 @@ impl Structures {
         self.pieces.insert(piece.key, piece);
     }
 
-    fn take(&mut self, key: &PieceKey) -> Option<Piece> {
+    /// Remove a piece without any checks (see [`Self::insert`]).
+    pub fn take(&mut self, key: &PieceKey) -> Option<Piece> {
         let piece = self.pieces.remove(key)?;
         let cells: Vec<IVec2> = self.cells_of(self.lattice.bounds(key)).collect();
         for c in cells {

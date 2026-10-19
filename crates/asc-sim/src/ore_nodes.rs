@@ -18,6 +18,37 @@ const DEEP_SPACING: f32 = 3.0;
 /// Share of candidate cave floors that get a node.
 const DEEP_CHANCE: f32 = 0.5;
 
+/// Which ore nodes: the outcrops on the surface, or the nodes in caves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum NodeKind {
+    Surface,
+    Deep,
+}
+
+/// A node's identity: its position on a quarter-metre grid (placement is deterministic, so this
+/// names the same node in every session).
+pub type NodeId = glam::IVec3;
+
+pub fn node_id(p: Vec3) -> NodeId {
+    (p * 4.0).round().as_ivec3()
+}
+
+/// The scatter seed nodes are placed with, from the world seed.
+pub fn seed_of(world_seed: i32) -> u64 {
+    world_seed as u32 as u64
+}
+
+/// The node called `id`, if there is one: its kind and ore.
+pub fn find(seed: u64, worldgen: &WorldGen, id: NodeId) -> Option<(NodeKind, Node)> {
+    let p = id.as_vec3() / 4.0;
+    let column = (glam::Vec2::new(p.x, p.z) / COLUMN).floor().as_ivec2();
+    let hit = |nodes: Vec<Node>| nodes.into_iter().find(|n| node_id(n.position) == id);
+    if let Some(n) = hit(surface(seed, worldgen, column)) {
+        return Some((NodeKind::Surface, n));
+    }
+    hit(deep(seed, worldgen, column)).map(|n| (NodeKind::Deep, n))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Node {
     pub ore: usize,

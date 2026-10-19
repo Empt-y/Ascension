@@ -4,6 +4,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use asc_render::{Camera, FrameParams, FrameStats, Frustum, Renderer, UiFrame};
+use asc_sim::inventory::{InventoryOp, InventorySnapshot};
+use asc_sim::protocol::{ClientMsg, ServerMsg};
+use asc_sim::rules::find_ground;
+use asc_sim::server::{self as srv, Server};
 use asc_world::{EditKind, EditOp, Material, RayHit, World, raycast};
 use glam::{Vec2, Vec3};
 use winit::application::ApplicationHandler;
@@ -21,13 +25,12 @@ use crate::input::Input;
 use crate::inventory::{HOTBAR, Inventory, Stack};
 use crate::inventory_ui;
 use crate::inventory_ui::MenuChoice;
-use crate::mining::{BITE_RADIUS, Mining, PlaceOutcome};
+use crate::mining::{BITE_RADIUS, Mining};
 use crate::player::{self, Mode, MoveInput, Player};
-use crate::save::{self, PlayerSave, SaveGame, SlotSave, WorldMeta};
+use crate::save;
 use crate::sim::Sim;
 use crate::streaming::Streamer;
 
-const DEFAULT_SEED: i32 = 1337;
 
 /// The build tool in hand.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -35,21 +38,12 @@ enum BuildTool {
     Piece(Selection),
     Flatten,
 }
-const AUTOSAVE: Duration = Duration::from_secs(120);
-/// How far a flatten reaches past its cell (metres). Combining cut boxes with `max` gives the right
-/// surface but, inside the combined volume, only a lower bound on the distance to it: within this
-/// far of an internal box face it under-reports, which collision feels as an invisible wall. So
-/// neighbouring flattens overlap by more than the player's radius (0.35 m).
-const FLATTEN_OVERLAP: f32 = 0.4;
 const TICK: Duration = Duration::from_millis(50);
 const MAX_TICKS_PER_FRAME: u32 = 5;
 const FLY_REACH: f32 = 64.0;
 const WALK_REACH: f32 = 5.0;
 /// How close the crosshair must be to an ore node's collider to mine it.
 const NODE_TOLERANCE: f32 = 0.15;
-/// Ore items from breaking a surface outcrop and an underground node.
-const SURFACE_NODE_YIELD: u32 = 3;
-const DEEP_NODE_YIELD: u32 = 8;
 const EDIT_REPEAT: Duration = Duration::from_millis(110);
 
 #[derive(Clone, Debug, Default)]
@@ -196,6 +190,10 @@ struct App {
 struct State {
     window: Arc<Window>,
     renderer: Renderer,
+    /// The game itself. The fields below that mirror it (`world`, `building.structures`, the
+    /// scatter's mined nodes, `inventory`, `sim`) only change through its messages.
+    server: Server,
+    /// The world as the server has it (seed plus edits), for meshing, collision and raycasts.
     world: World,
     streamer: Streamer,
     far: FarStreamer,
@@ -218,10 +216,10 @@ struct State {
     inventory: Inventory,
     mining: Mining,
     held: Option<Stack>,
+    /// Inventory ops sent but not yet in a server snapshot, re-applied on top of each snapshot.
+    pending_ops: Vec<(u32, InventoryOp)>,
+    inventory_seq: u32,
     inventory_open: bool,
-    save_dir: std::path::PathBuf,
-    seed: i32,
-    last_save: Instant,
     notice: Option<(String, Instant)>,
     /// Derived from the player every frame.
     camera: Camera,
@@ -270,43 +268,32 @@ impl State {
         if options.vsync {
             renderer.set_vsync(true);
         }
-        let content = Content::load()?;
-        log::info!("content: {} items", content.items.len());
+        let parts = PartModels::load(&mut renderer)?;
         let save_dir = options.saves_dir.clone().unwrap_or_else(save::default_saves_dir).join(&options.world);
-        if options.new_world && save_dir.exists() {
-            let stamp =
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-            let aside = save_dir.with_file_name(format!("{}-replaced-{stamp}", options.world));
-            std::fs::rename(&save_dir, &aside)?;
-            log::info!("--new-world: kept the old world as {}", aside.display());
+        // Scripted tests and tools build and dig from wherever they stand.
+        let check_reach = !(options.build_test || options.build_stress || options.autopilot);
+        let config = srv::Config { save_dir, seed: options.seed, new_world: options.new_world, check_reach };
+        let mut server = Server::open(config, asc_build::Lattice::new(&parts.spec))?;
+        if let Some(t) = options.time_of_day {
+            server.handle(ClientMsg::SetTime(t));
         }
-        let loaded = save::load(&save_dir)?;
-        let seed = loaded.as_ref().map_or(options.seed.unwrap_or(DEFAULT_SEED), |g| g.meta.seed);
+        server.drain().for_each(drop);
+        let welcome = server.welcome();
+        let content = Content::load()?;
+        let seed = welcome.seed;
         let mut world = World::new(seed);
-        match &loaded {
-            Some(game) => {
-                world.edits = asc_world::EditLog::from_ops(game.ops.iter().copied());
-                log::info!("loaded {} ({} edits)", save_dir.display(), game.ops.len());
-            }
-            None => log::info!("new world {} (seed {seed})", save_dir.display()),
-        }
+        world.edits = asc_world::EditLog::from_ops(welcome.edits.iter().copied());
         let streamer = Streamer::new(world.worldgen.clone(), options.view_radius.unwrap_or(10));
         let far = FarStreamer::new(world.worldgen.clone());
-        let parts = PartModels::load(&mut renderer)?;
         let nature = crate::assets::NatureModels::load(&mut renderer)?;
         let ores = crate::assets::OreModels::load(&mut renderer)?;
         let mut scatter = crate::scatter::Scatter::new(
             crate::scatter::Config::new(seed, &nature, Some(&ores)),
             world.worldgen.clone(),
         );
-        if let Some(game) = &loaded {
-            scatter.set_removed_nodes(game.nodes.iter().map(|n| glam::IVec3::from_array(*n)));
-        }
+        scatter.set_removed_nodes(welcome.mined.iter().copied());
         let lattice = asc_build::Lattice::new(&parts.spec);
-        let structures = match &loaded {
-            Some(game) => asc_build::Structures::from_pieces(lattice, game.structures.iter().copied()),
-            None => asc_build::Structures::new(lattice),
-        };
+        let structures = asc_build::Structures::from_pieces(lattice, welcome.pieces.iter().copied());
         log::info!("structures: {} pieces", structures.len());
         let building = Building::new(structures);
         renderer.set_far_enabled(options.far);
@@ -319,21 +306,13 @@ impl State {
         if let Some(d) = options.fog_density {
             renderer.fog_density = d;
         }
-        let mut sim = Sim::default();
-        if let Some(game) = &loaded {
-            sim.ticks = game.meta.ticks;
-            sim.time_of_day = game.meta.time_of_day;
-        }
-        if let Some(t) = options.time_of_day {
-            sim.time_of_day = t.rem_euclid(1.0);
-        }
-        let spawn = find_ground(&world, 0.0, 0.0);
-        let mut player = Player::new(spawn);
-        player.pitch = -0.15;
+        let sim = Sim { ticks: welcome.ticks, time_of_day: welcome.time_of_day };
+        let spawn = server.spawn;
+        let mut player = Player::new(welcome.feet);
+        player.mode = welcome.mode;
+        (player.yaw, player.pitch) = (welcome.yaw, welcome.pitch);
         let mut inventory = Inventory::default();
-        if let Some(game) = &loaded {
-            restore_player(&game.player, &content, &mut player, &mut inventory);
-        }
+        let held = inventory.restore(&welcome.inventory);
         if options.autopilot {
             player.mode = Mode::Fly;
             player.teleport(spawn + Vec3::Y * 25.0);
@@ -360,6 +339,7 @@ impl State {
         Ok(Self {
             window,
             renderer,
+            server,
             world,
             streamer,
             far,
@@ -379,11 +359,10 @@ impl State {
             build_test_floor: 0.0,
             inventory,
             mining: Mining::default(),
-            held: None,
+            held,
+            pending_ops: Vec::new(),
+            inventory_seq: welcome.inventory.seq,
             inventory_open: options.show_inventory,
-            save_dir,
-            seed,
-            last_save: Instant::now(),
             notice: None,
             camera,
             input: Input::default(),
@@ -449,7 +428,7 @@ impl State {
         self.tick_accumulator += dt;
         let mut ticks = 0;
         while self.tick_accumulator >= TICK && ticks < MAX_TICKS_PER_FRAME {
-            self.sim.tick();
+            self.server.tick();
             self.tick_accumulator -= TICK;
             ticks += 1;
         }
@@ -466,6 +445,8 @@ impl State {
         if let Some(rate) = self.options.orbit {
             self.player.yaw += rate * dt.as_secs_f32();
         }
+        let p = &self.player;
+        self.send(ClientMsg::Move { feet: p.feet, yaw: p.yaw, pitch: p.pitch, mode: p.mode });
         self.camera = Camera {
             position: self.player.eye(),
             yaw: self.player.yaw,
@@ -559,7 +540,8 @@ impl State {
         let spec = &self.parts.spec;
         let status = self.build_status();
         let mut picked = None;
-        let (content, inventory, held) = (&self.content, &mut self.inventory, &mut self.held);
+        let (content, inventory, held) = (&self.content, &self.inventory, self.held);
+        let mut clicked = None;
         let (open, captured, notice) = (self.inventory_open, self.captured, &self.notice);
         let output = self.egui_ctx.run_ui(raw_input, |ui| {
             let ctx = ui.ctx();
@@ -574,7 +556,7 @@ impl State {
                 inventory_ui::notice(ctx, text);
             }
             if open {
-                inventory_ui::window(ctx, content, inventory, held);
+                clicked = inventory_ui::window(ctx, content, inventory, held);
             }
             if let Some(previews) = menu {
                 picked = inventory_ui::build_menu(ctx, spec, previews);
@@ -585,6 +567,9 @@ impl State {
         });
         if let Some(choice) = picked {
             self.choose_build_tool(choice);
+        }
+        if let Some(op) = clicked {
+            self.inventory_op(op);
         }
         self.egui_state.handle_platform_output(&self.window, output.platform_output);
         let primitives = self.egui_ctx.tessellate(output.shapes, output.pixels_per_point);
@@ -693,9 +678,6 @@ impl State {
                 log::info!("gpu ms: {stages} | parts drawn {}", self.last_stats.parts_drawn);
             }
         }
-        if self.last_save.elapsed() >= AUTOSAVE {
-            self.save_now("autosaved");
-        }
         if let Some(limit) = self.options.exit_after
             && self.started.elapsed().as_secs_f32() >= limit
         {
@@ -737,7 +719,7 @@ impl State {
             KeyCode::Digit9,
         ];
         if let Some(i) = DIGITS.iter().position(|k| self.input.pressed(*k)) {
-            self.inventory.selected = i;
+            self.inventory_op(InventoryOp::Select(i));
         }
         if self.input.pressed(KeyCode::KeyF) {
             self.player.mode = match self.player.mode {
@@ -747,7 +729,7 @@ impl State {
             self.player.velocity = Vec3::ZERO;
         }
         if self.input.pressed(KeyCode::F9) {
-            self.save_now("saved");
+            self.send(ClientMsg::Save);
         }
         if self.input.pressed(KeyCode::F3) {
             self.show_hud = !self.show_hud;
@@ -775,8 +757,8 @@ impl State {
         if self.input.held(KeyCode::KeyT) {
             let step = if self.input.held(KeyCode::ShiftLeft) { -1.0 } else { 1.0 };
             // An in-game hour per real second.
-            self.sim.time_of_day =
-                (self.sim.time_of_day + step * self.frame_ms / 1000.0 / 24.0).rem_euclid(1.0);
+            let t = (self.sim.time_of_day + step * self.frame_ms / 1000.0 / 24.0).rem_euclid(1.0);
+            self.send(ClientMsg::SetTime(t));
         }
         let wheel = self.input.wheel;
         if wheel != 0.0 && self.build_tool.is_some() {
@@ -788,7 +770,7 @@ impl State {
         } else if wheel != 0.0 && self.player.mode == Mode::Walk && !self.input.held(KeyCode::AltLeft) {
             // Wheel down moves right along the hotbar, as in most games.
             let step = if wheel > 0.0 { HOTBAR - 1 } else { 1 };
-            self.inventory.selected = (self.inventory.selected + step) % HOTBAR;
+            self.inventory_op(InventoryOp::Select((self.inventory.selected + step) % HOTBAR));
         } else if wheel != 0.0 {
             if self.input.held(KeyCode::AltLeft) {
                 self.fly_speed = (self.fly_speed * 1.25f32.powf(wheel)).clamp(1.0, 500.0);
@@ -888,58 +870,61 @@ impl State {
         }
     }
 
-    fn snapshot(&self) -> SaveGame {
-        let mut held = self.inventory.clone();
-        // A stack on the cursor belongs to the player too.
-        if let Some(h) = self.held {
-            held.add(&self.content, h.item, h.count);
-        }
-        let item_id = |id: crate::content::ItemId| self.content.item(id).id.clone();
-        SaveGame {
-            meta: WorldMeta {
-                format_version: save::FORMAT_VERSION,
-                worldgen_version: asc_world::WORLDGEN_VERSION,
-                seed: self.seed,
-                ticks: self.sim.ticks,
-                time_of_day: self.sim.time_of_day,
-            },
-            player: PlayerSave {
-                mode: self.player.mode,
-                feet: self.player.feet.into(),
-                yaw: self.player.yaw,
-                pitch: self.player.pitch,
-                selected: held.selected,
-                slots: held
-                    .slots
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, s)| {
-                        s.map(|s| SlotSave { index, item: item_id(s.item), count: s.count })
-                    })
-                    .collect(),
-                remainders: held.remainders.iter().map(|(id, v)| (item_id(*id), *v)).collect(),
-            },
-            ops: self.world.edits.ops().to_vec(),
-            structures: self.building.structures.iter().copied().collect(),
-            nodes: self.scatter.removed_nodes().into_iter().map(|n| n.to_array()).collect(),
+    /// Send a message to the server, and apply what comes back.
+    fn send(&mut self, msg: ClientMsg) {
+        self.server.handle(msg);
+        self.receive();
+    }
+
+    /// Apply the server's messages to the client's copies of the game.
+    fn receive(&mut self) {
+        let messages: Vec<ServerMsg> = self.server.drain().collect();
+        for msg in messages {
+            match msg {
+                ServerMsg::Welcome(_) => {}
+                ServerMsg::Edited(op) => {
+                    let dirty = self.world.edits.push(op);
+                    self.streamer.invalidate(&dirty);
+                }
+                ServerMsg::PiecePlaced(piece) => self.building.placed(piece),
+                ServerMsg::PieceRemoved(key) => self.building.removed(&key),
+                ServerMsg::NodeMined(id) => self.scatter.remove_node(id),
+                ServerMsg::Inventory(snapshot) => self.inventory_snapshot(&snapshot),
+                ServerMsg::Time { ticks, time_of_day } => {
+                    self.sim.ticks = ticks;
+                    self.sim.time_of_day = time_of_day;
+                }
+                ServerMsg::Notice(text) => self.show_notice(text),
+                ServerMsg::Saved { .. } => {}
+            }
         }
     }
 
-    pub fn save_now(&mut self, what: &str) {
-        let t = Instant::now();
-        match save::save(&self.save_dir, &self.snapshot()) {
-            Ok(()) => log::info!(
-                "{what} {} ({} edits) in {:.1} ms",
-                self.save_dir.display(),
-                self.world.edits.len(),
-                t.elapsed().as_secs_f32() * 1e3
-            ),
-            Err(err) => {
-                log::error!("saving failed: {err:#}");
-                self.show_notice("Saving failed (see log)".into());
-            }
+    /// Do an inventory op now (so the screen responds at once) and ask the server to do it too.
+    fn inventory_op(&mut self, op: InventoryOp) {
+        self.inventory_seq += 1;
+        self.inventory.apply(&self.content, op, &mut self.held);
+        self.pending_ops.push((self.inventory_seq, op));
+        self.send(ClientMsg::Inventory { seq: self.inventory_seq, op });
+    }
+
+    /// The server's inventory, with the ops it hasn't seen yet applied on top.
+    fn inventory_snapshot(&mut self, snapshot: &InventorySnapshot) {
+        self.held = self.inventory.restore(snapshot);
+        self.pending_ops.retain(|(seq, _)| *seq > snapshot.seq);
+        for (_, op) in self.pending_ops.clone() {
+            self.inventory.apply(&self.content, op, &mut self.held);
         }
-        self.last_save = Instant::now();
+    }
+
+    /// Ask the server to place a piece; whether it did (the reason if not, from its notice).
+    fn place_piece(&mut self, piece: asc_build::Piece, gap: f32) -> Result<(), String> {
+        self.send(ClientMsg::Place { piece, gap });
+        if self.building.structures.get(&piece.key) == Some(&piece) {
+            Ok(())
+        } else {
+            Err(self.notice.as_ref().map_or_else(|| "refused".to_owned(), |(t, _)| t.clone()))
+        }
     }
 
     fn toggle_build_menu(&mut self) {
@@ -993,8 +978,8 @@ impl State {
                     *valid = self.building.structures.check_snap(snap);
                 }
                 if clicked {
-                    match self.building.place() {
-                        Ok(key) => log::debug!("placed {key:?}"),
+                    match self.building.request() {
+                        Ok((piece, gap)) => self.send(ClientMsg::Place { piece, gap }),
                         Err(why) => self.show_notice(format!("Can't place: {why}")),
                     }
                 }
@@ -1014,8 +999,8 @@ impl State {
             None => {}
         }
         if self.captured && self.input.pressed(KeyCode::KeyX) {
-            match self.building.dismantle(self.hit) {
-                Ok(piece) => log::debug!("dismantled {:?}", piece.key),
+            match self.building.dismantle_target(self.hit) {
+                Ok(key) => self.send(ClientMsg::Dismantle { key }),
                 Err(why) => self.show_notice(format!("Can't dismantle: {why}")),
             }
         }
@@ -1026,13 +1011,7 @@ impl State {
 
     /// Level one grid cell to `height`: cut above, fill below with soil.
     fn flatten(&mut self, center: glam::Vec2, height: f32) {
-        // Overlap the neighbouring cells (see FLATTEN_OVERLAP for why).
-        let half = self.building.structures.lattice.cell / 2.0 + FLATTEN_OVERLAP;
-        // Deep fill so the levelled pad meets the ground on downhill slopes instead of overhanging.
-        for op in EditOp::flatten(center, half, height, 6.0, 8.0, Material::Soil) {
-            let dirty = self.world.edits.push(op);
-            self.streamer.invalidate(&dirty);
-        }
+        self.send(ClientMsg::Flatten { center, height });
     }
 
     fn build_status(&self) -> Option<(String, bool)> {
@@ -1076,8 +1055,8 @@ impl State {
                 }
                 let world = &self.world;
                 let terrain = |x: f32, z: f32| Self::ground_height(world, x, z, height + 5.0);
-                let mut placed = 0;
-                let mut failures = Vec::new();
+                // Foundations snap to the terrain alone, so all nine can be worked out first.
+                let mut snaps = Vec::new();
                 for dz in 0..3 {
                     for dx in 0..3 {
                         let cell = site + glam::IVec2::new(dx, dz);
@@ -1088,15 +1067,16 @@ impl State {
                             Vec3::ZERO,
                             &terrain,
                         );
-                        match self.building.structures.check_snap(&snap) {
-                            Ok(()) => {
-                                self.building.place_key(snap.key, 1, snap.grounded).ok();
-                                placed += 1;
-                            }
-                            Err(why) => {
-                                failures.push(format!("foundation {cell}: {why} (gap {:.2})", snap.gap))
-                            }
-                        }
+                        snaps.push((cell, snap));
+                    }
+                }
+                let mut placed = 0;
+                let mut failures = Vec::new();
+                for (cell, snap) in snaps {
+                    let piece = asc_build::Piece { key: snap.key, tier: 1, grounded: snap.grounded };
+                    match self.place_piece(piece, snap.gap) {
+                        Ok(()) => placed += 1,
+                        Err(why) => failures.push(format!("foundation {cell}: {why} (gap {:.2})", snap.gap)),
                     }
                 }
                 let mut heights: Vec<(glam::IVec2, i32)> =
@@ -1119,7 +1099,7 @@ impl State {
                                 continue;
                             }
                             let key = PieceKey::wall_on_side(cell, y, side);
-                            match self.building.place_key(key, 2, false) {
+                            match self.place_piece(asc_build::Piece { key, tier: 2, grounded: false }, 0.0) {
                                 Ok(()) => placed += 1,
                                 Err(why) => failures.push(format!("wall {key:?}: {why}")),
                             }
@@ -1133,7 +1113,7 @@ impl State {
                 cells.sort_by_key(|c| u8::from(*c == glam::IVec2::ONE));
                 for c in cells {
                     let key = PieceKey::ceiling(site + c, roof);
-                    match self.building.place_key(key, 3, false) {
+                    match self.place_piece(asc_build::Piece { key, tier: 3, grounded: false }, 0.0) {
                         Ok(()) => placed += 1,
                         Err(why) => failures.push(format!("ceiling {key:?}: {why}")),
                     }
@@ -1185,9 +1165,8 @@ impl State {
         if self.inventory_open {
             self.set_captured(false);
         } else {
-            let dropped = self.inventory.return_held(&self.content, &mut self.held);
-            if dropped > 0 {
-                self.show_notice(format!("Inventory full: {dropped} items lost"));
+            if self.held.is_some() {
+                self.inventory_op(InventoryOp::ReturnHeld);
             }
             self.set_captured(true);
         }
@@ -1218,61 +1197,31 @@ impl State {
             return;
         }
         if mine {
-            if let Some(bite) =
-                self.mining.mine(dt, self.hit, &mut self.world, &self.content, &mut self.inventory)
-            {
-                let dirty: Vec<_> = bite.op.touched_chunks().collect();
-                self.streamer.invalidate(&dirty);
-                log::debug!("bite at {} removed {:.2} m3", bite.op.center, bite.removed.total_solid());
-                if bite.overflow > 0 {
-                    self.show_notice(format!("Inventory full: {} items lost", bite.overflow));
-                }
+            if let Some(hit) = self.mining.mine(dt, self.hit, &self.world, &self.content) {
+                self.send(ClientMsg::Bite { point: hit.point, normal: hit.normal });
             }
         } else {
             self.mining.reset();
         }
         if place && let Some(hit) = self.hit {
-            let pressed = self.input.button_pressed(MouseButton::Right) || self.options.mine_test;
-            match self.mining.place(
-                hit,
-                self.player.feet,
-                &mut self.world,
-                &self.content,
-                &mut self.inventory,
-            ) {
-                PlaceOutcome::Placed(op) => {
-                    let dirty: Vec<_> = op.touched_chunks().collect();
-                    self.streamer.invalidate(&dirty);
-                }
-                PlaceOutcome::NotEnough if pressed => {
-                    let name =
-                        self.inventory.selected_stack().map(|s| self.content.item(s.item).name.clone());
-                    self.show_notice(format!("Not enough {} for that", name.unwrap_or_default()));
-                }
-                PlaceOutcome::NotPlaceable if pressed => self.show_notice("That can't be placed".into()),
-                _ => {}
+            let fresh = self.input.button_pressed(MouseButton::Right) || self.options.mine_test;
+            if self.mining.try_place() {
+                self.send(ClientMsg::Fill { point: hit.point, normal: hit.normal, fresh });
             }
         }
     }
 
     /// Hold to break an ore node; it yields a handful of its ore.
     fn mine_node(&mut self, dt: f32, node: crate::scatter::NodeHit) {
-        let def = self.content.ores[node.ore];
-        let (hardness, count) = match node.kind {
-            crate::scatter::NodeKind::Surface => (def.hardness * 1.5, SURFACE_NODE_YIELD),
-            crate::scatter::NodeKind::Deep => (def.hardness * 2.5, DEEP_NODE_YIELD),
-        };
-        if !self.mining.mine_node(dt, node, hardness) {
-            return;
+        use asc_sim::rules::{DEEP_NODE_HARDNESS, SURFACE_NODE_HARDNESS};
+        let hardness = self.content.ores[node.ore].hardness
+            * match node.kind {
+                crate::scatter::NodeKind::Surface => SURFACE_NODE_HARDNESS,
+                crate::scatter::NodeKind::Deep => DEEP_NODE_HARDNESS,
+            };
+        if self.mining.mine_node(dt, node, hardness) {
+            self.send(ClientMsg::MineNode { id: node.id });
         }
-        self.scatter.remove_node(node.id);
-        if let Some(item) = def.drop {
-            let lost = self.inventory.add(&self.content, item, count);
-            if lost > 0 {
-                self.show_notice(format!("Inventory full: {lost} items lost"));
-            }
-        }
-        log::debug!("mined a {:?} {} node", node.kind, asc_world::ores::builtin().ores[node.ore].name);
     }
 
     /// Mine test: sweep the crosshair over the ground ahead, mining a shallow pit, then aim ahead and
@@ -1288,8 +1237,9 @@ impl State {
             if let Some(soil) = self.content.item_id("soil")
                 && let Some(i) =
                     (0..HOTBAR).find(|i| self.inventory.slots[*i].is_some_and(|s| s.item == soil))
+                && i != self.inventory.selected
             {
-                self.inventory.selected = i;
+                self.inventory_op(InventoryOp::Select(i));
             }
         }
         (t > 3.0 && t < 25.0, (26.0..27.1).contains(&t))
@@ -1317,8 +1267,7 @@ impl State {
         if kind == EditKind::Fill && center.distance(self.camera.position) < r + 0.5 {
             return;
         }
-        let dirty = self.world.edits.push(EditOp { center, radius: r, kind, material: Material::Rock });
-        self.streamer.invalidate(&dirty);
+        self.send(ClientMsg::Edit(EditOp { center, radius: r, kind, material: Material::Rock }));
         self.last_edit = Instant::now();
     }
 
@@ -1340,13 +1289,13 @@ impl State {
         let cells: Vec<glam::IVec2> =
             (0..10).flat_map(|z| (0..10).map(move |x| site + glam::IVec2::new(x, z))).collect();
         let mut failures = 0;
-        let mut place = |b: &mut Building, key: PieceKey, tier: usize, grounded: bool| {
-            if b.place_key(key, tier, grounded).is_err() {
+        let mut place = |state: &mut Self, key: PieceKey, tier: usize, grounded: bool| {
+            if state.place_piece(asc_build::Piece { key, tier: tier as u8, grounded }, 0.0).is_err() {
                 failures += 1;
             }
         };
         for &cell in &cells {
-            place(&mut self.building, PieceKey::foundation(cell, base), 1, true);
+            place(self, PieceKey::foundation(cell, base), 1, true);
         }
         for storey in 0..3 {
             let y = floor + storey * 2 * lattice.wall_units;
@@ -1355,7 +1304,7 @@ impl State {
                     for edge in [Edge::North, Edge::East] {
                         let tier = (storey as usize + layer as usize) % 4;
                         place(
-                            &mut self.building,
+                            self,
                             PieceKey::wall(cell, y + layer * lattice.wall_units, edge),
                             tier,
                             false,
@@ -1364,7 +1313,7 @@ impl State {
                 }
             }
             for &cell in &cells {
-                place(&mut self.building, PieceKey::ceiling(cell, y + 2 * lattice.wall_units), 3, false);
+                place(self, PieceKey::ceiling(cell, y + 2 * lattice.wall_units), 3, false);
             }
         }
         log::info!("build stress: {} pieces placed, {failures} refused", self.building.structures.len());
@@ -1536,50 +1485,13 @@ impl ApplicationHandler for App {
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(state) = self.state.as_mut() {
-            state.save_now("saved on exit");
+            state.send(ClientMsg::Save);
         }
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(state) = &self.state {
             state.window.request_redraw();
-        }
-    }
-}
-
-/// Feet position standing on the ground in column (x, z).
-fn find_ground(world: &World, x: f32, z: f32) -> Vec3 {
-    let top = Vec3::new(x, 400.0, z);
-    match raycast(|p| world.density_at(p), top, -Vec3::Y, 800.0) {
-        Some(hit) => hit.point + Vec3::Y * 0.05,
-        None => Vec3::new(x, world.worldgen.height(x, z) + 2.0, z),
-    }
-}
-
-/// Put a saved player and inventory back. Unknown items (removed from the content files) are dropped
-/// with a warning rather than failing the load.
-fn restore_player(saved: &PlayerSave, content: &Content, player: &mut Player, inventory: &mut Inventory) {
-    player.teleport(Vec3::from(saved.feet));
-    player.mode = saved.mode;
-    (player.yaw, player.pitch) = (saved.yaw, saved.pitch);
-    inventory.selected = saved.selected.min(HOTBAR - 1);
-    for slot in &saved.slots {
-        match content.item_id(&slot.item) {
-            Some(item) if slot.index < crate::inventory::SLOTS && slot.count > 0 => {
-                let count = slot.count.min(content.item(item).stack);
-                inventory.slots[slot.index] = Some(Stack { item, count });
-            }
-            _ => log::warn!(
-                "dropping saved slot {} ({} x{}): unknown item or slot",
-                slot.index,
-                slot.item,
-                slot.count
-            ),
-        }
-    }
-    for (name, value) in &saved.remainders {
-        if let Some(item) = content.item_id(name) {
-            inventory.remainders.insert(item, *value);
         }
     }
 }

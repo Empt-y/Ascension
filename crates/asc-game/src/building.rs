@@ -56,23 +56,31 @@ impl Building {
         };
     }
 
-    /// Place the previewed piece. Returns why not, if it can't be.
-    pub fn place(&mut self) -> Result<PieceKey, Invalid> {
-        let (Some(sel), Some((snap, _))) = (self.selection, self.preview) else {
+    /// The previewed piece and its gap, to ask the server to place. Returns why not, if it can't be.
+    pub fn request(&self) -> Result<(Piece, f32), Invalid> {
+        let (Some(sel), Some((snap, valid))) = (self.selection, self.preview) else {
             return Err(Invalid::Missing);
         };
-        self.structures.place(Piece { key: snap.key, tier: sel.tier as u8, grounded: snap.grounded })?;
-        self.dirty = true;
-        Ok(snap.key)
+        valid?;
+        Ok((Piece { key: snap.key, tier: sel.tier as u8, grounded: snap.grounded }, snap.gap))
     }
 
-    /// Dismantle the piece the crosshair is on.
-    pub fn dismantle(&mut self, hit: Option<RayHit>) -> Result<Piece, Invalid> {
+    /// The piece the crosshair is on, to ask the server to dismantle.
+    pub fn dismantle_target(&self, hit: Option<RayHit>) -> Result<PieceKey, Invalid> {
         let hit = hit.filter(|h| h.distance <= BUILD_REACH).ok_or(Invalid::Missing)?;
-        let key = self.structures.piece_at(hit.point, 0.05).ok_or(Invalid::Missing)?;
-        let piece = self.structures.dismantle(&key)?;
+        self.structures.piece_at(hit.point, 0.05).ok_or(Invalid::Missing)
+    }
+
+    /// The server placed a piece.
+    pub fn placed(&mut self, piece: Piece) {
+        self.structures.insert(piece);
         self.dirty = true;
-        Ok(piece)
+    }
+
+    /// The server removed a piece.
+    pub fn removed(&mut self, key: &PieceKey) {
+        self.structures.take(key);
+        self.dirty = true;
     }
 
     /// Push changes to the renderer: every placed piece when the set changed, and the ghost.
@@ -99,12 +107,5 @@ impl Building {
             _ => None,
         };
         renderer.set_ghost(ghost);
-    }
-
-    /// Place a piece directly (scripted tests and tools), bypassing snapping.
-    pub fn place_key(&mut self, key: PieceKey, tier: usize, grounded: bool) -> Result<(), Invalid> {
-        self.structures.place(Piece { key, tier: tier as u8, grounded })?;
-        self.dirty = true;
-        Ok(())
     }
 }
