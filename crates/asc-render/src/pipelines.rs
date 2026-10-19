@@ -3,7 +3,7 @@
 use anyhow::{Result, bail};
 
 use crate::shaders::ShaderLib;
-use crate::targets::{DEPTH_FORMAT, HDR_FORMAT};
+use crate::targets::{DEPTH_FORMAT, HDR_FORMAT, MOTION_FORMAT};
 
 pub struct Layouts {
     /// Globals, chunk offsets, shadow map and its comparison sampler.
@@ -29,6 +29,7 @@ fn taa_layout(device: &wgpu::Device, multisampled: bool) -> wgpu::BindGroupLayou
             texture_entry(0, float),
             texture_entry(1, float),
             sampler_entry(2, wgpu::SamplerBindingType::Filtering),
+            texture_entry(4, float),
             wgpu::BindGroupLayoutEntry {
                 binding: 3,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -213,6 +214,9 @@ struct Builder<'a> {
     samples: u32,
     /// Turn shader alpha into MSAA coverage (only meaningful with more than one sample).
     alpha_to_coverage: bool,
+    /// Scene pass pipelines also have the motion target: `Some(writes)`, empty for those whose
+    /// pixels only move with the camera (TAA reprojects those from depth).
+    motion: Option<wgpu::ColorWrites>,
 }
 
 impl Builder<'_> {
@@ -237,7 +241,10 @@ impl Builder<'_> {
         depth_stencil: Option<wgpu::DepthStencilState>,
         target: Option<wgpu::ColorTargetState>,
     ) -> wgpu::RenderPipeline {
-        let targets: Vec<Option<wgpu::ColorTargetState>> = target.into_iter().map(Some).collect();
+        let mut targets: Vec<Option<wgpu::ColorTargetState>> = target.into_iter().map(Some).collect();
+        if let Some(write_mask) = self.motion {
+            targets.push(Some(wgpu::ColorTargetState { format: MOTION_FORMAT, blend: None, write_mask }));
+        }
         // parts.wgsl's `ALPHA_TO_COVERAGE` override defaults to false; other shaders don't declare it.
         let constants = [("ALPHA_TO_COVERAGE", 1.0)];
         let compilation_options = wgpu::PipelineCompilationOptions {
@@ -295,11 +302,22 @@ impl Pipelines {
         let taa_src = shaders.module_with(device, "taa", &[("DEPTH_TEXTURE", depth_type)])?;
 
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let b = Builder { device, samples: 1, alpha_to_coverage: false };
-        // Everything drawn in the HDR scene pass shares its sample count.
-        let scene_builder = Builder { device, samples: msaa, alpha_to_coverage: false };
-        // Models (leaf cards) turn their cut-out alpha into coverage for smooth edges under MSAA.
-        let models_builder = Builder { device, samples: msaa, alpha_to_coverage: msaa > 1 };
+        let b = Builder { device, samples: 1, alpha_to_coverage: false, motion: None };
+        // Everything drawn in the HDR scene pass shares its sample count and targets.
+        let scene_builder = Builder {
+            device,
+            samples: msaa,
+            alpha_to_coverage: false,
+            motion: Some(wgpu::ColorWrites::empty()),
+        };
+        // Models (leaf cards) turn their cut-out alpha into coverage for smooth edges under MSAA,
+        // and write their wind motion.
+        let models_builder = Builder {
+            device,
+            samples: msaa,
+            alpha_to_coverage: msaa > 1,
+            motion: Some(wgpu::ColorWrites::ALL),
+        };
         let scene = b.layout(&[&layouts.scene]);
         let shadow_layout = b.layout(&[&layouts.shadow]);
         let textures = b.layout(&[&layouts.scene, &layouts.textures]);

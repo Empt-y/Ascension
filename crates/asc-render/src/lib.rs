@@ -73,6 +73,8 @@ struct Globals {
     taa_reproject: [[f32; 4]; 4],
     /// x = 1 if the history is usable, y = weight of the new frame, zw = this frame's jitter (NDC).
     taa: [f32; 4],
+    /// Last frame's x = time, y = wind strength (for motion vectors of swaying plants).
+    motion: [f32; 4],
 }
 
 /// Weight of each new frame in the TAA history (the rest is the history).
@@ -171,6 +173,9 @@ pub struct Renderer {
     /// Last frame's unjittered view-projection and camera position, for reprojection.
     prev_view_proj: Mat4,
     prev_camera: Vec3,
+    /// Last frame's `camera.w` time and wind strength.
+    prev_time: f32,
+    prev_wind: f32,
     chunks: AHashMap<ChunkCoord, GpuChunk>,
     vertices: Arena,
     indices: Arena,
@@ -307,6 +312,8 @@ impl Renderer {
             taa_valid: false,
             prev_view_proj: Mat4::IDENTITY,
             prev_camera: Vec3::ZERO,
+            prev_time: 0.0,
+            prev_wind: 1.0,
             chunks: AHashMap::new(),
             vertices,
             indices,
@@ -425,6 +432,10 @@ impl Renderer {
                         wgpu::BindGroupEntry {
                             binding: 3,
                             resource: wgpu::BindingResource::TextureView(&targets.depth),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(&targets.motion),
                         },
                     ],
                 })
@@ -736,11 +747,12 @@ impl Renderer {
         // Open the exposure up only once it's actually getting dark, not while a low sun is still up.
         let night = 1.0 - smoothstep(-0.15, 0.03, frame.sun_dir.y);
         let exposure = 1.0 + night;
+        let time = self.start.elapsed().as_secs_f32();
         let globals = Globals {
             view_proj: jittered.to_cols_array_2d(),
             inv_view_proj: jittered.inverse().to_cols_array_2d(),
             shadow_view_proj: shadow_view_proj.map(|m| m.to_cols_array_2d()),
-            camera: cam.position.extend(self.start.elapsed().as_secs_f32()).into(),
+            camera: cam.position.extend(time).into(),
             sun: frame.sun_dir.extend(daylight).into(),
             fog: [self.fog_density, 0.012, frame.view_distance, exposure],
             screen: [width as f32, height as f32, 1.0 / width as f32, 1.0 / height as f32],
@@ -753,6 +765,12 @@ impl Renderer {
             shadow_radii: [CASCADE_RADII[0], CASCADE_RADII[1], CASCADE_RADII[2], self.shadow_set as f32],
             taa_reproject: taa_reproject.to_cols_array_2d(),
             taa: [f32::from(u8::from(history_ok)), TAA_FEEDBACK, jitter.x, jitter.y],
+            motion: [
+                if self.taa_valid { self.prev_time } else { time },
+                if self.taa_valid { self.prev_wind } else { self.wind },
+                0.0,
+                0.0,
+            ],
         };
         let queue = &self.gpu.queue;
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
@@ -835,6 +853,8 @@ impl Renderer {
         // Next frame reprojects into this one.
         self.prev_view_proj = view_proj;
         self.prev_camera = cam.position;
+        self.prev_time = time;
+        self.prev_wind = self.wind;
         self.taa_valid = taa;
         if taa {
             self.taa_index ^= 1;
@@ -964,32 +984,55 @@ impl Renderer {
     fn scene_pass(&self, encoder: &mut wgpu::CommandEncoder) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("scene"),
-            color_attachments: &[Some(match &self.targets.hdr_msaa {
-                // Multisampled: render into the MSAA target and resolve into the HDR texture.
-                Some(msaa) => wgpu::RenderPassColorAttachment {
-                    view: msaa,
-                    depth_slice: None,
-                    resolve_target: Some(&self.targets.hdr),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Discard,
+            color_attachments: &[
+                Some(match &self.targets.hdr_msaa {
+                    // Multisampled: render into the MSAA target and resolve into the HDR texture.
+                    Some(msaa) => wgpu::RenderPassColorAttachment {
+                        view: msaa,
+                        depth_slice: None,
+                        resolve_target: Some(&self.targets.hdr),
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Discard,
+                        },
                     },
-                },
-                None => wgpu::RenderPassColorAttachment {
-                    view: &self.targets.hdr,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
+                    None => wgpu::RenderPassColorAttachment {
+                        view: &self.targets.hdr,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
                     },
-                },
-            })],
+                }),
+                Some(match &self.targets.motion_msaa {
+                    Some(msaa) => wgpu::RenderPassColorAttachment {
+                        view: msaa,
+                        depth_slice: None,
+                        resolve_target: Some(&self.targets.motion),
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Discard,
+                        },
+                    },
+                    None => wgpu::RenderPassColorAttachment {
+                        view: &self.targets.motion,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    },
+                }),
+            ],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &self.targets.depth,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(0.0),
-                    store: wgpu::StoreOp::Discard,
+                    // Kept: TAA reprojects from it.
+                    store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
             }),

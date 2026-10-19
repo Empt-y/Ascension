@@ -47,6 +47,16 @@ struct VsOut {
     @location(7) ambient: vec3<f32>,
     @location(8) sun: vec3<f32>,
     @location(9) fog: vec4<f32>,
+    // Where the vertex is now and was last frame, both through this frame's camera: their
+    // difference is the wind's motion, which TAA can't infer from depth.
+    @location(10) now_clip: vec4<f32>,
+    @location(11) prev_clip: vec4<f32>,
+}
+
+struct SceneOut {
+    @location(0) color: vec4<f32>,
+    // NDC motion this frame beyond the camera's.
+    @location(1) motion: vec2<f32>,
 }
 
 fn rotate_y(v: vec3<f32>, yaw: f32) -> vec3<f32> {
@@ -58,13 +68,17 @@ fn rotate_y(v: vec3<f32>, yaw: f32) -> vec3<f32> {
 // Camera-relative position of a vertex: scaled, turned, placed, and (with `wind`) pushed by the
 // wind. Shadows are cast without wind: moving leaves are fine, flickering shadow patches aren't.
 fn place(in: VsIn, wind: bool) -> vec3<f32> {
+    return place_at(in, select(0.0, globals.shadow.z, wind), globals.camera.w);
+}
+
+// `place` with wind of `strength` at time `t`.
+fn place_at(in: VsIn, strength: f32, t: f32) -> vec3<f32> {
     let local = in.position * in.params.x;
     var rel = rotate_y(local, in.origin.w) + in.origin.xyz;
-    let sway = select(0.0, in.params.z * globals.shadow.z, wind);
+    let sway = in.params.z * strength;
     if sway > 0.0 {
         let world = in.origin.xyz + globals.camera.xyz;
         let phase = dot(world.xz, vec2(0.37, 0.61));
-        let t = globals.camera.w;
         // Movement smaller than a pixel only makes thin edges (birch branches, twig tips) flicker,
         // so it dies away with distance: flutter by 30 m, all bending by 60 m.
         let dist = length(in.origin.xyz);
@@ -93,6 +107,11 @@ fn vs_main(in: VsIn) -> VsOut {
     out.rel = place(in, true);
     out.normal = rotate_y(in.normal, in.origin.w);
     out.clip = globals.view_proj * vec4(out.rel, 1.0);
+    out.now_clip = out.clip;
+    out.prev_clip = out.clip;
+    if in.params.z > 0.0 {
+        out.prev_clip = globals.view_proj * vec4(place_at(in, globals.motion.y, globals.motion.x), 1.0);
+    }
     out.uv = in.uv;
     out.color = in.color;
     out.ghost = u32(round(in.params.y));
@@ -154,7 +173,7 @@ fn shade_foliage(in: VsOut, albedo: vec3<f32>, n: vec3<f32>, occlusion: f32) -> 
 }
 
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_main(in: VsOut) -> SceneOut {
     let geometric = normalize(in.normal);
     let world = in.rel + globals.camera.xyz;
     let textured = material.extra.y >= 0.0;
@@ -209,7 +228,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             discard;
         }
     }
-    return vec4(color, alpha);
+    var out: SceneOut;
+    out.color = vec4(color, alpha);
+    out.motion = in.now_clip.xy / in.now_clip.w - in.prev_clip.xy / in.prev_clip.w;
+    return out;
 }
 
 // Placement preview: the part tinted blue (fits) or red (doesn't), translucent, with a rim.

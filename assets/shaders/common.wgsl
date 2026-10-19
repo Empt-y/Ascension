@@ -29,6 +29,8 @@ struct Globals {
     taa_reproject: mat4x4<f32>,
     // x = 1 if the history is usable, y = weight of the new frame, zw = this frame's jitter in NDC.
     taa: vec4<f32>,
+    // Last frame's x = time (camera.w) and y = wind strength, for plants' motion vectors.
+    motion: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;

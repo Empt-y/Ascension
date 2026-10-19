@@ -1,6 +1,9 @@
 //! Size-dependent render targets: HDR colour, depth and the bloom chain. Rebuilt on resize.
 
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// Per-pixel motion of what's drawn there, beyond what the camera's own movement explains (wind
+/// sway), in NDC per frame.
+pub const MOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 pub const BLOOM_LEVELS: usize = 6;
 
@@ -9,6 +12,9 @@ pub struct Targets {
     pub hdr: wgpu::TextureView,
     /// Multisampled HDR colour the scene renders into, when MSAA is on.
     pub hdr_msaa: Option<wgpu::TextureView>,
+    /// Object motion (see MOTION_FORMAT), resolved, and its multisampled target under MSAA.
+    pub motion: wgpu::TextureView,
+    pub motion_msaa: Option<wgpu::TextureView>,
     pub depth: wgpu::TextureView,
     /// Half resolution and down; `bloom[0]` holds the final blurred result.
     pub bloom: Vec<wgpu::TextureView>,
@@ -56,6 +62,16 @@ impl Targets {
         let hdr_msaa = (samples > 1).then(|| {
             target_ms(device, "hdr msaa", (width, height), HDR_FORMAT, U::RENDER_ATTACHMENT, samples)
         });
+        let motion = target(
+            device,
+            "motion",
+            (width, height),
+            MOTION_FORMAT,
+            U::RENDER_ATTACHMENT | U::TEXTURE_BINDING,
+        );
+        let motion_msaa = (samples > 1).then(|| {
+            target_ms(device, "motion msaa", (width, height), MOTION_FORMAT, U::RENDER_ATTACHMENT, samples)
+        });
         // Sampled too: TAA reprojects from it.
         let depth = target_ms(
             device,
@@ -80,7 +96,7 @@ impl Targets {
                 target(device, "bloom", size, HDR_FORMAT, U::RENDER_ATTACHMENT | U::TEXTURE_BINDING)
             })
             .collect();
-        Self { hdr, hdr_msaa, depth, bloom, taa }
+        Self { hdr, hdr_msaa, motion, motion_msaa, depth, bloom, taa }
     }
 }
 

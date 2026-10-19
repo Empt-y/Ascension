@@ -3,7 +3,8 @@
 // the view moves.
 //
 // Each pixel is reprojected into the previous frame from its depth and the camera's movement
-// (`taa_reproject`), which is exact for everything static. History is clamped to the colour range of
+// (`taa_reproject`), which is exact for everything static, then moved back by its own motion
+// (`motion_tex`: how far the wind swayed it). History is clamped to the colour range of
 // this frame's 3x3 neighbourhood, so anything that moved (wind, the player's edits) or was hidden
 // last frame can't leave ghosts. Blending and clamping happen on squashed colour (c / (1 + luma)),
 // so a single bright pixel can't keep flickering through the average.
@@ -14,6 +15,7 @@
 @group(1) @binding(1) var history: texture_2d<f32>;
 @group(1) @binding(2) var linear_sampler: sampler;
 @group(1) @binding(3) var depth_tex: DEPTH_TEXTURE;
+@group(1) @binding(4) var motion_tex: texture_2d<f32>;
 
 @vertex
 fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
@@ -75,15 +77,22 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     // The nearest depth around the pixel (reversed-Z: largest), so edges reproject with the object
     // in front rather than whatever is behind it.
     var depth = 0.0;
+    var nearest = px;
     for (var y = -1; y <= 1; y++) {
         for (var x = -1; x <= 1; x++) {
             let q = clamp(px + vec2(x, y), vec2(0), size - 1);
             let c = squash(textureLoad(current, q, 0).rgb);
             m1 += c;
             m2 += c * c;
-            depth = max(depth, textureLoad(depth_tex, q, 0));
+            let d = textureLoad(depth_tex, q, 0);
+            if d > depth {
+                depth = d;
+                nearest = q;
+            }
         }
     }
+    // The motion of whatever is nearest, like the depth.
+    let motion = textureLoad(motion_tex, nearest, 0).xy;
     let mean = m1 / 9.0;
     let sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3(0.0)));
     // Wide enough that a thin feature visible at only some jitter offsets (a far trunk) settles into
@@ -97,7 +106,7 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     var feedback = globals.taa.y;
     var past = now;
     if globals.taa.x > 0.5 && prev.w > 1e-6 {
-        let p = prev.xy / prev.w;
+        let p = prev.xy / prev.w - motion;
         let puv = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
         if all(puv >= vec2(0.0)) && all(puv <= vec2(1.0)) {
             past = clamp(squash(sample_history(puv)), lo, hi);
