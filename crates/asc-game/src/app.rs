@@ -283,12 +283,14 @@ impl State {
         let parts = PartModels::load(&mut renderer)?;
         let save_dir = options.saves_dir.clone().unwrap_or_else(save::default_saves_dir).join(&options.world);
         // Scripted tests and tools build and dig from wherever they stand.
-        let check_reach = !(options.build_test || options.build_stress || options.autopilot);
+        let validate = !(options.build_test || options.build_stress || options.autopilot);
         let config = srv::Config {
             save_dir,
             seed: options.seed,
             new_world: options.new_world,
-            check_reach,
+            validate,
+            // Single player: the player is the host.
+            cheats: true,
             stress: options.tick_stress,
         };
         let mut server = Server::open(config, asc_build::Lattice::new(&parts.spec))?;
@@ -942,6 +944,11 @@ impl State {
             ServerMsg::Notice(text) => self.show_notice(text),
             ServerMsg::Saved { .. } | ServerMsg::Pong(_) => {}
             ServerMsg::Stats { tps, mspt } => self.server_stats = (tps, mspt),
+            ServerMsg::Correct { feet, mode } => {
+                log::warn!("server put the player back at {feet}");
+                self.player.teleport(feet);
+                self.player.mode = mode;
+            }
         }
     }
 

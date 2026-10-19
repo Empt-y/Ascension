@@ -14,13 +14,13 @@ fn temp_dir(name: &str) -> PathBuf {
 
 fn server(name: &str) -> Server {
     let config =
-        Config { save_dir: temp_dir(name), seed: Some(1337), new_world: false, check_reach: true, stress: None };
+        Config { save_dir: temp_dir(name), seed: Some(1337), new_world: false, validate: true, cheats: false, stress: None };
     Server::open(config, lattice()).unwrap()
 }
 
-/// Stand the player at `feet`.
+/// Put the player at `feet` (a test setup step, not a move: moves are checked).
 fn stand(s: &mut Server, feet: Vec3) {
-    s.handle(ClientMsg::Move { feet, yaw: 0.0, pitch: 0.0, mode: Mode::Walk });
+    s.player.feet = feet;
 }
 
 fn ground(s: &Server, x: f32, z: f32) -> asc_world::RayHit {
@@ -118,7 +118,7 @@ fn inventory_ops_echo_their_sequence_number() {
 fn a_saved_world_reopens_the_same() {
     let dir = temp_dir("reopen");
     let config =
-        |dir: &PathBuf| Config { save_dir: dir.clone(), seed: Some(77), new_world: false, check_reach: false, stress: None };
+        |dir: &PathBuf| Config { save_dir: dir.clone(), seed: Some(77), new_world: false, validate: false, cheats: true, stress: None };
     let mut s = Server::open(config(&dir), lattice()).unwrap();
     let hit = ground(&s, 5.0, 5.0);
     s.handle(ClientMsg::Bite { point: hit.point, normal: hit.normal });
@@ -160,6 +160,7 @@ fn every_message_survives_postcard() {
         ClientMsg::Save,
         ClientMsg::Ping(3),
     ];
+    let _ = ServerMsg::Correct { feet: Vec3::ONE, mode: Mode::Walk };
     for m in client {
         let bytes = postcard::to_stdvec(&m).unwrap();
         assert_eq!(postcard::from_bytes::<ClientMsg>(&bytes).unwrap(), m);
@@ -176,9 +177,60 @@ fn every_message_survives_postcard() {
         ServerMsg::Saved { ok: true },
         ServerMsg::Pong(3),
         ServerMsg::Stats { tps: 19.8, mspt: 0.4 },
+        ServerMsg::Correct { feet: Vec3::new(1.0, 2.0, 3.0), mode: Mode::Walk },
     ];
     for m in server_msgs {
         let bytes = postcard::to_stdvec(&m).unwrap();
         assert_eq!(postcard::from_bytes::<ServerMsg>(&bytes).unwrap(), m);
     }
+}
+
+#[test]
+fn bites_come_no_faster_than_the_material_allows() {
+    let mut s = server("rate");
+    let hit = ground(&s, 40.0, 40.0);
+    s.player.feet = hit.point + Vec3::new(2.0, 0.0, 0.0);
+    s.handle(ClientMsg::Bite { point: hit.point, normal: hit.normal });
+    s.handle(ClientMsg::Bite { point: hit.point - hit.normal * 0.5, normal: hit.normal });
+    assert_eq!(s.world.edits.len(), 1, "the second bite came at once and was refused");
+}
+
+#[test]
+fn development_tools_and_flying_need_permission() {
+    let mut s = server("cheats");
+    let op = asc_world::EditOp {
+        center: s.player.feet,
+        radius: 3.0,
+        kind: asc_world::EditKind::Dig,
+        material: asc_world::Material::Air,
+    };
+    let feet = s.player.feet;
+    s.handle(ClientMsg::Move { feet, yaw: 0.0, pitch: 0.0, mode: Mode::Fly });
+    assert_eq!(s.player.mode, Mode::Walk);
+    s.handle(ClientMsg::Edit(op));
+    s.handle(ClientMsg::SetTime(0.9));
+    assert!(s.world.edits.is_empty());
+    assert!((s.sim.time_of_day - 0.9).abs() > 0.01);
+    s.player.cheats = true;
+    s.handle(ClientMsg::Edit(op));
+    assert_eq!(s.world.edits.len(), 1);
+}
+
+#[test]
+fn teleporting_and_walking_into_the_ground_are_refused() {
+    let mut s = server("moves");
+    let start = s.player.feet;
+    let away = start + Vec3::new(40.0, 0.0, 0.0);
+    let away = Vec3::new(away.x, s.world.worldgen.height(away.x, away.z) + 0.05, away.z);
+    s.handle(ClientMsg::Move { feet: away, yaw: 0.0, pitch: 0.0, mode: Mode::Walk });
+    assert_eq!(s.player.feet, start);
+    assert!(s.drain().any(|m| matches!(m, ServerMsg::Correct { feet, .. } if feet == start)));
+    let buried = start - Vec3::Y * 3.0;
+    s.handle(ClientMsg::Move { feet: buried, yaw: 0.0, pitch: 0.0, mode: Mode::Walk });
+    assert_eq!(s.player.feet, start, "inside the ground");
+    // A small step is fine.
+    let step = start + Vec3::new(0.5, 0.0, 0.0);
+    let step = Vec3::new(step.x, s.world.worldgen.height(step.x, step.z) + 0.05, step.z);
+    s.handle(ClientMsg::Move { feet: step, yaw: 0.0, pitch: 0.0, mode: Mode::Walk });
+    assert_eq!(s.player.feet, step);
 }

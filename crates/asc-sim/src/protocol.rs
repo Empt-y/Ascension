@@ -74,6 +74,8 @@ pub enum ServerMsg {
     Notice(String),
     Saved { ok: bool },
     Pong(u32),
+    /// The player's last move was refused: put them back here, in this mode.
+    Correct { feet: Vec3, mode: Mode },
     /// Once a second: ticks per second, and the slowest tick (ms).
     Stats { tps: f32, mspt: f32 },
 }

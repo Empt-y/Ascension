@@ -147,7 +147,7 @@ mod tests {
         let spec = asc_build::BuildingSpec::parse(include_str!("../../../assets/data/building.toml")).unwrap();
         let dir = std::env::temp_dir().join(format!("ascension-link-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let config = Config { save_dir: dir.clone(), seed: Some(5), new_world: false, check_reach: true, stress: None };
+        let config = Config { save_dir: dir.clone(), seed: Some(5), new_world: false, validate: true, cheats: true, stress: None };
         let server = Server::open(config, asc_build::Lattice::new(&spec)).unwrap();
         let link = spawn(server);
         link.send(ClientMsg::SetTime(0.5));

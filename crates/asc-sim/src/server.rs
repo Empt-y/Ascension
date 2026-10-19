@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 use asc_build::{Lattice, Snap, Structures};
 use asc_world::World;
+use std::time::{Duration, Instant};
+
 use glam::{IVec3, Vec3};
 
 use crate::content::{Content, ItemId};
@@ -30,6 +32,51 @@ const AUTOSAVE_TICKS: u64 = 120 * TPS as u64;
 const ACTION_REACH: f32 = 7.5;
 /// How far from the eye a player can build (client: 10 m).
 const BUILD_REACH: f32 = 14.0;
+/// Actions may come this much faster than their nominal time (timer jitter between client and
+/// server).
+const RATE_TOLERANCE: f32 = 0.8;
+/// Placing repeats this often while held (matches the client).
+const FILL_INTERVAL: f32 = 0.2;
+/// Movement budgets, metres per second, and the most a budget can save up (bursts after a stall).
+/// Walking tops out at 8 m/s sprinting; up covers jumps and step-ups; down covers falling at the
+/// 60 m/s terminal speed.
+const MAX_ACROSS: (f32, f32) = (12.0, 3.0);
+const MAX_UP: (f32, f32) = (12.0, 3.0);
+const MAX_DOWN: (f32, f32) = (70.0, 10.0);
+/// A body centre this deep in terrain or a building is inside it, not brushing it.
+const INSIDE: f32 = -0.25;
+
+/// Distance a player may still cover, refilled over time.
+#[derive(Clone, Copy, Debug)]
+struct Budget {
+    across: f32,
+    up: f32,
+    down: f32,
+    at: Instant,
+}
+
+impl Budget {
+    fn new() -> Self {
+        Self { across: MAX_ACROSS.1, up: MAX_UP.1, down: MAX_DOWN.1, at: Instant::now() }
+    }
+
+    /// Refill for the time since the last move, then pay for `d` if it can be afforded.
+    fn spend(&mut self, d: Vec3) -> bool {
+        let now = Instant::now();
+        let dt = (now - self.at).as_secs_f32();
+        self.at = now;
+        let refill = |v: f32, (rate, cap): (f32, f32)| (v + rate * dt).min(cap);
+        let (across, up, down) =
+            (refill(self.across, MAX_ACROSS), refill(self.up, MAX_UP), refill(self.down, MAX_DOWN));
+        let (h, rise, fall) = (Vec3::new(d.x, 0.0, d.z).length(), d.y.max(0.0), (-d.y).max(0.0));
+        (self.across, self.up, self.down) = (across, up, down);
+        if h > across || rise > up || fall > down {
+            return false;
+        }
+        (self.across, self.up, self.down) = (across - h, up - rise, down - fall);
+        true
+    }
+}
 pub const DEFAULT_SEED: i32 = 1337;
 
 pub struct Config {
@@ -38,8 +85,12 @@ pub struct Config {
     pub seed: Option<i32>,
     /// Move any existing world aside and start a new one.
     pub new_world: bool,
-    /// Check reach on players' actions. Off for scripted tests and tools that build far away.
-    pub check_reach: bool,
+    /// Check players' reach, action rates and movement. Off for scripted tests and tools that build
+    /// far away or teleport.
+    pub validate: bool,
+    /// The local player (the host) may fly and use the development tools (terrain brush, setting
+    /// the time). Remote players, when there are any, won't by default.
+    pub cheats: bool,
     /// Run a stand-in factory every tick, to measure the tick (`--tick-stress`).
     pub stress: Option<crate::stress::StressConfig>,
 }
@@ -55,11 +106,28 @@ pub struct PlayerState {
     pub held: Option<Stack>,
     /// The last inventory op applied.
     pub seq: u32,
+    /// May fly and use the development tools.
+    pub cheats: bool,
+    /// When the last bite or node was accepted, and the last fill.
+    last_dig: Option<Instant>,
+    last_fill: Option<Instant>,
+    budget: Budget,
 }
 
 impl PlayerState {
     fn eye(&self) -> Vec3 {
         self.feet + Vec3::Y * EYE_HEIGHT
+    }
+
+    /// Whether an action of `seconds` nominal length may happen now, given the last one at `last`;
+    /// starts its clock if so.
+    fn ready(last: &mut Option<Instant>, seconds: f32) -> bool {
+        let now = Instant::now();
+        if last.is_some_and(|t| now - t < Duration::from_secs_f32(seconds * RATE_TOLERANCE)) {
+            return false;
+        }
+        *last = Some(now);
+        true
     }
 }
 
@@ -73,7 +141,7 @@ pub struct Server {
     pub spawn: Vec3,
     seed: i32,
     save_dir: PathBuf,
-    check_reach: bool,
+    validate: bool,
     stress: Option<crate::stress::Stress>,
     last_save: u64,
     outbox: Vec<ServerMsg>,
@@ -125,6 +193,10 @@ impl Server {
             inventory: Inventory::default(),
             held: None,
             seq: 0,
+            cheats: config.cheats,
+            last_dig: None,
+            last_fill: None,
+            budget: Budget::new(),
         };
         if let Some(saved) = loaded.as_ref().and_then(|g| g.players.get(save::LOCAL_PLAYER)) {
             restore_player(saved, &content, &mut player);
@@ -141,7 +213,7 @@ impl Server {
             spawn,
             seed,
             save_dir,
-            check_reach: config.check_reach,
+            validate: config.validate,
             stress: config.stress.map(|c| {
                 log::info!("tick stress: {c:?}");
                 crate::stress::Stress::new(c, ticks)
@@ -187,7 +259,7 @@ impl Server {
     }
 
     fn within(&self, p: Vec3, reach: f32) -> bool {
-        !self.check_reach || self.player.eye().distance(p) <= reach
+        !self.validate || self.player.eye().distance(p) <= reach
     }
 
     /// One fixed step of the simulation.
@@ -204,13 +276,19 @@ impl Server {
 
     pub fn handle(&mut self, msg: ClientMsg) {
         match msg {
-            ClientMsg::Move { feet, yaw, pitch, mode } => {
-                let p = &mut self.player;
-                (p.feet, p.yaw, p.pitch, p.mode) = (feet, yaw, pitch, mode);
-            }
+            ClientMsg::Move { feet, yaw, pitch, mode } => self.moved(feet, yaw, pitch, mode),
             ClientMsg::Bite { point, normal } => {
                 if !self.within(point, ACTION_REACH) {
                     log::warn!("bite at {point} refused: out of reach");
+                    return;
+                }
+                let (_, byte) = self.world.sample_raw(point - normal * 0.3);
+                if byte == asc_world::Material::Air as u8 {
+                    return;
+                }
+                let hardness = self.content.sample(byte).hardness;
+                if self.validate && !PlayerState::ready(&mut self.player.last_dig, hardness) {
+                    log::warn!("bite at {point} refused: too soon after the last");
                     return;
                 }
                 let bite = rules::bite(&mut self.world, &self.content, &mut self.player.inventory, point, normal);
@@ -222,7 +300,9 @@ impl Server {
                 }
             }
             ClientMsg::Fill { point, normal, fresh } => {
-                if !self.within(point, ACTION_REACH) {
+                if !self.within(point, ACTION_REACH)
+                    || (self.validate && !PlayerState::ready(&mut self.player.last_fill, FILL_INTERVAL))
+                {
                     return;
                 }
                 let feet = self.player.feet;
@@ -277,8 +357,8 @@ impl Server {
                 }
             }
             ClientMsg::Edit(op) => {
-                // The fly-mode brush, a development tool: only while flying.
-                if self.player.mode == Mode::Fly || !self.check_reach {
+                // The fly-mode brush, a development tool.
+                if self.player.cheats || !self.validate {
                     self.world.edits.push(op);
                     self.outbox.push(ServerMsg::Edited(op));
                 }
@@ -293,12 +373,48 @@ impl Server {
                 }
             }
             ClientMsg::SetTime(t) => {
+                if !self.player.cheats && self.validate {
+                    return;
+                }
                 self.sim.time_of_day = t.rem_euclid(1.0);
                 self.outbox.push(ServerMsg::Time { ticks: self.sim.ticks, time_of_day: self.sim.time_of_day });
             }
             ClientMsg::Save => self.save("saved"),
             ClientMsg::Ping(n) => self.outbox.push(ServerMsg::Pong(n)),
         }
+    }
+
+    /// A player's reported position, checked: no flying without permission, no faster than they
+    /// can move (except straight back to spawn, after falling out of the world), and not inside
+    /// terrain or a building. Refused moves put the player back where they were.
+    fn moved(&mut self, feet: Vec3, yaw: f32, pitch: f32, mode: Mode) {
+        let p = &mut self.player;
+        (p.yaw, p.pitch) = (yaw, pitch);
+        if !self.validate {
+            (p.feet, p.mode) = (feet, mode);
+            return;
+        }
+        let mode = if mode == Mode::Fly && !p.cheats { Mode::Walk } else { mode };
+        let respawn = feet.distance(self.spawn) < 1.0;
+        let free = p.cheats && mode == Mode::Fly;
+        let center = feet + Vec3::Y * 0.9;
+        let inside = !free
+            && (self.world.density_at(center) < INSIDE || self.structures.sdf(center) < INSIDE);
+        let fast = !free && !respawn && !p.budget.spend(feet - p.feet);
+        if inside || fast || mode != Mode::Fly && p.mode == Mode::Fly && !p.cheats {
+            log::warn!(
+                "move to {feet} refused ({}); back to {}",
+                if inside { "inside something" } else { "too fast" },
+                p.feet
+            );
+            p.mode = mode;
+            self.outbox.push(ServerMsg::Correct { feet: p.feet, mode });
+            return;
+        }
+        if mode != p.mode && mode == Mode::Walk && !p.cheats {
+            self.outbox.push(ServerMsg::Correct { feet, mode });
+        }
+        (p.feet, p.mode) = (feet, mode);
     }
 
     fn mine_node(&mut self, id: NodeId) {
@@ -310,6 +426,15 @@ impl Server {
             return;
         };
         if !self.within(node.position, ACTION_REACH + 1.0) {
+            return;
+        }
+        let hardness = self.content.ores[node.ore].hardness
+            * match kind {
+                NodeKind::Surface => rules::SURFACE_NODE_HARDNESS,
+                NodeKind::Deep => rules::DEEP_NODE_HARDNESS,
+            };
+        if self.validate && !PlayerState::ready(&mut self.player.last_dig, hardness) {
+            log::warn!("node {id} refused: too soon after the last dig");
             return;
         }
         self.mined.insert(id.to_array());
