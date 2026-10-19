@@ -326,7 +326,8 @@ fn shadow_lookup_set(group: u32, rel: vec3<f32>, n: vec3<f32>, taps: u32) -> f32
         let s = cascade_coords(layer, c, rel, n);
         if s.w < 1.0 {
             var lit = cascade_pcf(layer, c, s, taps);
-            let blend = smoothstep(0.8, 1.0, s.w);
+            // A wide blend into the next cascade, so the change in detail has no visible edge.
+            let blend = smoothstep(0.6, 1.0, s.w);
             if blend > 0.0 {
                 if c < 2u {
                     lit = mix(lit, cascade_pcf(layer + 1u, c + 1u, cascade_coords(layer + 1u, c + 1u, rel, n), taps), blend);

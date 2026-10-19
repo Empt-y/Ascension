@@ -313,8 +313,10 @@ impl Parts {
         self.instances.len()
     }
 
-    /// Add, replace (`Some`) or remove (`None`) the scatter batch under `key`.
-    pub fn set_scatter(&mut self, key: u64, batch: Option<ScatterBatch>) {
+    /// Add, replace (`Some`) or remove (`None`) the scatter batch under `key`. Returns the bounds the
+    /// change touched and how far its instances cast shadows, if it touched anything.
+    pub fn set_scatter(&mut self, key: u64, batch: Option<ScatterBatch>) -> Option<(Vec3, Vec3, f32)> {
+        let old = self.scatter.get(&key).map(|b| (b.min, b.max, b.batch.shadow_distance));
         match batch {
             Some(mut batch) => {
                 batch.instances.retain(|i| (i.model.0 as usize) < self.models.len());
@@ -333,6 +335,11 @@ impl Parts {
             None => {
                 self.scatter.remove(&key);
             }
+        }
+        let new = self.scatter.get(&key).map(|b| (b.min, b.max, b.batch.shadow_distance));
+        match (old, new) {
+            (Some(a), Some(b)) => Some((a.0.min(b.0), a.1.max(b.1), a.2.max(b.2))),
+            (a, b) => a.or(b),
         }
     }
 

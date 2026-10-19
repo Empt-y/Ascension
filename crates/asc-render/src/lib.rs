@@ -165,8 +165,10 @@ pub struct Renderer {
     frame: u64,
     /// The sun direction the shadow maps are rendered from (see `SHADOW_SUN_STEP`).
     shadow_sun: Vec3,
-    /// Something that casts shadows changed since the cascades were last drawn.
-    shadow_world_dirty: bool,
+    /// Cascades with a changed shadow caster in reach since they were last drawn.
+    shadow_dirty: [bool; CASCADES],
+    /// The camera position at the last frame, to judge which cascades a change reaches.
+    last_camera: Vec3,
     offset_data: Vec<[f32; 4]>,
     egui: egui_wgpu::Renderer,
     start: Instant,
@@ -278,7 +280,8 @@ impl Renderer {
             shadow_fade_start: Instant::now(),
             frame: 0,
             shadow_sun: Vec3::Y,
-            shadow_world_dirty: true,
+            shadow_dirty: [true; CASCADES],
+            last_camera: Vec3::ZERO,
             offset_data: Vec::new(),
             egui,
             start: Instant::now(),
@@ -422,8 +425,18 @@ impl Renderer {
         self.shaders.hot_reload_available()
     }
 
+    /// Something that casts shadows changed within `min..max` (world space); redraw the cascades it
+    /// can reach, at most `limit` metres from the camera.
+    fn shadow_changed(&mut self, min: Vec3, max: Vec3, limit: f32) {
+        let nearest = self.last_camera.clamp(min, max).distance(self.last_camera);
+        for (c, dirty) in self.shadow_dirty.iter_mut().enumerate() {
+            if nearest < (CASCADE_RADII[c] * 1.25 + 32.0).min(limit) {
+                *dirty = true;
+            }
+        }
+    }
+
     pub fn upload_chunk(&mut self, coord: ChunkCoord, mesh: &ChunkMesh) {
-        self.shadow_world_dirty = true;
         self.remove_chunk(coord);
         if mesh.is_empty() {
             return;
@@ -448,11 +461,14 @@ impl Renderer {
                 max,
             },
         );
+        let origin = chunk_origin(coord);
+        self.shadow_changed(origin + min, origin + max, f32::MAX);
     }
 
     pub fn remove_chunk(&mut self, coord: ChunkCoord) {
-        self.shadow_world_dirty = true;
         if let Some(chunk) = self.chunks.remove(&coord) {
+            let origin = chunk_origin(coord);
+            self.shadow_changed(origin + chunk.min, origin + chunk.max, f32::MAX);
             self.vertices.free(chunk.first_vertex, chunk.vertex_count);
             self.indices.free(chunk.first_index, chunk.index_count);
         }
@@ -475,7 +491,7 @@ impl Renderer {
 
     /// Every placed part. Call when the set changes.
     pub fn set_parts(&mut self, instances: &[PartInstance]) {
-        self.shadow_world_dirty = true;
+        self.shadow_dirty = [true; CASCADES];
         self.parts.set_instances(instances);
     }
 
@@ -485,8 +501,11 @@ impl Renderer {
 
     /// Add, replace or remove a batch of nature scatter (see [`ScatterBatch`]).
     pub fn set_scatter(&mut self, key: u64, batch: Option<ScatterBatch>) {
-        self.shadow_world_dirty = true;
-        self.parts.set_scatter(key, batch);
+        if let Some((min, max, shadow_distance)) = self.parts.set_scatter(key, batch)
+            && shadow_distance > 0.0
+        {
+            self.shadow_changed(min, max, shadow_distance);
+        }
     }
 
     /// Draw scatter instances of `near` as `far` beyond `distance`.
@@ -517,7 +536,7 @@ impl Renderer {
     /// Turn the sun's shadows on or off (off skips the shadow passes entirely).
     pub fn set_shadows(&mut self, on: bool) {
         self.shadows = on;
-        self.shadow_world_dirty = true;
+        self.shadow_dirty = [true; CASCADES];
     }
 
     /// How strongly plants move in the wind: 1 normal, 0 still (reduce motion).
@@ -571,10 +590,16 @@ impl Renderer {
         self.cascade_update = [false; SHADOW_LAYERS];
         for (c, radius) in CASCADE_RADII.iter().enumerate() {
             let layer = self.shadow_set * CASCADES + c;
-            let moved = (cam.position - self.cascade_state[layer].1).length() > radius * 0.08;
-            self.cascade_update[layer] = first || sun_stepped || moved || self.shadow_world_dirty;
+            // Following the camera can't sparkle (the sun holds still and the maps snap to their own
+            // texels), so redraw often: the near cascade whenever the camera has moved at all, the
+            // others after a couple of percent of their width. Lagging further showed as detail
+            // popping in around you.
+            let follow = if c == 0 { 0.02 } else { radius * 0.02 };
+            let moved = (cam.position - self.cascade_state[layer].1).length() > follow;
+            self.cascade_update[layer] = first || sun_stepped || moved || self.shadow_dirty[c];
         }
-        self.shadow_world_dirty = false;
+        self.shadow_dirty = [false; CASCADES];
+        self.last_camera = cam.position;
         let fade =
             if first { 1.0 } else { (self.shadow_fade_start.elapsed().as_secs_f32() / SHADOW_FADE).min(1.0) };
         for layer in 0..SHADOW_LAYERS {
