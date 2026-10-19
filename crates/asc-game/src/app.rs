@@ -689,6 +689,9 @@ impl State {
                 sub,
                 pre,
             );
+            if let Some(stages) = self.renderer.gpu_stages() {
+                log::info!("gpu ms: {stages} | parts drawn {}", self.last_stats.parts_drawn);
+            }
         }
         if self.last_save.elapsed() >= AUTOSAVE {
             self.save_now("autosaved");

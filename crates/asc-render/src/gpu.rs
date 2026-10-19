@@ -32,7 +32,8 @@ impl Gpu {
 
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("ascension"),
-            required_features: wgpu::Features::empty(),
+            // Stage timings where the GPU has them.
+            required_features: adapter.features() & crate::timing::GpuTimer::features(),
             required_limits: wgpu::Limits::default(),
             ..Default::default()
         }))

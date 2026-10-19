@@ -150,9 +150,14 @@ impl Config {
                     nodes: Some((node, models)),
                 }
             };
-            kinds.push(node_kind("ore_surface", NodeKind::Surface, 150.0, 50.0));
-            // Underground: no sun reaches them, so no shadows.
-            kinds.push(node_kind("ore_deep", NodeKind::Deep, 80.0, 0.0));
+            let wanted = |name: &str| only.as_ref().is_none_or(|o| o.iter().any(|n| n == name));
+            if wanted("ore_surface") {
+                kinds.push(node_kind("ore_surface", NodeKind::Surface, 150.0, 50.0));
+            }
+            if wanted("ore_deep") {
+                // Underground: no sun reaches them, so no shadows.
+                kinds.push(node_kind("ore_deep", NodeKind::Deep, 80.0, 0.0));
+            }
         }
         Self { seed: seed as u32 as u64, kinds }
     }

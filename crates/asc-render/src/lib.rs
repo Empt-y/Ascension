@@ -14,6 +14,7 @@ mod parts;
 mod pipelines;
 mod shaders;
 mod targets;
+mod timing;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -146,6 +147,8 @@ struct GpuChunk {
 
 pub struct Renderer {
     gpu: Gpu,
+    /// Per-stage GPU timings, where supported (a cell: the passes mark it from `&self`).
+    timer: std::cell::RefCell<Option<timing::GpuTimer>>,
     shaders: ShaderLib,
     layouts: Layouts,
     pipelines: Pipelines,
@@ -287,7 +290,9 @@ impl Renderer {
         );
         let (post_bg, bloom_bgs, taa_bgs) =
             Self::texture_bind_groups(device, &layouts, &targets, &placeholder, &linear_sampler, msaa);
+        let timer = std::cell::RefCell::new(timing::GpuTimer::new(&gpu.device, &gpu.queue));
         Ok(Self {
+            timer,
             gpu,
             shaders,
             layouts,
@@ -652,6 +657,28 @@ impl Renderer {
         proj * Mat4::from_translation(shift) * light_view
     }
 
+    /// Smoothed GPU milliseconds per stage of the frame, e.g. "shadows 1.20 | terrain 2.10", or
+    /// `None` without timestamp support.
+    pub fn gpu_stages(&self) -> Option<String> {
+        let timer = self.timer.borrow();
+        let timer = timer.as_ref()?;
+        let parts: Vec<String> = timer.stages().map(|(l, ms)| format!("{l} {ms:.2}")).collect();
+        let total: f32 = timer.stages().map(|(_, ms)| ms).sum();
+        Some(format!("{} | total {total:.2}", parts.join(" | ")))
+    }
+
+    fn mark(&self, encoder: &mut wgpu::CommandEncoder, label: &'static str) {
+        if let Some(t) = self.timer.borrow_mut().as_mut() {
+            t.mark(encoder, label);
+        }
+    }
+
+    fn mark_in(&self, pass: &mut wgpu::RenderPass<'_>, label: &'static str) {
+        if let Some(t) = self.timer.borrow_mut().as_mut() {
+            t.mark_in(pass, label);
+        }
+    }
+
     pub fn render(&mut self, frame: &FrameParams, ui: Option<UiFrame<'_>>) -> FrameStats {
         let t_acquire = Instant::now();
         let surface = match self.gpu.surface.get_current_texture() {
@@ -800,8 +827,14 @@ impl Renderer {
         let device = &self.gpu.device;
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+        if let Some(t) = self.timer.get_mut().as_mut() {
+            t.begin(device);
+        }
+        self.mark(&mut encoder, "start");
         self.shadow_pass(&mut encoder);
+        self.mark(&mut encoder, "shadows");
         self.scene_pass(&mut encoder);
+        self.mark(&mut encoder, "resolve");
         if taa {
             let mut pass = color_pass(&mut encoder, "taa", &self.targets.taa[self.taa_index], None);
             pass.set_pipeline(&self.pipelines.taa);
@@ -809,7 +842,9 @@ impl Renderer {
             pass.set_bind_group(1, &self.taa_bgs.pass[self.taa_index], &[]);
             pass.draw(0..3, 0..1);
         }
+        self.mark(&mut encoder, "taa");
         self.bloom_passes(&mut encoder, taa);
+        self.mark(&mut encoder, "bloom");
 
         let view = surface.texture.create_view(&wgpu::TextureViewDescriptor::default());
         {
@@ -819,6 +854,7 @@ impl Renderer {
             pass.set_bind_group(1, if taa { &self.taa_bgs.post[self.taa_index] } else { &self.post_bg }, &[]);
             pass.draw(0..3, 0..1);
         }
+        self.mark(&mut encoder, "post");
 
         let mut extra = Vec::new();
         if let Some(ui) = &ui {
@@ -839,8 +875,15 @@ impl Renderer {
             let mut pass = color_pass(&mut encoder, "egui", &ui_view, None).forget_lifetime();
             self.egui.render(&mut pass, ui.primitives, &screen);
         }
+        self.mark(&mut encoder, "ui");
+        if let Some(t) = self.timer.get_mut().as_mut() {
+            t.finish(&mut encoder);
+        }
         let t_submit = Instant::now();
         queue.submit(extra.into_iter().chain([encoder.finish()]));
+        if let Some(t) = self.timer.get_mut().as_mut() {
+            t.after_submit();
+        }
         stats.submit_ms = t_submit.elapsed().as_secs_f32() * 1e3;
         if let Some(ui) = &ui {
             for id in &ui.textures.free {
@@ -1041,21 +1084,27 @@ impl Renderer {
             multiview_mask: None,
         });
         pass.set_bind_group(0, &self.scene_bg, &[]);
+        self.mark_in(&mut pass, "scene start");
         pass.set_pipeline(&self.pipelines.terrain);
         self.bind_arenas(&mut pass);
         for (i, (_, coord)) in self.draw_list.iter().enumerate() {
             self.draw_chunk(&mut pass, *coord, i as u32);
         }
+        self.mark_in(&mut pass, "terrain");
         pass.set_pipeline(&self.pipelines.parts);
         self.parts.draw(&mut pass);
+        self.mark_in(&mut pass, "parts");
         // Far terrain after the chunks, so the depth test lets chunks win wherever they exist.
         pass.set_pipeline(&self.pipelines.far);
         self.far.draw(&mut pass);
+        self.mark_in(&mut pass, "far");
         pass.set_pipeline(&self.pipelines.sky);
         pass.draw(0..3, 0..1);
+        self.mark_in(&mut pass, "sky");
         // Water last: it blends over terrain and sky and doesn't write depth.
         pass.set_pipeline(&self.pipelines.water);
         self.far.draw_water(&mut pass);
+        self.mark_in(&mut pass, "water");
         // The placement ghost blends over everything, including water.
         pass.set_bind_group(0, &self.scene_bg, &[]);
         pass.set_pipeline(&self.pipelines.ghost);

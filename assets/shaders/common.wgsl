@@ -269,8 +269,12 @@ fn terrain_surface(wa: vec4<f32>, wb: vec4<f32>, wc: vec4<f32>, ore: vec4<f32>, 
     let packed = round(ore.a * 255.0);
     let ore_metal = floor(packed / 16.0) / 15.0;
     let ore_rough = (packed - floor(packed / 16.0) * 16.0) / 15.0;
-    let clump = value_noise(world * vec3(1.6, 3.2, 1.6)) * 0.7 + value_noise(world * 5.0) * 0.3;
-    let fleck = smoothstep(0.42, 0.56, clump);
+    // (Only where there is ore: the noise is the dearest part of the terrain's shading.)
+    var fleck = 0.0;
+    if wb.y > 0.0 {
+        let clump = value_noise(world * vec3(1.6, 3.2, 1.6)) * 0.7 + value_noise(world * 5.0) * 0.3;
+        fleck = smoothstep(0.42, 0.56, clump);
+    }
     let ore_albedo = mix(rock * 0.75, ore_color, fleck);
     let flat = smoothstep(0.62, 0.82, n.y);
     let dry = mix(soil, mix(vec3(0.36, 0.29, 0.11), vec3(0.47, 0.38, 0.15), broad), flat);
