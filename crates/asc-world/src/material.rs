@@ -1,4 +1,19 @@
-/// What a solid sample is made of. Stored as one byte per sample.
+/// Sample bytes from this value up are ores: byte `ORE_BASE + i` is ore `i` of the ore table
+/// ([`crate::ores::builtin`]). They all read as [`Material::Ore`]; [`ore_index`] gives which one.
+pub const ORE_BASE: u8 = 64;
+
+/// The sample byte for ore `index`.
+pub fn ore_byte(index: usize) -> u8 {
+    debug_assert!(index < (256 - ORE_BASE as usize));
+    ORE_BASE + index as u8
+}
+
+/// Which ore a sample byte holds, if it's one.
+pub fn ore_index(byte: u8) -> Option<usize> {
+    (byte >= ORE_BASE).then(|| (byte - ORE_BASE) as usize)
+}
+
+/// What a solid sample is made of. Stored as one byte per sample (ores as `ORE_BASE + index`).
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -9,8 +24,8 @@ pub enum Material {
     Rock = 3,
     Sand = 4,
     Snow = 5,
-    /// Placeholder ore so the material channel is exercised end to end.
-    CopperOre = 6,
+    /// Any ore; the sample byte says which (see [`ORE_BASE`]).
+    Ore = 6,
     /// Sun-bleached savanna and steppe grass.
     DryGrass = 7,
     /// Tundra and taiga ground cover.
@@ -33,7 +48,7 @@ impl Material {
         Self::Rock,
         Self::Sand,
         Self::Snow,
-        Self::CopperOre,
+        Self::Ore,
         Self::DryGrass,
         Self::Moss,
         Self::Mud,
@@ -50,7 +65,7 @@ impl Material {
             Self::Rock => "rock",
             Self::Sand => "sand",
             Self::Snow => "snow",
-            Self::CopperOre => "copper_ore",
+            Self::Ore => "ore",
             Self::DryGrass => "dry_grass",
             Self::Moss => "moss",
             Self::Mud => "mud",
@@ -70,12 +85,13 @@ impl Material {
             3 => Self::Rock,
             4 => Self::Sand,
             5 => Self::Snow,
-            6 => Self::CopperOre,
+            6 => Self::Ore,
             7 => Self::DryGrass,
             8 => Self::Moss,
             9 => Self::Mud,
             10 => Self::Ice,
             11 => Self::Sandstone,
+            v if v >= ORE_BASE => Self::Ore,
             _ => Self::Air,
         }
     }

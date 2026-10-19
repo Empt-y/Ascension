@@ -17,7 +17,8 @@ const CENSUS_STEP: f32 = 0.25;
 
 #[derive(Default)]
 pub struct Mining {
-    target: Option<(Vec3, Material)>,
+    /// Where mining started and the sample byte there (which tells ores apart).
+    target: Option<(Vec3, u8)>,
     progress: f32,
     place_cooldown: f32,
 }
@@ -45,12 +46,13 @@ impl Mining {
     /// 0..1 progress of the current bite, for the HUD.
     pub fn progress(&self, content: &Content) -> f32 {
         match self.target {
-            Some((_, m)) => (self.progress / content.material(m).hardness.max(1e-3)).min(1.0),
+            Some((_, m)) => (self.progress / content.sample(m).hardness.max(1e-3)).min(1.0),
             None => 0.0,
         }
     }
 
-    pub fn target_material(&self) -> Option<Material> {
+    /// The sample byte being mined (see [`Content::sample_name`]).
+    pub fn target_material(&self) -> Option<u8> {
         self.target.map(|(_, m)| m)
     }
 
@@ -78,8 +80,8 @@ impl Mining {
             return None;
         };
         // What's just under the surface at the crosshair.
-        let (_, material) = world.sample_at(hit.point - hit.normal * 0.3);
-        if material == Material::Air {
+        let (_, material) = world.sample_raw(hit.point - hit.normal * 0.3);
+        if material == Material::Air as u8 {
             self.reset();
             return None;
         }
@@ -90,7 +92,7 @@ impl Mining {
             self.progress = 0.0;
         }
         self.progress += dt;
-        if self.progress < content.material(material).hardness {
+        if self.progress < content.sample(material).hardness {
             return None;
         }
         self.progress = 0.0;
@@ -100,10 +102,17 @@ impl Mining {
         let op = EditOp { center, radius: BITE_RADIUS, kind: EditKind::Dig, material: Material::Air };
         world.edits.push(op);
         let mut overflow = 0;
-        for m in Material::ALL {
+        for m in Material::ALL.into_iter().filter(|m| *m != Material::Ore) {
             let volume = removed.solid[m as usize];
             if volume > 0.0
                 && let Some(item) = content.material(m).drop
+            {
+                overflow += inventory.add_volume(content, item, volume);
+            }
+        }
+        for (ore, &volume) in removed.ores.iter().enumerate() {
+            if volume > 0.0
+                && let Some(item) = content.ores[ore].drop
             {
                 overflow += inventory.add_volume(content, item, volume);
             }
@@ -161,8 +170,8 @@ mod tests {
         let material = mining.target_material();
         assert_eq!(material, None);
         let hardness = {
-            let (_, m) = world.sample_at(hit.point - hit.normal * 0.3);
-            content.material(m).hardness
+            let (_, m) = world.sample_raw(hit.point - hit.normal * 0.3);
+            content.sample(m).hardness
         };
         let dt = 1.0 / 60.0;
         let mut elapsed = 0.0;

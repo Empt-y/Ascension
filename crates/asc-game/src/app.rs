@@ -1399,7 +1399,7 @@ impl State {
             },
             grounded: self.player.grounded,
             speed: self.player.velocity.length(),
-            target: self.mining.target_material().map(asc_world::Material::name),
+            target: self.mining.target_material().map(crate::content::Content::sample_name),
             physics_ms: self.worst_physics_ms,
             frame_ms: self.frame_ms,
             position: self.camera.position,

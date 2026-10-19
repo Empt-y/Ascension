@@ -156,6 +156,7 @@ fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
 struct Surface {
     albedo: vec3<f32>,
     roughness: f32,
+    metallic: f32,
 }
 
 fn triplanar(p: vec3<f32>, w_in: vec3<f32>) -> f32 {
@@ -248,8 +249,10 @@ fn surface_detail(world: vec3<f32>, n: vec3<f32>) -> Detail {
 }
 
 // Base colours are linear and deliberately saturated. Materials blend by the interpolated weights:
-// wa = grass, soil, rock, sand; wb = snow, copper ore, dry grass, moss; wc = mud, ice, sandstone.
-fn terrain_surface(wa: vec4<f32>, wb: vec4<f32>, wc: vec4<f32>, world: vec3<f32>, n: vec3<f32>, tone: f32) -> Surface {
+// wa = grass, soil, rock, sand; wb = snow, ore, dry grass, moss; wc = mud, ice, sandstone.
+// `ore` is how the ore there looks: rgb = square root of its linear colour, a = metallic (high
+// nibble) and roughness (low nibble), as packed by OreTable::look.
+fn terrain_surface(wa: vec4<f32>, wb: vec4<f32>, wc: vec4<f32>, ore: vec4<f32>, world: vec3<f32>, n: vec3<f32>, tone: f32) -> Surface {
     let broad = fbm3(world * 0.035);
     let detail = 1.0 + tone;
     let fine = 0.5 + tone;
@@ -261,8 +264,14 @@ fn terrain_surface(wa: vec4<f32>, wb: vec4<f32>, wc: vec4<f32>, world: vec3<f32>
     let rock = mix(vec3(0.24, 0.23, 0.24), vec3(0.36, 0.32, 0.29), broad);
     let sand = mix(vec3(0.34, 0.28, 0.18), vec3(0.40, 0.33, 0.22), broad);
     let snow = vec3(0.85, 0.88, 0.95);
-    let fleck = smoothstep(0.72, 0.8, fine);
-    let copper = mix(vec3(0.28, 0.25, 0.24), vec3(0.85, 0.42, 0.18), fleck);
+    // Ore: clumps and streaks of the mineral through darker host rock.
+    let ore_color = ore.rgb * ore.rgb;
+    let packed = round(ore.a * 255.0);
+    let ore_metal = floor(packed / 16.0) / 15.0;
+    let ore_rough = (packed - floor(packed / 16.0) * 16.0) / 15.0;
+    let clump = value_noise(world * vec3(1.6, 3.2, 1.6)) * 0.7 + value_noise(world * 5.0) * 0.3;
+    let fleck = smoothstep(0.42, 0.56, clump);
+    let ore_albedo = mix(rock * 0.75, ore_color, fleck);
     let flat = smoothstep(0.62, 0.82, n.y);
     let dry = mix(soil, mix(vec3(0.36, 0.29, 0.11), vec3(0.47, 0.38, 0.15), broad), flat);
     let moss = mix(soil, mix(vec3(0.11, 0.16, 0.05), vec3(0.21, 0.22, 0.09), broad), flat);
@@ -272,10 +281,11 @@ fn terrain_surface(wa: vec4<f32>, wb: vec4<f32>, wc: vec4<f32>, world: vec3<f32>
 
     let total = max(dot(wa, vec4(1.0)) + dot(wb, vec4(1.0)) + dot(wc, vec4(1.0)), 1e-4);
     var s: Surface;
-    s.albedo = (grass * wa.x + soil * wa.y + rock * wa.z + sand * wa.w + snow * wb.x + copper * wb.y
+    s.albedo = (grass * wa.x + soil * wa.y + rock * wa.z + sand * wa.w + snow * wb.x + ore_albedo * wb.y
         + dry * wb.z + moss * wb.w + mud * wc.x + ice * wc.y + sandstone * wc.z) / total;
     s.roughness = (0.9 * (wa.x + wa.y + wa.w + wb.z + wb.w) + 0.75 * wa.z + 0.5 * wb.x
-        + mix(0.8, 0.3, fleck) * wb.y + 0.45 * wc.x + 0.12 * wc.y + 0.85 * wc.z) / total;
+        + mix(0.8, max(ore_rough, 0.2), fleck) * wb.y + 0.45 * wc.x + 0.12 * wc.y + 0.85 * wc.z) / total;
+    s.metallic = ore_metal * fleck * wb.y / total;
     s.albedo *= detail;
     return s;
 }
@@ -411,7 +421,7 @@ fn shade_pbr(albedo: vec3<f32>, roughness: f32, metallic: f32, n: vec3<f32>, rel
 }
 
 fn shade_terrain(s: Surface, n: vec3<f32>, rel: vec3<f32>, occlusion: f32, shadow: f32) -> vec3<f32> {
-    return shade_pbr(s.albedo, s.roughness, 0.0, n, rel, occlusion, shadow);
+    return shade_pbr(s.albedo, s.roughness, s.metallic, n, rel, occlusion, shadow);
 }
 
 // Full-screen triangle from the vertex index.

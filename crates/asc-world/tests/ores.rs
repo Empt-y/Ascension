@@ -133,3 +133,37 @@ fn shallow_veins_show_at_the_surface() {
     assert!(shallow > 20, "{shallow}");
     println!("{shallow} shallow veins, {hints} surface hints");
 }
+
+#[test]
+fn veins_are_written_into_the_rock() {
+    use asc_world::{CHUNK, ChunkData, Material, SAMPLES, chunk_of, ore_index};
+    let t = table();
+    let worldgen = WorldGen::new(1337);
+    let mut found = 0;
+    let mut cells = 0;
+    for v in sample_veins(&t, &worldgen, 12).into_iter().take(12) {
+        let coord = chunk_of(v.center);
+        let chunk = worldgen.generate(coord);
+        let ores: Vec<usize> = chunk.material.iter().filter_map(|m| ore_index(*m)).collect();
+        found += ores.len();
+        cells += 1;
+        // Every ore in the chunk belongs to a vein type that can hold it.
+        for ore in &ores {
+            assert!(t.veins.iter().any(|vt| vt.ores.contains(ore)));
+        }
+        // Point samples agree with the chunk, ores included.
+        for i in (0..chunk.density.len()).step_by(97) {
+            let (x, y, z) = (i % SAMPLES, (i / SAMPLES) % SAMPLES, i / (SAMPLES * SAMPLES));
+            let p = ChunkData::sample_pos(coord, x, y, z);
+            let (d, m) = worldgen.sample(p);
+            assert_eq!(m, chunk.material[i], "at {p}");
+            assert!((d - chunk.density[i]).abs() < 1e-4);
+            if d < 0.0 && ore_index(m).is_some() {
+                assert_eq!(Material::from_u8(m), Material::Ore);
+            }
+        }
+    }
+    assert!(cells > 5);
+    // A vein centre's chunk is mostly lens: expect plenty of ore.
+    assert!(found > cells * (CHUNK as usize) * 4, "{found} ore samples in {cells} chunks");
+}

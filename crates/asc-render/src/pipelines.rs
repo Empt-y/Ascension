@@ -206,8 +206,9 @@ pub struct Pipelines {
     pub taa: wgpu::RenderPipeline,
 }
 
-const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] =
-    wgpu::vertex_attr_array![0 => Float32x3, 1 => Snorm8x4, 2 => Unorm8x4, 3 => Unorm8x4, 4 => Unorm8x4];
+const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+    0 => Float32x3, 1 => Snorm8x4, 2 => Unorm8x4, 3 => Unorm8x4, 4 => Unorm8x4, 5 => Unorm8x4
+];
 
 struct Builder<'a> {
     device: &'a wgpu::Device,

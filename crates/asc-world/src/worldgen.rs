@@ -6,11 +6,15 @@
 //! can be regenerated on any thread at any time.
 
 use fastnoise_lite::{DomainWarpType, FastNoiseLite, FractalType, NoiseType};
-use glam::{Vec2, Vec3};
+use std::sync::{Arc, RwLock};
+
+use ahash::AHashMap;
+use glam::{IVec2, Vec2, Vec3};
 
 use crate::chunk::{CHUNK, ChunkCoord, ChunkData, SAMPLES};
 use crate::edit::DENSITY_CLAMP;
-use crate::material::Material;
+use crate::material::{Material, ore_byte};
+use crate::ores::{OreTable, VEIN_CELL, Vein};
 
 /// Surfaces within a few metres of this height are sandy shores. Deeper basins are lowland
 /// meadows rather than vast sand plains (there is no water yet to make them seas).
@@ -117,7 +121,9 @@ pub struct WorldGen {
     patches: FastNoiseLite,
     /// Ridged dune field, stretched across the wind.
     dunes: FastNoiseLite,
-    ore: FastNoiseLite,
+    ores: &'static OreTable,
+    /// Veins per vein cell, worked out once: every chunk and point sample near a cell reads them.
+    veins: RwLock<AHashMap<IVec2, Arc<[Vein]>>>,
 }
 
 /// Per-(x, z) values shared by every sample in a column.
@@ -177,17 +183,52 @@ impl WorldGen {
             cave_b: noise(seed.wrapping_add(6), OpenSimplex2, 0.012, None),
             cavern: noise(seed.wrapping_add(8), OpenSimplex2, 0.007, Some((FBm, 2))),
             entrance: noise(seed.wrapping_add(9), OpenSimplex2, 0.004, None),
-            ore: noise(seed.wrapping_add(7), OpenSimplex2, 0.08, None),
             forest: noise(seed.wrapping_add(10), OpenSimplex2, 0.0028, Some((FBm, 3))),
             temperature: noise(seed.wrapping_add(11), OpenSimplex2, 0.00005, Some((FBm, 2))),
             moisture: noise(seed.wrapping_add(12), OpenSimplex2, 0.00008, Some((FBm, 2))),
             patches: noise(seed.wrapping_add(13), OpenSimplex2, 0.012, Some((FBm, 2))),
             dunes: noise(seed.wrapping_add(14), OpenSimplex2, 0.011, Some((Ridged, 2))),
+            ores: crate::ores::builtin(),
+            veins: RwLock::new(AHashMap::new()),
         }
     }
 
     pub fn seed(&self) -> i32 {
         self.seed
+    }
+
+    /// The ore table veins are placed from.
+    pub fn ores(&self) -> &'static OreTable {
+        self.ores
+    }
+
+    /// The veins centred in `cell` (cached).
+    pub fn veins_in_cell(&self, cell: IVec2) -> Arc<[Vein]> {
+        if let Some(v) = self.veins.read().unwrap().get(&cell) {
+            return v.clone();
+        }
+        let v: Arc<[Vein]> = self.ores.veins_in_cell(self, cell).into();
+        self.veins.write().unwrap().insert(cell, v.clone());
+        v
+    }
+
+    /// Every vein that may reach into the box `lo..hi`.
+    pub fn veins_touching(&self, lo: Vec3, hi: Vec3) -> Vec<Vein> {
+        let reach = self.ores.max_reach();
+        let c0 = (Vec2::new(lo.x, lo.z) - reach).div_euclid(Vec2::splat(VEIN_CELL)).as_ivec2();
+        let c1 = (Vec2::new(hi.x, hi.z) + reach).div_euclid(Vec2::splat(VEIN_CELL)).as_ivec2();
+        let mut out = Vec::new();
+        for cz in c0.y..=c1.y {
+            for cx in c0.x..=c1.x {
+                for v in self.veins_in_cell(IVec2::new(cx, cz)).iter() {
+                    let r = Vec3::splat(v.reach());
+                    if (v.center + r).cmpge(lo).all() && (v.center - r).cmple(hi).all() {
+                        out.push(*v);
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Mountain mask in [0, 1] from the continent value.
@@ -306,7 +347,7 @@ impl WorldGen {
     /// The material showing at the surface at (x, z).
     pub fn surface_material(&self, x: f32, z: f32) -> Material {
         let col = self.column(x, z);
-        self.material(Vec3::new(x, col.height - 0.5, z), &col)
+        Material::from_u8(self.material(Vec3::new(x, col.height - 0.5, z), &col, &[]))
     }
 
     /// The surface material at (x, z) given its height and slope, which the far terrain already
@@ -323,11 +364,11 @@ impl WorldGen {
             biome,
             patch: self.patches.get_noise_2d(x, z) * 0.5 + 0.5,
         };
-        self.material(Vec3::new(x, height - 0.5, z), &col)
+        Material::from_u8(self.material(Vec3::new(x, height - 0.5, z), &col, &[]))
     }
 
     /// Density and material at a point, given its column.
-    fn point(&self, p: Vec3, col: &Column) -> (f32, u8) {
+    fn point(&self, p: Vec3, col: &Column, veins: &[Vein]) -> (f32, u8) {
         let surface = (p.y - col.height) * col.inv_grad;
         if surface > DENSITY_CLAMP + 8.0 {
             return (DENSITY_CLAMP, Material::Air as u8);
@@ -359,16 +400,24 @@ impl WorldGen {
         if d >= 0.0 {
             return (d, Material::Air as u8);
         }
-        (d, self.material(p, col) as u8)
+        (d, self.material(p, col, veins))
     }
 
-    fn material(&self, p: Vec3, col: &Column) -> Material {
+    /// The material byte of a solid point: ores replace the rock wherever a vein passes through.
+    fn material(&self, p: Vec3, col: &Column, veins: &[Vein]) -> u8 {
+        let base = self.base_material(p, col);
+        if matches!(base, Material::Rock | Material::Sandstone)
+            && let Some((ore, _)) = self.ores.ore_in(veins, p)
+        {
+            return ore_byte(ore);
+        }
+        base as u8
+    }
+
+    fn base_material(&self, p: Vec3, col: &Column) -> Material {
         let depth = col.height - p.y;
         let sandy = matches!(col.biome, Biome::Desert);
         if depth > 5.0 && !(sandy && depth < 12.0) {
-            if self.ore.get_noise_3d(p.x, p.y, p.z) > 0.72 {
-                return Material::CopperOre;
-            }
             return Material::Rock;
         }
         if col.slope > 1.1 {
@@ -403,7 +452,14 @@ impl WorldGen {
     /// Density and material at any world point. Matches [`Self::generate`] exactly at sample positions.
     pub fn sample(&self, p: Vec3) -> (f32, u8) {
         let col = self.column(p.x, p.z);
-        self.point(p, &col)
+        let (d, m) = self.point(p, &col, &[]);
+        // Only rock can hold ore: look the veins up just for that.
+        if (m == Material::Rock as u8 || m == Material::Sandstone as u8)
+            && let Some((ore, _)) = self.ores.ore_in(&self.veins_touching(p, p), p)
+        {
+            return (d, ore_byte(ore));
+        }
+        (d, m)
     }
 
     /// Generate a chunk's padded samples (no edits applied).
@@ -449,13 +505,14 @@ impl WorldGen {
             chunk.uniform = Some(crate::chunk::Uniform::Air);
             return chunk;
         }
+        let veins = self.veins_touching(base, base + Vec3::splat((SAMPLES - 1) as f32));
         for z in 0..SAMPLES {
             for y in 0..SAMPLES {
                 for x in 0..SAMPLES {
                     let col = &columns[x + SAMPLES * z];
                     let p = base + Vec3::new(x as f32, y as f32, z as f32);
                     let i = ChunkData::index(x, y, z);
-                    (chunk.density[i], chunk.material[i]) = self.point(p, col);
+                    (chunk.density[i], chunk.material[i]) = self.point(p, col, &veins);
                 }
             }
         }

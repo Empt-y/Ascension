@@ -16,7 +16,7 @@ mod worldgen;
 pub use chunk::{CHUNK, ChunkCoord, ChunkData, SAMPLES, chunk_of, chunk_origin};
 pub use collide::{Capsule, Contact, box_distance, distance_estimate, push_sphere, resolve_capsule};
 pub use edit::{EditKind, EditLog, EditOp};
-pub use material::Material;
+pub use material::{Material, ORE_BASE, ore_byte, ore_index};
 pub use mesh::{ChunkMesh, MATERIAL_SLOTS, POSITION_GRID, Vertex, mesh_chunk};
 pub use raycast::{RayHit, raycast};
 pub use worldgen::{Biome, Ground, WorldGen};
@@ -24,14 +24,17 @@ pub use worldgen::{Biome, Ground, WorldGen};
 use std::sync::Arc;
 
 /// Bumped whenever worldgen changes what a seed produces, so saves can warn about mismatched terrain.
-pub const WORLDGEN_VERSION: u32 = 3;
+pub const WORLDGEN_VERSION: u32 = 4;
 
 use glam::Vec3;
 
 /// Volume (m³) of each material, and of air, inside a sphere.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Census {
+    /// By material; `Material::Ore` is the total of every ore.
     pub solid: [f32; Material::COUNT],
+    /// By ore index (as long as the highest ore found).
+    pub ores: Vec<f32>,
     pub air: f32,
 }
 
@@ -59,11 +62,17 @@ impl World {
 
     /// Density and material at an arbitrary point, with edits applied.
     pub fn sample_at(&self, p: Vec3) -> (f32, Material) {
+        let (d, m) = self.sample_raw(p);
+        (d, Material::from_u8(m))
+    }
+
+    /// Density and material byte (which tells ores apart) at a point, with edits applied.
+    pub fn sample_raw(&self, p: Vec3) -> (f32, u8) {
         let (mut d, mut m) = self.worldgen.sample(p);
         for op in self.edits.ops_near(p) {
             (d, m) = op.apply(p, d, m);
         }
-        (d, Material::from_u8(m))
+        (d, m)
     }
 
     /// What a sphere currently contains, sampled on a grid of `step` metres.
@@ -79,9 +88,15 @@ impl World {
                     if offset.length() > radius {
                         continue;
                     }
-                    let (d, m) = self.sample_at(center + offset);
+                    let (d, byte) = self.sample_raw(center + offset);
                     if d < 0.0 {
-                        census.solid[m as usize] += cell;
+                        census.solid[Material::from_u8(byte) as usize] += cell;
+                        if let Some(ore) = ore_index(byte) {
+                            if census.ores.len() <= ore {
+                                census.ores.resize(ore + 1, 0.0);
+                            }
+                            census.ores[ore] += cell;
+                        }
                     } else {
                         census.air += cell;
                     }

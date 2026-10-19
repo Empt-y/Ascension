@@ -9,6 +9,7 @@
 use glam::Vec3;
 
 use crate::chunk::{CHUNK, ChunkData, SAMPLES};
+use crate::material::{Material, ore_index};
 
 /// Vertex positions are rounded to 1 / this many metres (see the comment where they're made).
 pub const POSITION_GRID: f32 = 1024.0;
@@ -16,7 +17,8 @@ pub const POSITION_GRID: f32 = 1024.0;
 /// Materials that can be blended per vertex: slot `i` holds material id `i + 1` (0 is air).
 pub const MATERIAL_SLOTS: usize = 12;
 
-/// 28 bytes. The renderer reads `normal` as snorm8x4 and `weights` as three unorm8x4.
+/// 32 bytes. The renderer reads `normal` as snorm8x4, `weights` as three unorm8x4 and `ore` as
+/// one unorm8x4.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
@@ -26,6 +28,9 @@ pub struct Vertex {
     pub normal: [i8; 4],
     /// Blend weights of the surrounding materials, summing to about 255.
     pub weights: [u8; MATERIAL_SLOTS],
+    /// How the ore here looks, blended over the ore corners (see [`crate::ores::OreTable::look`]);
+    /// zero where there's none.
+    pub ore: [u8; 4],
 }
 
 impl Vertex {
@@ -100,14 +105,32 @@ pub fn mesh_chunk(chunk: &ChunkData) -> ChunkMesh {
                 // Blend the materials of the solid corners, deeper ones counting more, so material
                 // boundaries fade across triangles instead of following them.
                 let mut weight = [0.0f32; MATERIAL_SLOTS];
+                // Ore colour, metallic and roughness, averaged over the ore corners.
+                let (mut look, mut look_weight) = ([0.0f32; 5], 0.0);
                 for (i, o) in CORNERS.iter().enumerate() {
-                    let m = chunk.material[idx(x + o[0], y + o[1], z + o[2])] as usize;
+                    let byte = chunk.material[idx(x + o[0], y + o[1], z + o[2])];
+                    let m = Material::from_u8(byte) as usize;
                     if corner[i] < 0.0 && (1..=MATERIAL_SLOTS).contains(&m) {
-                        weight[m - 1] += (-corner[i]).min(2.0) + 0.05;
+                        let w = (-corner[i]).min(2.0) + 0.05;
+                        weight[m - 1] += w;
+                        if let Some(ore) = ore_index(byte) {
+                            let l = crate::ores::builtin().look(ore);
+                            let parts = [l[0], l[1], l[2], l[3] >> 4, l[3] & 15];
+                            for (sum, v) in look.iter_mut().zip(parts) {
+                                *sum += v as f32 * w;
+                            }
+                            look_weight += w;
+                        }
                     }
                 }
                 let total: f32 = weight.iter().sum::<f32>().max(1e-6);
                 let weights = weight.map(|w| (w / total * 255.0).round() as u8);
+                let ore = if look_weight > 0.0 {
+                    let [r, g, b, metal, rough] = look.map(|v| (v / look_weight).round() as u8);
+                    [r, g, b, (metal << 4) | rough]
+                } else {
+                    [0; 4]
+                };
 
                 // Cell (x, y, z) has its low corner at sample (x, y, z), which sits at chunk-local x - 1.
                 // On a 1/1024 m grid, so that chunk offset + local position is exact in f32 and the
@@ -127,6 +150,7 @@ pub fn mesh_chunk(chunk: &ChunkData) -> ChunkMesh {
                     position: position.into(),
                     normal: [n.x as i8, n.y as i8, n.z as i8, (occlusion * 127.0).round() as i8],
                     weights,
+                    ore,
                 });
             }
         }

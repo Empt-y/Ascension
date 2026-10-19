@@ -1,6 +1,9 @@
 # Items. `color` (linear RGB) stands in for an icon until there is art.
 # `places` names the terrain material the item fills with when placed; omit it for items that can't
 # be placed. `stack` defaults to 64.
+#
+# Every ore in ores.toml also gets an item, added by the game: `<ore id>_ore`, named "<name> Ore",
+# in the ore's colour.
 
 [[item]]
 id = "soil"
@@ -25,11 +28,6 @@ id = "snow"
 name = "Snow"
 color = [0.88, 0.90, 0.96]
 places = "snow"
-
-[[item]]
-id = "copper_ore"
-name = "Copper Ore"
-color = [0.85, 0.42, 0.18]
 
 [[item]]
 id = "mud"

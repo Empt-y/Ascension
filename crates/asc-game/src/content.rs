@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use ahash::AHashMap;
 use anyhow::{Context, Result, bail};
-use asc_world::Material;
+use asc_world::{Material, ore_index};
 use serde::Deserialize;
 
 const EMBEDDED_ITEMS: &str = include_str!("../../../assets/data/items.toml");
@@ -37,6 +37,8 @@ pub struct Content {
     pub items: Vec<ItemDef>,
     by_id: AHashMap<String, ItemId>,
     pub materials: [MaterialDef; Material::COUNT],
+    /// Per ore (index into `asc_world::ores::builtin()`): its item and mining time per bite.
+    pub ores: Vec<MaterialDef>,
 }
 
 #[derive(Deserialize)]
@@ -64,6 +66,9 @@ fn default_stack() -> u32 {
 struct RawMaterial {
     hardness: f32,
     drop: Option<String>,
+    /// Ores only: extra hardness per tool tier.
+    #[serde(default)]
+    tier_hardness: f32,
 }
 
 impl Content {
@@ -107,6 +112,24 @@ impl Content {
             }
             items.push(ItemDef { id: raw.id, name: raw.name, color: raw.color, stack: raw.stack, places });
         }
+        // An item per ore.
+        let table = asc_world::ores::builtin();
+        let mut ore_items = Vec::new();
+        for ore in &table.ores {
+            let id = format!("{}_ore", ore.id);
+            let item = ItemId(items.len() as u16);
+            if by_id.insert(id.clone(), item).is_some() {
+                bail!("ore item {id} clashes with an item in items.toml");
+            }
+            items.push(ItemDef {
+                id,
+                name: format!("{} Ore", ore.name),
+                color: ore.color,
+                stack: 64,
+                places: None,
+            });
+            ore_items.push(item);
+        }
 
         let raw_materials: BTreeMap<String, RawMaterial> =
             toml::from_str(materials_toml).context("parsing materials.toml")?;
@@ -120,6 +143,9 @@ impl Content {
             }
             if raw.hardness <= 0.0 {
                 bail!("material {name}: hardness must be positive");
+            }
+            if (m == Material::Ore) != raw.drop.is_none() {
+                bail!("material {name}: every material but ore needs a drop, and ore must not have one");
             }
             let drop = match &raw.drop {
                 Some(item) => Some(
@@ -137,7 +163,15 @@ impl Content {
                 bail!("materials.toml: no entry for {}", m.name());
             }
         }
-        Ok(Self { items, by_id, materials })
+        let tier_hardness = raw_materials.get("ore").map_or(0.0, |r| r.tier_hardness);
+        let base = materials[Material::Ore as usize].hardness;
+        let ores = table
+            .ores
+            .iter()
+            .zip(ore_items)
+            .map(|(o, item)| MaterialDef { hardness: base + tier_hardness * o.tier as f32, drop: Some(item) })
+            .collect();
+        Ok(Self { items, by_id, materials, ores })
     }
 
     pub fn item(&self, id: ItemId) -> &ItemDef {
@@ -151,6 +185,22 @@ impl Content {
     pub fn material(&self, m: Material) -> &MaterialDef {
         &self.materials[m as usize]
     }
+
+    /// Mining properties of a sample byte: its ore's own if it's an ore.
+    pub fn sample(&self, byte: u8) -> &MaterialDef {
+        match ore_index(byte) {
+            Some(i) => &self.ores[i],
+            None => self.material(Material::from_u8(byte)),
+        }
+    }
+
+    /// What a sample byte is called, for the HUD.
+    pub fn sample_name(byte: u8) -> &'static str {
+        match ore_index(byte) {
+            Some(i) => asc_world::ores::builtin().ores[i].name.as_str(),
+            None => Material::from_u8(byte).name(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -160,11 +210,18 @@ mod tests {
     #[test]
     fn shipped_content_is_valid() {
         let c = Content::parse(EMBEDDED_ITEMS, EMBEDDED_MATERIALS).expect("content should load");
-        for m in Material::ALL.into_iter().filter(|m| *m != Material::Air) {
+        for m in Material::ALL.into_iter().filter(|m| *m != Material::Air && *m != Material::Ore) {
             let def = c.material(m);
             assert!(def.hardness > 0.0, "{} has no hardness", m.name());
             assert!(def.drop.is_some(), "{} drops nothing", m.name());
         }
+        let table = asc_world::ores::builtin();
+        assert_eq!(c.ores.len(), table.ores.len());
+        let coal = table.ore_index("coal").unwrap();
+        let def = c.sample(asc_world::ore_byte(coal));
+        assert_eq!(c.item(def.drop.unwrap()).id, "coal_ore");
+        let hardest = c.ores.iter().map(|d| d.hardness).fold(0.0, f32::max);
+        assert!(hardest > def.hardness, "higher tiers take longer");
         assert_eq!(c.item(c.material(Material::Grass).drop.unwrap()).id, "soil");
         assert_eq!(c.item(c.item_id("rock").unwrap()).places, Some(Material::Rock));
     }

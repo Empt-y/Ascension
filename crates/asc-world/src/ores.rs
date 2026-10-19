@@ -14,6 +14,7 @@
 //! sprinkle of its sporadic ore anywhere. Veins near the surface show small outcrops above them.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use glam::{IVec2, Vec2, Vec3};
 use serde::Deserialize;
@@ -39,8 +40,29 @@ pub struct OreDef {
     pub tier: u8,
     pub vein: String,
     pub style: String,
+    /// Linear base colour, metallic and roughness, as in glTF.
+    pub color: [f32; 3],
+    #[serde(default)]
+    pub metallic: f32,
+    #[serde(default = "default_roughness")]
+    pub roughness: f32,
     #[serde(default)]
     pub byproducts: Vec<String>,
+}
+
+fn default_roughness() -> f32 {
+    0.7
+}
+
+const EMBEDDED: &str = include_str!("../../../assets/data/ores.toml");
+
+/// The shipped ore table (`assets/data/ores.toml`, built in so worldgen can't drift from it).
+pub fn builtin() -> &'static OreTable {
+    static TABLE: OnceLock<OreTable> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let file: OreFile = toml::from_str(EMBEDDED).expect("parsing ores.toml");
+        OreTable::new(file).expect("ores.toml")
+    })
 }
 
 /// One vein type, as listed in `ores.toml`.
@@ -127,6 +149,37 @@ impl OreTable {
         self.ores.iter().position(|o| o.id == id)
     }
 
+    /// The furthest any vein reaches from its centre, horizontally or vertically.
+    pub fn max_reach(&self) -> f32 {
+        self.veins.iter().map(|v| v.def.radius[1] + v.def.thickness[1] * 0.5).fold(0.0, f32::max)
+    }
+
+    /// The ore at `p` among `veins`, and its layer.
+    pub fn ore_in(&self, veins: &[Vein], p: Vec3) -> Option<(usize, Layer)> {
+        for vein in veins {
+            if let Some(layer) = vein.layer_at(p) {
+                let t = &self.veins[vein.kind];
+                let ore = match layer {
+                    Layer::Primary => t.ores[0],
+                    Layer::Between => t.ores[1],
+                    Layer::Secondary => t.ores[2],
+                    Layer::Sporadic => t.ores[3],
+                };
+                return Some((ore, layer));
+            }
+        }
+        None
+    }
+
+    /// How ore `index` looks in the terrain, packed for a vertex: sRGB-ish colour (square root
+    /// of linear, so dark ores keep precision) and metallic (high nibble) / roughness (low).
+    pub fn look(&self, index: usize) -> [u8; 4] {
+        let o = &self.ores[index];
+        let c = o.color.map(|v| (v.clamp(0.0, 1.0).sqrt() * 255.0).round() as u8);
+        let nib = |v: f32| (v.clamp(0.0, 1.0) * 15.0).round() as u8;
+        [c[0], c[1], c[2], (nib(o.metallic) << 4) | nib(o.roughness)]
+    }
+
     /// The veins whose centres lie in `cell`.
     pub fn veins_in_cell(&self, worldgen: &WorldGen, cell: IVec2) -> Vec<Vein> {
         let mut out = Vec::new();
@@ -172,24 +225,7 @@ impl OreTable {
 
     /// The ore at `p` and which layer of its vein it's in, or `None` for plain rock.
     pub fn ore_at(&self, worldgen: &WorldGen, p: Vec3) -> Option<(usize, Layer)> {
-        let cell = (Vec2::new(p.x, p.z) / VEIN_CELL).floor().as_ivec2();
-        for dz in -1..=1 {
-            for dx in -1..=1 {
-                for vein in self.veins_in_cell(worldgen, cell + IVec2::new(dx, dz)) {
-                    if let Some(layer) = vein.layer_at(p) {
-                        let t = &self.veins[vein.kind];
-                        let ore = match layer {
-                            Layer::Primary => t.ores[0],
-                            Layer::Between => t.ores[1],
-                            Layer::Secondary => t.ores[2],
-                            Layer::Sporadic => t.ores[3],
-                        };
-                        return Some((ore, layer));
-                    }
-                }
-            }
-        }
-        None
+        self.ore_in(&worldgen.veins_touching(p, p), p)
     }
 
     /// Outcrops on the surface above a shallow vein: (ore, ground position). Empty for veins
@@ -233,6 +269,11 @@ pub struct Vein {
 }
 
 impl Vein {
+    /// Distance from the centre beyond which nothing is ore, on any axis.
+    pub fn reach(&self) -> f32 {
+        self.radius + self.thickness * 0.5
+    }
+
     /// Which layer of the vein `p` is in, if it's ore (about half the lens is, in patches).
     pub fn layer_at(&self, p: Vec3) -> Option<Layer> {
         let d = p - self.center;

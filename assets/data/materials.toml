@@ -2,6 +2,9 @@
 #
 # hardness: seconds of holding the mine button per bite (one 0.9 m sphere).
 # drop:     item id (items.toml) that mining yields, 1 item per cubic metre removed.
+#
+# `ore` covers every ore in ores.toml: each drops its own `<ore id>_ore` item, and takes `hardness`
+# plus `tier_hardness` for each tool tier it needs.
 
 [grass]
 hardness = 0.5
@@ -23,9 +26,9 @@ drop = "sand"
 hardness = 0.2
 drop = "snow"
 
-[copper_ore]
-hardness = 2.5
-drop = "copper_ore"
+[ore]
+hardness = 2.0
+tier_hardness = 0.6
 
 [dry_grass]
 hardness = 0.5
