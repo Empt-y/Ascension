@@ -1,0 +1,19 @@
+//! The authoritative game: its state and rules, the fixed-rate simulation, saves and (later) the
+//! protocol a client talks to it with. No window, GPU or renderer types, so it can run on its own
+//! thread inside the game or, one day, headless as a server.
+
+pub mod content;
+pub mod inventory;
+pub mod ore_nodes;
+pub mod save;
+pub mod sim;
+
+use serde::{Deserialize, Serialize};
+
+/// How a player moves: walking with physics, or flying freely.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    Walk,
+    Fly,
+}

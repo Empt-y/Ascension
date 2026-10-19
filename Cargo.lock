@@ -188,6 +188,7 @@ dependencies = [
  "anyhow",
  "asc-build",
  "asc-render",
+ "asc-sim",
  "asc-world",
  "crossbeam-channel",
  "dirs",
@@ -220,6 +221,22 @@ dependencies = [
  "pollster",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "asc-sim"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "asc-build",
+ "asc-world",
+ "dirs",
+ "glam",
+ "log",
+ "postcard",
+ "serde",
+ "toml",
 ]
 
 [[package]]

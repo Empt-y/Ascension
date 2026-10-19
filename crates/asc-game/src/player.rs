@@ -5,7 +5,6 @@
 
 use asc_world::{Capsule, push_sphere};
 use glam::Vec3;
-use serde::{Deserialize, Serialize};
 
 pub const STEP: f32 = 1.0 / 60.0;
 pub const EYE_HEIGHT: f32 = 1.62;
@@ -32,12 +31,7 @@ const STEP_HEIGHT: f32 = 0.55;
 /// Below this the player is put back at the spawn point.
 pub const KILL_Y: f32 = -400.0;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Mode {
-    Walk,
-    Fly,
-}
+pub use asc_sim::Mode;
 
 /// Intent for one update, already mapped from keys.
 #[derive(Clone, Copy, Debug, Default)]

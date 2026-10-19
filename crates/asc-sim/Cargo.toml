@@ -1,0 +1,20 @@
+[package]
+name = "asc-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+asc-world.workspace = true
+asc-build.workspace = true
+glam.workspace = true
+ahash.workspace = true
+log.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+toml.workspace = true
+postcard.workspace = true
+dirs.workspace = true

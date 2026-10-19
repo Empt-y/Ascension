@@ -25,8 +25,7 @@ use glam::{IVec2, Vec2, Vec3};
 
 use crate::assets::{Collide, NatureModels, OreModels};
 
-/// Side of a scatter column in metres (the terrain chunk size).
-pub const COLUMN: f32 = 32.0;
+pub use crate::ore_nodes::COLUMN;
 /// Keep generated columns this much beyond a kind's draw distance before dropping them.
 const KEEP_MARGIN: f32 = 2.0 * COLUMN;
 

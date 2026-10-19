@@ -13,7 +13,7 @@ use asc_world::EditOp;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::player::Mode;
+use crate::Mode;
 
 /// Bumped when the save layout changes. 2 added `structures.bin`, 3 `nodes.bin`; older saves load
 /// without them.

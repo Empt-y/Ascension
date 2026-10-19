@@ -10,7 +10,8 @@
 use asc_world::{WorldGen, ore_index};
 use glam::{IVec2, Vec3};
 
-use crate::scatter::COLUMN;
+/// Side of a scatter column in metres (the terrain chunk size): nodes are found per column.
+pub const COLUMN: f32 = 32.0;
 
 /// Grid spacing of underground node candidates, metres.
 const DEEP_SPACING: f32 = 3.0;

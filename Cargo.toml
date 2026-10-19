@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/asc-world", "crates/asc-render", "crates/asc-build", "crates/asc-game"]
+members = ["crates/asc-world", "crates/asc-render", "crates/asc-build", "crates/asc-sim", "crates/asc-game"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,6 +17,7 @@ all = { level = "warn", priority = -1 }
 asc-world = { path = "crates/asc-world" }
 asc-render = { path = "crates/asc-render" }
 asc-build = { path = "crates/asc-build" }
+asc-sim = { path = "crates/asc-sim" }
 wgpu = "30"
 winit = "0.30"
 glam = { version = "0.30", features = ["bytemuck", "serde"] }
