@@ -18,4 +18,13 @@ name = ""
 if h and kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
     name = os.path.basename(buf.value).lower()
 print(f"foreground: {name or '?'}")
+# A game running at all blocks launches, even with something else in front for a moment (the user
+# flicks to Spotify or Discord mid-match).
+GAMES = {"overwatch.exe", "arkascended.exe", "shootergame.exe"}
+import subprocess
+running = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True).stdout.lower()
+playing = sorted(g for g in GAMES if f'"{g}"' in running)
+if playing:
+    print(f"game running: {', '.join(playing)}")
+    sys.exit(1)
 sys.exit(0 if name in ALLOWED else 1)
