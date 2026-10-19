@@ -39,6 +39,9 @@ pub enum ClientMsg {
     SetTime(f32),
     /// Save now.
     Save,
+    /// Answered with `Pong` once everything sent before it has been handled (so scripted clients
+    /// can wait for the results of what they asked).
+    Ping(u32),
 }
 
 /// The state a client starts from.
@@ -70,4 +73,7 @@ pub enum ServerMsg {
     /// Something to tell the player ("Inventory full", "Can't place: ...").
     Notice(String),
     Saved { ok: bool },
+    Pong(u32),
+    /// Once a second: ticks per second, and the slowest tick (ms).
+    Stats { tps: f32, mspt: f32 },
 }

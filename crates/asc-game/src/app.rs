@@ -7,6 +7,7 @@ use asc_render::{Camera, FrameParams, FrameStats, Frustum, Renderer, UiFrame};
 use asc_sim::inventory::{InventoryOp, InventorySnapshot};
 use asc_sim::protocol::{ClientMsg, ServerMsg};
 use asc_sim::rules::find_ground;
+use asc_sim::link::LocalLink;
 use asc_sim::server::{self as srv, Server};
 use asc_world::{EditKind, EditOp, Material, RayHit, World, raycast};
 use glam::{Vec2, Vec3};
@@ -38,8 +39,6 @@ enum BuildTool {
     Piece(Selection),
     Flatten,
 }
-const TICK: Duration = Duration::from_millis(50);
-const MAX_TICKS_PER_FRAME: u32 = 5;
 const FLY_REACH: f32 = 64.0;
 const WALK_REACH: f32 = 5.0;
 /// How close the crosshair must be to an ore node's collider to mine it.
@@ -190,9 +189,13 @@ struct App {
 struct State {
     window: Arc<Window>,
     renderer: Renderer,
-    /// The game itself. The fields below that mirror it (`world`, `building.structures`, the
-    /// scatter's mined nodes, `inventory`, `sim`) only change through its messages.
-    server: Server,
+    /// The game itself, running on its own thread. The fields below that mirror it (`world`,
+    /// `building.structures`, the scatter's mined nodes, `inventory`, `sim`) only change through
+    /// its messages.
+    server: LocalLink,
+    /// The server's last ticks per second and slowest tick.
+    server_stats: (f32, f32),
+    ping: u32,
     /// The world as the server has it (seed plus edits), for meshing, collision and raycasts.
     world: World,
     streamer: Streamer,
@@ -238,7 +241,6 @@ struct State {
 
     started: Instant,
     last_frame: Instant,
-    tick_accumulator: Duration,
     frame_ms: f32,
     /// Longest frame since the last log line, to catch hitches averages hide.
     worst_frame_ms: f32,
@@ -308,6 +310,7 @@ impl State {
         }
         let sim = Sim { ticks: welcome.ticks, time_of_day: welcome.time_of_day };
         let spawn = server.spawn;
+        let server = asc_sim::link::spawn(server);
         let mut player = Player::new(welcome.feet);
         player.mode = welcome.mode;
         (player.yaw, player.pitch) = (welcome.yaw, welcome.pitch);
@@ -340,6 +343,8 @@ impl State {
             window,
             renderer,
             server,
+            server_stats: (0.0, 0.0),
+            ping: 0,
             world,
             streamer,
             far,
@@ -378,7 +383,6 @@ impl State {
             hit: None,
             started: now,
             last_frame: now,
-            tick_accumulator: Duration::ZERO,
             frame_ms: 0.0,
             worst_frame_ms: 0.0,
             worst_update_ms: 0.0,
@@ -424,17 +428,7 @@ impl State {
         self.frame_ms += (dt.as_secs_f32() * 1e3 - self.frame_ms) * 0.05;
         self.worst_frame_ms = self.worst_frame_ms.max(dt.as_secs_f32() * 1e3);
 
-        // Fixed-rate simulation, decoupled from rendering.
-        self.tick_accumulator += dt;
-        let mut ticks = 0;
-        while self.tick_accumulator >= TICK && ticks < MAX_TICKS_PER_FRAME {
-            self.server.tick();
-            self.tick_accumulator -= TICK;
-            ticks += 1;
-        }
-        if ticks == MAX_TICKS_PER_FRAME {
-            self.tick_accumulator = Duration::ZERO;
-        }
+        self.receive();
 
         self.handle_keys(event_loop);
         if self.options.autopilot {
@@ -870,33 +864,67 @@ impl State {
         }
     }
 
-    /// Send a message to the server, and apply what comes back.
     fn send(&mut self, msg: ClientMsg) {
-        self.server.handle(msg);
-        self.receive();
+        self.server.send(msg);
     }
 
-    /// Apply the server's messages to the client's copies of the game.
+    /// Apply the server's messages that have arrived.
     fn receive(&mut self) {
-        let messages: Vec<ServerMsg> = self.server.drain().collect();
-        for msg in messages {
-            match msg {
-                ServerMsg::Welcome(_) => {}
-                ServerMsg::Edited(op) => {
-                    let dirty = self.world.edits.push(op);
-                    self.streamer.invalidate(&dirty);
-                }
-                ServerMsg::PiecePlaced(piece) => self.building.placed(piece),
-                ServerMsg::PieceRemoved(key) => self.building.removed(&key),
-                ServerMsg::NodeMined(id) => self.scatter.remove_node(id),
-                ServerMsg::Inventory(snapshot) => self.inventory_snapshot(&snapshot),
-                ServerMsg::Time { ticks, time_of_day } => {
-                    self.sim.ticks = ticks;
-                    self.sim.time_of_day = time_of_day;
-                }
-                ServerMsg::Notice(text) => self.show_notice(text),
-                ServerMsg::Saved { .. } => {}
+        while let Some(msg) = self.server.try_recv() {
+            self.apply(msg);
+        }
+    }
+
+    /// Wait until the server has handled everything sent so far, applying what it sends back
+    /// (scripted tests that act on the results of their own requests).
+    fn sync(&mut self) {
+        self.ping += 1;
+        let n = self.ping;
+        self.send(ClientMsg::Ping(n));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match self.server.recv_timeout(Duration::from_millis(100)) {
+                Some(ServerMsg::Pong(m)) if m == n => return,
+                Some(msg) => self.apply(msg),
+                None => {}
             }
+        }
+        log::error!("the server didn't answer within 10 s");
+    }
+
+    /// Ask the server to save, and wait for it to finish.
+    fn save_and_wait(&mut self) {
+        self.send(ClientMsg::Save);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match self.server.recv_timeout(Duration::from_millis(100)) {
+                Some(ServerMsg::Saved { .. }) => return,
+                Some(msg) => self.apply(msg),
+                None => {}
+            }
+        }
+        log::error!("the server didn't finish saving within 10 s");
+    }
+
+    /// Apply one server message to the client's copies of the game.
+    fn apply(&mut self, msg: ServerMsg) {
+        match msg {
+            ServerMsg::Welcome(_) => {}
+            ServerMsg::Edited(op) => {
+                let dirty = self.world.edits.push(op);
+                self.streamer.invalidate(&dirty);
+            }
+            ServerMsg::PiecePlaced(piece) => self.building.placed(piece),
+            ServerMsg::PieceRemoved(key) => self.building.removed(&key),
+            ServerMsg::NodeMined(id) => self.scatter.remove_node(id),
+            ServerMsg::Inventory(snapshot) => self.inventory_snapshot(&snapshot),
+            ServerMsg::Time { ticks, time_of_day } => {
+                self.sim.ticks = ticks;
+                self.sim.time_of_day = time_of_day;
+            }
+            ServerMsg::Notice(text) => self.show_notice(text),
+            ServerMsg::Saved { .. } | ServerMsg::Pong(_) => {}
+            ServerMsg::Stats { tps, mspt } => self.server_stats = (tps, mspt),
         }
     }
 
@@ -920,6 +948,7 @@ impl State {
     /// Ask the server to place a piece; whether it did (the reason if not, from its notice).
     fn place_piece(&mut self, piece: asc_build::Piece, gap: f32) -> Result<(), String> {
         self.send(ClientMsg::Place { piece, gap });
+        self.sync();
         if self.building.structures.get(&piece.key) == Some(&piece) {
             Ok(())
         } else {
@@ -1053,6 +1082,8 @@ impl State {
                         self.flatten((cell.as_vec2() + 0.5) * lattice.cell, height);
                     }
                 }
+                // Snapping reads the levelled ground.
+                self.sync();
                 let world = &self.world;
                 let terrain = |x: f32, z: f32| Self::ground_height(world, x, z, height + 5.0);
                 // Foundations snap to the terrain alone, so all nine can be worked out first.
@@ -1397,6 +1428,8 @@ impl State {
             gpu_chunks: self.renderer.chunk_count(),
             ticks: self.sim.ticks,
             time_of_day: self.sim.time_of_day,
+            tps: self.server_stats.0,
+            mspt: self.server_stats.1,
             brush_radius: self.brush_radius,
             fly_speed: self.fly_speed,
             view_radius: self.streamer.view_radius,
@@ -1485,7 +1518,7 @@ impl ApplicationHandler for App {
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(state) = self.state.as_mut() {
-            state.send(ClientMsg::Save);
+            state.save_and_wait();
         }
     }
 

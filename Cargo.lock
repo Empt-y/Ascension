@@ -231,6 +231,7 @@ dependencies = [
  "anyhow",
  "asc-build",
  "asc-world",
+ "crossbeam-channel",
  "dirs",
  "glam",
  "log",

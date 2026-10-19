@@ -286,6 +286,7 @@ impl Server {
                 self.outbox.push(ServerMsg::Time { ticks: self.sim.ticks, time_of_day: self.sim.time_of_day });
             }
             ClientMsg::Save => self.save("saved"),
+            ClientMsg::Ping(n) => self.outbox.push(ServerMsg::Pong(n)),
         }
     }
 

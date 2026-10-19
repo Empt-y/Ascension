@@ -4,6 +4,7 @@
 
 pub mod content;
 pub mod inventory;
+pub mod link;
 pub mod ore_nodes;
 pub mod protocol;
 pub mod rules;

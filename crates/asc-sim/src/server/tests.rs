@@ -157,6 +157,7 @@ fn every_message_survives_postcard() {
         ClientMsg::Inventory { seq: 9, op: InventoryOp::RightClick(4) },
         ClientMsg::SetTime(0.5),
         ClientMsg::Save,
+        ClientMsg::Ping(3),
     ];
     for m in client {
         let bytes = postcard::to_stdvec(&m).unwrap();
@@ -172,6 +173,8 @@ fn every_message_survives_postcard() {
         ServerMsg::Time { ticks: 9, time_of_day: 0.3 },
         ServerMsg::Notice("hi".into()),
         ServerMsg::Saved { ok: true },
+        ServerMsg::Pong(3),
+        ServerMsg::Stats { tps: 19.8, mspt: 0.4 },
     ];
     for m in server_msgs {
         let bytes = postcard::to_stdvec(&m).unwrap();

@@ -12,6 +12,7 @@ asc-world.workspace = true
 asc-build.workspace = true
 glam.workspace = true
 ahash.workspace = true
+crossbeam-channel.workspace = true
 log.workspace = true
 anyhow.workspace = true
 serde.workspace = true

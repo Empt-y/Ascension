@@ -20,6 +20,9 @@ pub struct HudInfo {
     pub gpu_chunks: usize,
     pub ticks: u64,
     pub time_of_day: f32,
+    /// The server's ticks per second and slowest tick (ms).
+    pub tps: f32,
+    pub mspt: f32,
     pub brush_radius: f32,
     pub fly_speed: f32,
     pub view_radius: i32,
@@ -59,6 +62,7 @@ pub fn draw(ctx: &egui::Context, info: &HudInfo) {
             let p = info.position;
             ui.label(format!("pos {:.1} {:.1} {:.1}", p.x, p.y, p.z));
             ui.label(format!("time {}  tick {}", clock(info.time_of_day), info.ticks));
+            ui.label(format!("server {:.1} tps  worst tick {:.2} ms", info.tps, info.mspt));
             ui.label(format!(
                 "{}  {}  {:.1} m/s  physics {:.2} ms",
                 info.mode,
