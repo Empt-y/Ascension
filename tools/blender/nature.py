@@ -197,6 +197,8 @@ def blob(
     mix=0.0,
     bands=0.0,
     basis=None,
+    veins=None,
+    detail=0.0,
 ):
     """A noise-displaced ellipsoid. `floor` flattens it at a height; `top_mat` paints faces whose
     normal points up past `top` (snow, moss); `mat2` paints a noise-chosen share `mix` of faces."""
@@ -205,9 +207,23 @@ def blob(
     off = Vector((rng.uniform(-100, 100), rng.uniform(-100, 100), rng.uniform(-100, 100)))
     c = Vector(center)
     made = {}
+    vein_at = {}
     for v in tmp.verts:
         d = v.co.normalized()
         r = 1.0 + amp * noise.noise(d * freq + off) + amp * 0.5 * noise.noise(d * freq * 2.3 + off * 1.7)
+        if detail > 0.0:
+            # Fine, sharp-edged roughness (cracks and knobs) on top of the broad shape.
+            r += detail * (abs(noise.noise(d * freq * 7.0 + off * 2.3)) - 0.3)
+            r += detail * 0.5 * noise.noise(d * freq * 15.0 + off * 3.1)
+        if veins is not None:
+            # Meandering veins along the contours of a noise field (they branch and wander like
+            # real ones), standing a little proud of the rock: `veins` = (frequency, width, relief).
+            vfreq, width, relief = veins
+            q = Vector((d.x * radii[0], d.y * radii[1], d.z * radii[2]))
+            t = abs(noise.noise(q * vfreq + off * 0.3)) + 0.35 * abs(noise.noise(q * vfreq * 2.1 + off * 0.7))
+            strength = 1.0 - smoothstep(width * 0.55, width, t)
+            vein_at[v] = strength
+            r += relief * strength / max(radii)
         if basis is None:
             p = Vector((d.x * radii[0], d.y * radii[1], d.z * radii[2])) * r + c
         else:
@@ -218,20 +234,63 @@ def blob(
         made[v] = m.bm.verts.new(g2b(p))
     # The icosphere's coordinates are reused as game directions; game_to_blender is a proper
     # rotation, so its outward winding survives.
-    for f in tmp.faces:
-        face = m.bm.faces.new([made[v] for v in f.verts])
+    #
+    # With `mat2`, a scalar field over the vertices decides which material each point gets (above
+    # 0.5 is mat2). Triangles that straddle the 0.5 contour are cut exactly along it, so veins,
+    # strata and patches get smooth outlines instead of following the triangles.
+    field = None
+    if mat2 is not None:
+        if veins is not None:
+            field = {v: vein_at[v] for v in tmp.verts}
+        elif bands > 0.0:
+            def band(v):
+                c = made[v].co
+                # Strata `bands` metres thick (Blender z is game y), warped to undulate like real
+                # sediment.
+                h = c.z + 0.6 * bands * noise.noise(c * 2.2 + off) + 0.25 * (c.x * 0.3 - c.y * 0.2)
+                return 0.5 + 0.5 * math.sin(math.pi * h / bands)
+            field = {v: band(v) for v in tmp.verts}
+        else:
+            field = {v: noise.noise(made[v].co * 1.7 + off) - (1.0 - 2.0 * mix) + 0.5 for v in tmp.verts}
+    crossings = {}
+
+    def crossing(a, b):
+        key = (a.index, b.index) if a.index < b.index else (b.index, a.index)
+        if key not in crossings:
+            fa, fb = field[a], field[b]
+            t = (0.5 - fa) / (fb - fa)
+            crossings[key] = m.bm.verts.new(made[a].co.lerp(made[b].co, t))
+        return crossings[key]
+
+    tmp.verts.index_update()
+
+    def emit(verts, chosen):
+        face = m.bm.faces.new(verts)
         face.smooth = smooth
         face.normal_update()
-        chosen = mat
-        if mat2 is not None and bands > 0.0:
-            # Horizontal strata `bands` metres thick (Blender z is game y).
-            if int(math.floor(face.calc_center_median().z / bands)) % 2:
-                chosen = mat2
-        elif mat2 is not None and noise.noise(face.calc_center_median() * 1.7 + off) > 1.0 - 2.0 * mix:
-            chosen = mat2
         if top_mat is not None and face.normal.z > top:
             chosen = top_mat
         face.material_index = m.mat_index(chosen)
+
+    for f in tmp.faces:
+        vs = list(f.verts)
+        if field is None:
+            emit([made[v] for v in vs], mat)
+            continue
+        inside = [field[v] > 0.5 for v in vs]
+        if all(inside) or not any(inside):
+            emit([made[v] for v in vs], mat2 if inside[0] else mat)
+            continue
+        polys = {True: [], False: []}
+        for i, v in enumerate(vs):
+            w = vs[(i + 1) % len(vs)]
+            polys[inside[i]].append(made[v])
+            if inside[i] != inside[(i + 1) % len(vs)]:
+                c = crossing(v, w)
+                polys[True].append(c)
+                polys[False].append(c)
+        emit(polys[True], mat2)
+        emit(polys[False], mat)
     tmp.free()
 
 
@@ -1291,4 +1350,5 @@ def main():
     print("PARTS DONE", flush=True)
 
 
-main()
+if __name__ == "__main__":
+    main()

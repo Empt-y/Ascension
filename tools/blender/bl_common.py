@@ -5,6 +5,7 @@ Geometry is authored in game coordinates (x right, y up, z towards the viewer, m
 """
 
 import math
+import os
 
 import bpy
 from mathutils import Vector
@@ -67,14 +68,21 @@ def export(obj, path):
 
 def render_preview(obj, path):
     scene = bpy.context.scene
-    for engine in ("BLENDER_EEVEE", "BLENDER_EEVEE_NEXT", "CYCLES"):
+    # ASC_PREVIEW_CPU=1 renders with Cycles on two CPU threads instead of EEVEE on the GPU (slower,
+    # but it leaves the GPU alone, e.g. while someone is playing a game).
+    cpu_only = os.environ.get("ASC_PREVIEW_CPU") == "1"
+    for engine in (("CYCLES",) if cpu_only else ("BLENDER_EEVEE", "BLENDER_EEVEE_NEXT", "CYCLES")):
         try:
             scene.render.engine = engine
             break
         except TypeError:
             continue
     if scene.render.engine == "CYCLES":
-        scene.cycles.samples = 32
+        scene.cycles.samples = 16 if cpu_only else 32
+        scene.cycles.device = "CPU"
+        if cpu_only:
+            scene.render.threads_mode = "FIXED"
+            scene.render.threads = 2
     scene.render.resolution_x = 640
     scene.render.resolution_y = 480
     scene.render.film_transparent = False

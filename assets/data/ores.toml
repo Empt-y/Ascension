@@ -1,0 +1,485 @@
+# Ores, GregTech: New Horizons style: many real minerals, found together in veins.
+#
+# Each ore gets two models from tools/blender/ores.py (run `python tools/build_ores.py`):
+#   <id>_surface.glb  a small outcrop on the ground, hinting at the vein below (like GT's surface
+#                     indicator rocks)
+#   <id>_deep.glb     the vein itself underground: a bigger node on a flat base, for cave floors
+#                     and walls
+#
+# Fields:
+#   formula   chemical formula, shown in tooltips
+#   tier      tool tier needed to mine it: 0 stone, 1 bronze, 2 steel, 3 aluminium, 4 stainless,
+#             5 titanium
+#   vein      which vein it belongs to (veins mix several ores; worldgen will place them)
+#   style     how it looks: "metal" (veins and nuggets through the rock), "crystal" (hexagonal
+#             prisms), "cubic" (cube crystals), "earthy" (lumpy patches), "banded" (strata)
+#   color     linear base colour of the ore; metallic and roughness as in glTF
+
+# --- Coal and lignite ---------------------------------------------------------------------------
+
+[[ore]]
+id = "coal"
+name = "Coal"
+formula = "C"
+tier = 0
+vein = "coal"
+style = "earthy"
+color = [0.025, 0.025, 0.03]
+metallic = 0.0
+roughness = 0.35
+
+[[ore]]
+id = "lignite"
+name = "Lignite"
+formula = "C2(H2O)4C"
+tier = 0
+vein = "coal"
+style = "banded"
+color = [0.07, 0.05, 0.035]
+metallic = 0.0
+roughness = 0.6
+
+# --- Iron ------------------------------------------------------------------------------------------
+
+[[ore]]
+id = "iron"
+name = "Iron"
+formula = "Fe"
+tier = 1
+vein = "iron"
+style = "metal"
+color = [0.52, 0.42, 0.36]
+metallic = 0.85
+roughness = 0.45
+
+[[ore]]
+id = "magnetite"
+name = "Magnetite"
+formula = "Fe3O4"
+tier = 1
+vein = "magnetite"
+style = "metal"
+color = [0.05, 0.05, 0.06]
+metallic = 0.7
+roughness = 0.3
+
+[[ore]]
+id = "brown_limonite"
+name = "Brown Limonite"
+formula = "FeO(OH)"
+tier = 1
+vein = "iron"
+style = "earthy"
+color = [0.24, 0.11, 0.035]
+metallic = 0.0
+roughness = 0.8
+
+[[ore]]
+id = "yellow_limonite"
+name = "Yellow Limonite"
+formula = "FeO(OH)"
+tier = 1
+vein = "iron"
+style = "earthy"
+color = [0.55, 0.4, 0.08]
+metallic = 0.0
+roughness = 0.8
+
+[[ore]]
+id = "banded_iron"
+name = "Banded Iron"
+formula = "Fe2O3"
+tier = 1
+vein = "iron"
+style = "banded"
+color = [0.34, 0.07, 0.045]
+metallic = 0.3
+roughness = 0.5
+
+[[ore]]
+id = "pyrite"
+name = "Pyrite"
+formula = "FeS2"
+tier = 1
+vein = "copper"
+style = "cubic"
+color = [0.68, 0.55, 0.16]
+metallic = 0.9
+roughness = 0.25
+
+# --- Copper and tin --------------------------------------------------------------------------------
+
+[[ore]]
+id = "copper"
+name = "Copper"
+formula = "Cu"
+tier = 0
+vein = "copper"
+style = "metal"
+color = [0.62, 0.28, 0.13]
+metallic = 0.9
+roughness = 0.35
+
+[[ore]]
+id = "chalcopyrite"
+name = "Chalcopyrite"
+formula = "CuFeS2"
+tier = 1
+vein = "copper"
+style = "metal"
+color = [0.55, 0.42, 0.12]
+metallic = 0.75
+roughness = 0.3
+
+[[ore]]
+id = "malachite"
+name = "Malachite"
+formula = "Cu2CO3(OH)2"
+tier = 1
+vein = "iron"
+style = "banded"
+color = [0.03, 0.34, 0.14]
+metallic = 0.0
+roughness = 0.35
+
+[[ore]]
+id = "tetrahedrite"
+name = "Tetrahedrite"
+formula = "Cu3SbS3Fe"
+tier = 1
+vein = "tin"
+style = "crystal"
+color = [0.26, 0.14, 0.12]
+metallic = 0.6
+roughness = 0.3
+
+[[ore]]
+id = "tin"
+name = "Tin"
+formula = "Sn"
+tier = 0
+vein = "tin"
+style = "metal"
+color = [0.68, 0.68, 0.72]
+metallic = 0.9
+roughness = 0.4
+
+[[ore]]
+id = "cassiterite"
+name = "Cassiterite"
+formula = "SnO2"
+tier = 1
+vein = "tin"
+style = "crystal"
+color = [0.11, 0.08, 0.06]
+metallic = 0.2
+roughness = 0.2
+
+# --- Lead, silver, zinc, nickel --------------------------------------------------------------------
+
+[[ore]]
+id = "galena"
+name = "Galena"
+formula = "PbS"
+tier = 2
+vein = "galena"
+style = "cubic"
+color = [0.32, 0.32, 0.4]
+metallic = 0.85
+roughness = 0.25
+
+[[ore]]
+id = "silver"
+name = "Silver"
+formula = "Ag"
+tier = 2
+vein = "galena"
+style = "metal"
+color = [0.82, 0.82, 0.86]
+metallic = 1.0
+roughness = 0.25
+
+[[ore]]
+id = "sphalerite"
+name = "Sphalerite"
+formula = "ZnS"
+tier = 1
+vein = "sulfur"
+style = "crystal"
+color = [0.4, 0.22, 0.04]
+metallic = 0.1
+roughness = 0.15
+
+[[ore]]
+id = "pentlandite"
+name = "Pentlandite"
+formula = "(Fe,Ni)9S8"
+tier = 2
+vein = "nickel"
+style = "metal"
+color = [0.52, 0.47, 0.26]
+metallic = 0.8
+roughness = 0.35
+
+[[ore]]
+id = "garnierite"
+name = "Garnierite"
+formula = "NiO"
+tier = 2
+vein = "nickel"
+style = "earthy"
+color = [0.12, 0.38, 0.18]
+metallic = 0.0
+roughness = 0.7
+
+# --- Gold and platinum -----------------------------------------------------------------------------
+
+[[ore]]
+id = "gold"
+name = "Gold"
+formula = "Au"
+tier = 2
+vein = "magnetite"
+style = "metal"
+color = [0.92, 0.62, 0.14]
+metallic = 1.0
+roughness = 0.25
+
+[[ore]]
+id = "cooperite"
+name = "Cooperite"
+formula = "PtS"
+tier = 4
+vein = "platinum"
+style = "metal"
+color = [0.72, 0.7, 0.58]
+metallic = 0.95
+roughness = 0.3
+
+# --- Aluminium, titanium, tungsten, chrome ---------------------------------------------------------
+
+[[ore]]
+id = "bauxite"
+name = "Bauxite"
+formula = "Al2O3"
+tier = 2
+vein = "bauxite"
+style = "earthy"
+color = [0.42, 0.17, 0.07]
+metallic = 0.0
+roughness = 0.85
+
+[[ore]]
+id = "ilmenite"
+name = "Ilmenite"
+formula = "FeTiO3"
+tier = 3
+vein = "bauxite"
+style = "metal"
+color = [0.09, 0.07, 0.09]
+metallic = 0.6
+roughness = 0.3
+
+[[ore]]
+id = "scheelite"
+name = "Scheelite"
+formula = "CaWO4"
+tier = 4
+vein = "tungstate"
+style = "crystal"
+color = [0.72, 0.52, 0.28]
+metallic = 0.0
+roughness = 0.2
+
+[[ore]]
+id = "chromite"
+name = "Chromite"
+formula = "FeCr2O4"
+tier = 3
+vein = "chromite"
+style = "metal"
+color = [0.13, 0.08, 0.08]
+metallic = 0.65
+roughness = 0.3
+
+# --- Uranium and rare earths -----------------------------------------------------------------------
+
+[[ore]]
+id = "uraninite"
+name = "Uraninite"
+formula = "UO2"
+tier = 4
+vein = "uranium"
+style = "metal"
+color = [0.04, 0.045, 0.04]
+metallic = 0.5
+roughness = 0.3
+
+[[ore]]
+id = "pitchblende"
+name = "Pitchblende"
+formula = "UO2"
+tier = 4
+vein = "uranium"
+style = "earthy"
+color = [0.16, 0.2, 0.04]
+metallic = 0.0
+roughness = 0.5
+
+[[ore]]
+id = "monazite"
+name = "Monazite"
+formula = "(Ce,La,Nd)PO4"
+tier = 3
+vein = "monazite"
+style = "crystal"
+color = [0.5, 0.18, 0.08]
+metallic = 0.0
+roughness = 0.2
+
+# --- Redstone, gems and crystals -------------------------------------------------------------------
+
+[[ore]]
+id = "redstone"
+name = "Redstone"
+formula = "Si(FeS2)5(CrAl2O3)Hg3"
+tier = 2
+vein = "redstone"
+style = "crystal"
+color = [0.7, 0.02, 0.02]
+metallic = 0.0
+roughness = 0.3
+
+[[ore]]
+id = "cinnabar"
+name = "Cinnabar"
+formula = "HgS"
+tier = 2
+vein = "redstone"
+style = "crystal"
+color = [0.55, 0.04, 0.05]
+metallic = 0.1
+roughness = 0.25
+
+[[ore]]
+id = "ruby"
+name = "Ruby"
+formula = "Al2O3Cr"
+tier = 2
+vein = "redstone"
+style = "crystal"
+color = [0.75, 0.01, 0.08]
+metallic = 0.0
+roughness = 0.08
+
+[[ore]]
+id = "sapphire"
+name = "Sapphire"
+formula = "Al2O3"
+tier = 3
+vein = "sapphire"
+style = "crystal"
+color = [0.04, 0.12, 0.8]
+metallic = 0.0
+roughness = 0.08
+
+[[ore]]
+id = "emerald"
+name = "Emerald"
+formula = "Be3Al2Si6O18"
+tier = 3
+vein = "beryllium"
+style = "crystal"
+color = [0.03, 0.6, 0.22]
+metallic = 0.0
+roughness = 0.08
+
+[[ore]]
+id = "diamond"
+name = "Diamond"
+formula = "C"
+tier = 3
+vein = "diamond"
+style = "crystal"
+color = [0.75, 0.92, 1.0]
+metallic = 0.0
+roughness = 0.05
+
+[[ore]]
+id = "graphite"
+name = "Graphite"
+formula = "C"
+tier = 2
+vein = "diamond"
+style = "metal"
+color = [0.09, 0.09, 0.1]
+metallic = 0.5
+roughness = 0.45
+
+[[ore]]
+id = "lapis"
+name = "Lapis"
+formula = "(Al6Si6Ca8Na8)8"
+tier = 1
+vein = "lapis"
+style = "earthy"
+color = [0.04, 0.1, 0.6]
+metallic = 0.0
+roughness = 0.4
+
+[[ore]]
+id = "certus_quartz"
+name = "Certus Quartz"
+formula = "SiO2"
+tier = 2
+vein = "quartz"
+style = "crystal"
+color = [0.68, 0.84, 0.95]
+metallic = 0.0
+roughness = 0.08
+
+[[ore]]
+id = "apatite"
+name = "Apatite"
+formula = "Ca5(PO4)3Cl"
+tier = 1
+vein = "apatite"
+style = "crystal"
+color = [0.12, 0.5, 0.58]
+metallic = 0.0
+roughness = 0.15
+
+[[ore]]
+id = "olivine"
+name = "Olivine"
+formula = "Mg2Fe(SiO2)2"
+tier = 2
+vein = "olivine"
+style = "crystal"
+color = [0.32, 0.52, 0.08]
+metallic = 0.0
+roughness = 0.12
+
+# --- Salts and sulfur ------------------------------------------------------------------------------
+
+[[ore]]
+id = "rock_salt"
+name = "Rock Salt"
+formula = "KCl"
+tier = 0
+vein = "salt"
+style = "cubic"
+color = [0.82, 0.78, 0.74]
+metallic = 0.0
+roughness = 0.3
+
+[[ore]]
+id = "sulfur"
+name = "Sulfur"
+formula = "S"
+tier = 1
+vein = "sulfur"
+style = "earthy"
+color = [0.85, 0.72, 0.04]
+metallic = 0.0
+roughness = 0.5

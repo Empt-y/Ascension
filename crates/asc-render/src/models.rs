@@ -202,6 +202,24 @@ mod tests {
     }
 
     #[test]
+    fn every_ore_model_loads() {
+        let spec = std::fs::read_to_string(models_dir().join("../data/ores.toml")).unwrap();
+        let ores = spec.matches("[[ore]]").count();
+        let mut count = 0;
+        for entry in std::fs::read_dir(models_dir().join("ores")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "glb") {
+                let model = load_glb(&std::fs::read(&path).unwrap())
+                    .unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+                assert!(model.triangles() >= 60, "{}", path.display());
+                assert!(model.min.y > -0.61, "{}: {}", path.display(), model.min);
+                count += 1;
+            }
+        }
+        assert_eq!(count, 2 * ores);
+    }
+
+    #[test]
     fn wall_bounds_match_the_spec() {
         let model = load_glb(&std::fs::read(models_dir().join("stone_wall.glb")).unwrap()).unwrap();
         let close = |a: Vec3, b: Vec3| (a - b).abs().max_element() < 1e-3;
