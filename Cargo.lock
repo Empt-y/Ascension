@@ -231,6 +231,7 @@ dependencies = [
  "fastnoise-lite",
  "glam",
  "serde",
+ "toml",
 ]
 
 [[package]]

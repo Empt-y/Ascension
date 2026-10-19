@@ -9,6 +9,7 @@ mod collide;
 mod edit;
 mod material;
 mod mesh;
+pub mod ores;
 mod raycast;
 mod worldgen;
 
