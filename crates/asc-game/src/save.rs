@@ -1,7 +1,8 @@
 //! Saving and loading worlds.
 //!
 //! A world is a directory: `world.toml` (seed, time), `player.toml` (position, inventory) and
-//! `edits.bin` (every terrain edit, postcard-encoded). Terrain itself is never saved: it is rebuilt
+//! `edits.bin` (every terrain edit, postcard-encoded), `structures.bin` (building pieces) and
+//! `nodes.bin` (the ore nodes mined away). Terrain itself is never saved: it is rebuilt
 //! from the seed plus the edits. Each file is written atomically (to `.tmp`, the old copy kept as
 //! `.bak`, then renamed into place) and loading falls back to `.bak` if a file is damaged.
 
@@ -14,9 +15,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::player::Mode;
 
-/// Bumped when the save layout changes. 2 added `structures.bin`; version 1 saves load with no
-/// structures.
-pub const FORMAT_VERSION: u32 = 2;
+/// Bumped when the save layout changes. 2 added `structures.bin`, 3 `nodes.bin`; older saves load
+/// without them.
+pub const FORMAT_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorldMeta {
@@ -60,6 +61,14 @@ pub struct SaveGame {
     pub player: PlayerSave,
     pub ops: Vec<EditOp>,
     pub structures: Vec<asc_build::Piece>,
+    /// Ore nodes mined away, by `scatter::node_id`.
+    pub nodes: Vec<[i32; 3]>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct NodesFile {
+    format_version: u32,
+    mined: Vec<[i32; 3]>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -119,6 +128,8 @@ pub fn save(dir: &Path, game: &SaveGame) -> Result<()> {
     write_atomic(&dir.join("edits.bin"), &postcard::to_stdvec(&edits)?)?;
     let structures = StructuresFile { format_version: FORMAT_VERSION, pieces: game.structures.clone() };
     write_atomic(&dir.join("structures.bin"), &postcard::to_stdvec(&structures)?)?;
+    let nodes = NodesFile { format_version: FORMAT_VERSION, mined: game.nodes.clone() };
+    write_atomic(&dir.join("nodes.bin"), &postcard::to_stdvec(&nodes)?)?;
     Ok(())
 }
 
@@ -152,7 +163,14 @@ pub fn load(dir: &Path) -> Result<Option<SaveGame>> {
         let file: StructuresFile = read_with_backup(&structures_path, |b| Ok(postcard::from_bytes(b)?))?;
         file.pieces
     };
-    Ok(Some(SaveGame { meta, player, ops: edits.ops, structures }))
+    let nodes_path = dir.join("nodes.bin");
+    let nodes = if meta.format_version < 3 && !nodes_path.exists() {
+        Vec::new()
+    } else {
+        let file: NodesFile = read_with_backup(&nodes_path, |b| Ok(postcard::from_bytes(b)?))?;
+        file.mined
+    };
+    Ok(Some(SaveGame { meta, player, ops: edits.ops, structures, nodes }))
 }
 
 #[cfg(test)]
@@ -208,6 +226,7 @@ mod tests {
                     grounded: false,
                 },
             ],
+            nodes: vec![[12, -40, 7], [-3, 5, 900]],
         }
     }
 
@@ -218,8 +237,10 @@ mod tests {
         game.meta.format_version = 1;
         save(&dir, &game).unwrap();
         std::fs::remove_file(dir.join("structures.bin")).unwrap();
+        std::fs::remove_file(dir.join("nodes.bin")).unwrap();
         let loaded = load(&dir).unwrap().unwrap();
         assert!(loaded.structures.is_empty());
+        assert!(loaded.nodes.is_empty());
         assert_eq!(loaded.ops, game.ops);
         let _ = std::fs::remove_dir_all(&dir);
     }

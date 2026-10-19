@@ -8,6 +8,9 @@
 //! distance. On the main thread instances are dropped where the ground has been dug or filled or a
 //! building stands, then handed to the renderer as one batch per (column, kind). Trunks and big
 //! rocks become colliders.
+//!
+//! Ore nodes (see `ore_nodes`) stream as two more kinds, placed by their own rules. They can be
+//! mined away; the ones that have been are kept in a set and filtered out like dug instances.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -20,7 +23,7 @@ use asc_world::{Biome, World, WorldGen};
 use crossbeam_channel::{Receiver, Sender};
 use glam::{IVec2, Vec2, Vec3};
 
-use crate::assets::{Collide, NatureModels};
+use crate::assets::{Collide, NatureModels, OreModels};
 
 /// Side of a scatter column in metres (the terrain chunk size).
 pub const COLUMN: f32 = 32.0;
@@ -39,6 +42,13 @@ struct Model {
     center_y: f32,
 }
 
+/// Which ore nodes a kind places.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeKind {
+    Surface,
+    Deep,
+}
+
 #[derive(Clone, Debug)]
 struct Kind {
     name: String,
@@ -53,6 +63,13 @@ struct Kind {
     cell: f32,
     density: [f32; Biome::ALL.len()],
     models: [Vec<Model>; Biome::ALL.len()],
+    /// Ore node kinds: which nodes, and each ore's model.
+    nodes: Option<(NodeKind, Vec<Model>)>,
+}
+
+fn rock_collider(min: Vec3, max: Vec3) -> (f32, f32) {
+    let half = (max - min) * 0.5;
+    (0.85 * half.x.min(half.z).min(half.y * 1.3), (max.y + min.y) * 0.5)
 }
 
 /// Everything the generator needs, shared with the worker.
@@ -62,7 +79,7 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn new(seed: i32, nature: &NatureModels) -> Self {
+    pub fn new(seed: i32, nature: &NatureModels, ores: Option<&OreModels>) -> Self {
         // Debugging aid: ASC_SCATTER_ONLY=tree,rock scatters only those kinds.
         let only: Option<Vec<String>> =
             std::env::var("ASC_SCATTER_ONLY").ok().map(|v| v.split(',').map(str::to_owned).collect());
@@ -78,12 +95,9 @@ impl Config {
                         nature.density.get(biome.name()).and_then(|d| d.get(name)).copied().unwrap_or(0.0);
                     for m in &nature.models {
                         if m.spec.kind == *name && m.spec.biomes.iter().any(|b| b == biome.name()) {
-                            let half = (m.max - m.min) * 0.5;
                             let (radius, center_y) = match spec.collide {
                                 Collide::Trunk => (0.3, 0.0),
-                                Collide::Rock => {
-                                    (0.85 * half.x.min(half.z).min(half.y * 1.3), (m.max.y + m.min.y) * 0.5)
-                                }
+                                Collide::Rock => rock_collider(m.min, m.max),
                                 Collide::None => (0.0, 0.0),
                             };
                             models[i].push(Model { id: m.id, radius, center_y });
@@ -103,9 +117,43 @@ impl Config {
                     cell: if max > 0.0 { 1.0 / max.sqrt() } else { 0.0 },
                     density,
                     models,
+                    nodes: None,
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let mut kinds = kinds;
+        if let Some(ores) = ores {
+            let node_kind = |name: &str, node: NodeKind, distance: f32, shadow: f32| {
+                let list = match node {
+                    NodeKind::Surface => &ores.surface,
+                    NodeKind::Deep => &ores.deep,
+                };
+                let models = list
+                    .iter()
+                    .map(|m| {
+                        let (radius, center_y) = rock_collider(m.min, m.max);
+                        Model { id: m.id, radius, center_y }
+                    })
+                    .collect();
+                Kind {
+                    name: name.into(),
+                    distance,
+                    fade: distance * 0.2,
+                    scale: [1.0, 1.0],
+                    sway: 0.0,
+                    max_slope: f32::MAX,
+                    shadow_distance: shadow,
+                    collide: Collide::Rock,
+                    cell: 1.0,
+                    density: [0.0; Biome::ALL.len()],
+                    models: Default::default(),
+                    nodes: Some((node, models)),
+                }
+            };
+            kinds.push(node_kind("ore_surface", NodeKind::Surface, 150.0, 50.0));
+            // Underground: no sun reaches them, so no shadows.
+            kinds.push(node_kind("ore_deep", NodeKind::Deep, 80.0, 0.0));
+        }
         Self { seed: seed as u32 as u64, kinds }
     }
 
@@ -126,6 +174,24 @@ pub struct Placed {
     /// Collider radius and centre height (rocks), already scaled.
     collider_radius: f32,
     collider_center: f32,
+    /// Ore nodes: which ore.
+    pub ore: Option<u16>,
+}
+
+/// A node's identity: its position on a quarter-metre grid (placement is deterministic, so this
+/// names the same node in every session).
+pub type NodeId = glam::IVec3;
+
+pub fn node_id(p: Vec3) -> NodeId {
+    (p * 4.0).round().as_ivec3()
+}
+
+/// The ore node a crosshair is on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NodeHit {
+    pub id: NodeId,
+    pub ore: usize,
+    pub kind: NodeKind,
 }
 
 fn splitmix(mut x: u64) -> u64 {
@@ -147,6 +213,27 @@ impl Rng {
 /// The instances of `kind` in `column`. Pure: the same inputs always give the same instances.
 pub fn generate(config: &Config, worldgen: &WorldGen, column: IVec2, kind: usize) -> Vec<Placed> {
     let k = &config.kinds[kind];
+    if let Some((node, models)) = &k.nodes {
+        let nodes = match node {
+            NodeKind::Surface => crate::ore_nodes::surface(config.seed, worldgen, column),
+            NodeKind::Deep => crate::ore_nodes::deep(config.seed, worldgen, column),
+        };
+        return nodes
+            .into_iter()
+            .filter_map(|n| {
+                let m = models.get(n.ore)?;
+                Some(Placed {
+                    model: m.id,
+                    position: n.position,
+                    yaw: n.yaw,
+                    scale: n.scale,
+                    collider_radius: m.radius * n.scale,
+                    collider_center: m.center_y * n.scale,
+                    ore: Some(n.ore as u16),
+                })
+            })
+            .collect();
+    }
     let mut out = Vec::new();
     if k.cell <= 0.0 {
         return out;
@@ -201,6 +288,7 @@ pub fn generate(config: &Config, worldgen: &WorldGen, column: IVec2, kind: usize
                 scale,
                 collider_radius: m.radius * scale,
                 collider_center: m.center_y * scale,
+                ore: None,
             });
         }
     }
@@ -228,6 +316,8 @@ struct Collider {
     a: Vec3,
     b: Vec3,
     radius: f32,
+    /// Set for ore nodes.
+    node: Option<NodeHit>,
 }
 
 impl Collider {
@@ -260,6 +350,8 @@ pub struct Scatter {
     /// Batches to (re)filter and hand to the renderer.
     dirty: HashSet<Key>,
     colliders: HashMap<IVec2, Vec<Collider>>,
+    /// Ore nodes that have been mined away.
+    removed: HashSet<NodeId>,
     last_center: Option<IVec2>,
     stats: ScatterStats,
 }
@@ -310,6 +402,7 @@ impl Scatter {
             in_flight: HashSet::new(),
             dirty: HashSet::new(),
             colliders: HashMap::new(),
+            removed: HashSet::new(),
             last_center: None,
             stats: ScatterStats::default(),
         }
@@ -387,7 +480,8 @@ impl Scatter {
     fn upload(&mut self, key: Key, world: &World, structures: &Structures, renderer: &mut Renderer) {
         let Some(raw) = self.raw.get(&key) else { return };
         let k = &self.config.kinds[key.1];
-        let kept: Vec<&Placed> = raw.iter().filter(|p| keep(world, structures, p.position)).collect();
+        let removed = &self.removed;
+        let kept: Vec<&Placed> = raw.iter().filter(|p| keep(world, structures, removed, p)).collect();
         let instances = kept
             .iter()
             .map(|p| PartInstance {
@@ -415,16 +509,23 @@ impl Scatter {
                     continue;
                 }
                 let Some(raw) = self.raw.get(&(key.0, kind)) else { continue };
-                for p in raw.iter().filter(|p| keep(world, structures, p.position)) {
+                for p in raw.iter().filter(|p| keep(world, structures, removed, p)) {
+                    let node = match (&kk.nodes, p.ore) {
+                        (Some((node, _)), Some(ore)) => {
+                            Some(NodeHit { id: node_id(p.position), ore: ore as usize, kind: *node })
+                        }
+                        _ => None,
+                    };
                     match kk.collide {
                         Collide::Trunk => list.push(Collider {
                             a: p.position - Vec3::Y * 0.5,
                             b: p.position + Vec3::Y * (3.5 * p.scale),
                             radius: p.collider_radius,
+                            node,
                         }),
-                        Collide::Rock if p.collider_radius > 0.25 => {
+                        Collide::Rock if p.collider_radius > 0.25 || node.is_some() => {
                             let c = p.position + Vec3::Y * p.collider_center;
-                            list.push(Collider { a: c, b: c, radius: p.collider_radius });
+                            list.push(Collider { a: c, b: c, radius: p.collider_radius, node });
                         }
                         _ => {}
                     }
@@ -444,6 +545,44 @@ impl Scatter {
         }
     }
 
+    /// The ore node whose collider `p` is on (within `tolerance`), if any.
+    pub fn node_at(&self, p: Vec3, tolerance: f32) -> Option<NodeHit> {
+        let column = (Vec2::new(p.x, p.z) / COLUMN).floor().as_ivec2();
+        let mut best: Option<(f32, NodeHit)> = None;
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                for c in self.colliders.get(&(column + IVec2::new(dx, dz))).into_iter().flatten() {
+                    if let Some(node) = c.node {
+                        let d = c.distance(p);
+                        if d < tolerance && best.is_none_or(|(b, _)| d < b) {
+                            best = Some((d, node));
+                        }
+                    }
+                }
+            }
+        }
+        best.map(|(_, n)| n)
+    }
+
+    /// Take a node out of the world (it has been mined).
+    pub fn remove_node(&mut self, id: NodeId) {
+        self.removed.insert(id);
+        self.invalidate(id.as_vec3() / 4.0, 1.0);
+    }
+
+    /// The nodes mined so far, for saving.
+    pub fn removed_nodes(&self) -> Vec<NodeId> {
+        let mut v: Vec<NodeId> = self.removed.iter().copied().collect();
+        v.sort_by_key(|n| (n.x, n.y, n.z));
+        v
+    }
+
+    /// Restore the mined nodes from a save.
+    pub fn set_removed_nodes(&mut self, nodes: impl IntoIterator<Item = NodeId>) {
+        self.removed = nodes.into_iter().collect();
+        self.dirty.extend(self.raw.keys().copied());
+    }
+
     /// Signed distance to the nearest trunk or rock collider (large when there's none nearby).
     pub fn sdf(&self, p: Vec3) -> f32 {
         let column = (Vec2::new(p.x, p.z) / COLUMN).floor().as_ivec2();
@@ -461,8 +600,13 @@ impl Scatter {
     }
 }
 
-/// Whether an instance standing at `p` still has its ground and isn't in a building's way.
-fn keep(world: &World, structures: &Structures, p: Vec3) -> bool {
+/// Whether an instance still has its ground, isn't in a building's way and (ore nodes) hasn't
+/// been mined.
+fn keep(world: &World, structures: &Structures, removed: &HashSet<NodeId>, placed: &Placed) -> bool {
+    let p = placed.position;
+    if placed.ore.is_some() && removed.contains(&node_id(p)) {
+        return false;
+    }
     if structures.sdf(p + Vec3::Y * 0.5) < 1.0 {
         return false;
     }
@@ -518,7 +662,7 @@ mod tests {
                 })
                 .collect(),
         };
-        Config::new(1337, &nature)
+        Config::new(1337, &nature, None)
     }
 
     #[test]
@@ -586,7 +730,7 @@ mod tests {
 
     #[test]
     fn capsule_distance() {
-        let c = Collider { a: Vec3::ZERO, b: Vec3::Y * 4.0, radius: 0.3 };
+        let c = Collider { a: Vec3::ZERO, b: Vec3::Y * 4.0, radius: 0.3, node: None };
         assert!((c.distance(Vec3::new(1.0, 2.0, 0.0)) - 0.7).abs() < 1e-5);
         assert!((c.distance(Vec3::new(0.0, 5.0, 0.0)) - 0.7).abs() < 1e-5);
         assert!(c.distance(Vec3::new(0.1, 1.0, 0.0)) < 0.0);

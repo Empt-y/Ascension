@@ -174,6 +174,40 @@ impl NatureModels {
     }
 }
 
+/// A loaded ore node model: renderer id and model-space bounds.
+pub struct OreModel {
+    pub id: ModelId,
+    pub min: glam::Vec3,
+    pub max: glam::Vec3,
+}
+
+/// Every ore's two node models (`models/ores/<id>_surface.glb` and `<id>_deep.glb`), indexed like
+/// `asc_world::ores::builtin().ores`.
+pub struct OreModels {
+    pub surface: Vec<OreModel>,
+    pub deep: Vec<OreModel>,
+}
+
+impl OreModels {
+    pub fn load(renderer: &mut Renderer) -> Result<Self> {
+        let dir = root()?.join("models").join("ores");
+        let mut load = |name: String| -> Result<OreModel> {
+            let path = dir.join(name);
+            let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            let data = asc_render::models::load_glb(&bytes)
+                .with_context(|| format!("loading {}", path.display()))?;
+            Ok(OreModel { id: renderer.add_model(&data), min: data.min, max: data.max })
+        };
+        let (mut surface, mut deep) = (Vec::new(), Vec::new());
+        for ore in &asc_world::ores::builtin().ores {
+            surface.push(load(format!("{}_surface.glb", ore.id))?);
+            deep.push(load(format!("{}_deep.glb", ore.id))?);
+        }
+        log::info!("loaded {} ore node models", surface.len() + deep.len());
+        Ok(Self { surface, deep })
+    }
+}
+
 /// Decode the Blender preview renders into egui textures, `[tier][kind]`.
 pub fn load_previews(ctx: &egui::Context, spec: &BuildingSpec) -> Result<Vec<[egui::TextureHandle; 3]>> {
     let dir = root()?.join("models").join("previews");

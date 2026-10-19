@@ -5,6 +5,7 @@ use glam::Vec3;
 
 use crate::content::Content;
 use crate::inventory::Inventory;
+use crate::scatter::{NodeHit, NodeId};
 
 /// Radius of one bite (and of one placed lump).
 pub const BITE_RADIUS: f32 = 0.9;
@@ -19,6 +20,8 @@ const CENSUS_STEP: f32 = 0.25;
 pub struct Mining {
     /// Where mining started and the sample byte there (which tells ores apart).
     target: Option<(Vec3, u8)>,
+    /// Or the ore node being mined, its hardness and ore.
+    node: Option<(NodeId, f32, usize)>,
     progress: f32,
     place_cooldown: f32,
 }
@@ -45,6 +48,9 @@ pub enum PlaceOutcome {
 impl Mining {
     /// 0..1 progress of the current bite, for the HUD.
     pub fn progress(&self, content: &Content) -> f32 {
+        if let Some((_, hardness, _)) = self.node {
+            return (self.progress / hardness.max(1e-3)).min(1.0);
+        }
         match self.target {
             Some((_, m)) => (self.progress / content.sample(m).hardness.max(1e-3)).min(1.0),
             None => 0.0,
@@ -56,9 +62,32 @@ impl Mining {
         self.target.map(|(_, m)| m)
     }
 
+    /// What's being mined, for the HUD.
+    pub fn target_name(&self) -> Option<&'static str> {
+        match self.node {
+            Some((_, _, ore)) => Some(asc_world::ores::builtin().ores[ore].name.as_str()),
+            None => self.target_material().map(Content::sample_name),
+        }
+    }
+
     pub fn reset(&mut self) {
         self.target = None;
+        self.node = None;
         self.progress = 0.0;
+    }
+
+    /// Advance mining an ore node while the button is held; true when it breaks.
+    pub fn mine_node(&mut self, dt: f32, node: NodeHit, hardness: f32) -> bool {
+        if self.node.map(|(id, _, _)| id) != Some(node.id) {
+            self.reset();
+            self.node = Some((node.id, hardness, node.ore));
+        }
+        self.progress += dt;
+        if self.progress < hardness {
+            return false;
+        }
+        self.reset();
+        true
     }
 
     pub fn tick_cooldown(&mut self, dt: f32) {
@@ -79,6 +108,9 @@ impl Mining {
             self.reset();
             return None;
         };
+        if self.node.is_some() {
+            self.reset();
+        }
         // What's just under the surface at the crosshair.
         let (_, material) = world.sample_raw(hit.point - hit.normal * 0.3);
         if material == Material::Air as u8 {

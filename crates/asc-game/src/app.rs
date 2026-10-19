@@ -45,6 +45,11 @@ const TICK: Duration = Duration::from_millis(50);
 const MAX_TICKS_PER_FRAME: u32 = 5;
 const FLY_REACH: f32 = 64.0;
 const WALK_REACH: f32 = 5.0;
+/// How close the crosshair must be to an ore node's collider to mine it.
+const NODE_TOLERANCE: f32 = 0.15;
+/// Ore items from breaking a surface outcrop and an underground node.
+const SURFACE_NODE_YIELD: u32 = 3;
+const DEEP_NODE_YIELD: u32 = 8;
 const EDIT_REPEAT: Duration = Duration::from_millis(110);
 
 #[derive(Clone, Debug, Default)]
@@ -289,8 +294,14 @@ impl State {
         let far = FarStreamer::new(world.worldgen.clone());
         let parts = PartModels::load(&mut renderer)?;
         let nature = crate::assets::NatureModels::load(&mut renderer)?;
-        let scatter =
-            crate::scatter::Scatter::new(crate::scatter::Config::new(seed, &nature), world.worldgen.clone());
+        let ores = crate::assets::OreModels::load(&mut renderer)?;
+        let mut scatter = crate::scatter::Scatter::new(
+            crate::scatter::Config::new(seed, &nature, Some(&ores)),
+            world.worldgen.clone(),
+        );
+        if let Some(game) = &loaded {
+            scatter.set_removed_nodes(game.nodes.iter().map(|n| glam::IVec3::from_array(*n)));
+        }
         let lattice = asc_build::Lattice::new(&parts.spec);
         let structures = match &loaded {
             Some(game) => asc_build::Structures::from_pieces(lattice, game.structures.iter().copied()),
@@ -907,6 +918,7 @@ impl State {
             },
             ops: self.world.edits.ops().to_vec(),
             structures: self.building.structures.iter().copied().collect(),
+            nodes: self.scatter.removed_nodes().into_iter().map(|n| n.to_array()).collect(),
         }
     }
 
@@ -1197,6 +1209,11 @@ impl State {
         } else {
             (false, false)
         };
+        let node = self.hit.and_then(|h| self.scatter.node_at(h.point, NODE_TOLERANCE));
+        if mine && let Some(node) = node {
+            self.mine_node(dt, node);
+            return;
+        }
         if mine {
             if let Some(bite) =
                 self.mining.mine(dt, self.hit, &mut self.world, &self.content, &mut self.inventory)
@@ -1233,6 +1250,26 @@ impl State {
                 _ => {}
             }
         }
+    }
+
+    /// Hold to break an ore node; it yields a handful of its ore.
+    fn mine_node(&mut self, dt: f32, node: crate::scatter::NodeHit) {
+        let def = self.content.ores[node.ore];
+        let (hardness, count) = match node.kind {
+            crate::scatter::NodeKind::Surface => (def.hardness * 1.5, SURFACE_NODE_YIELD),
+            crate::scatter::NodeKind::Deep => (def.hardness * 2.5, DEEP_NODE_YIELD),
+        };
+        if !self.mining.mine_node(dt, node, hardness) {
+            return;
+        }
+        self.scatter.remove_node(node.id);
+        if let Some(item) = def.drop {
+            let lost = self.inventory.add(&self.content, item, count);
+            if lost > 0 {
+                self.show_notice(format!("Inventory full: {lost} items lost"));
+            }
+        }
+        log::debug!("mined a {:?} {} node", node.kind, asc_world::ores::builtin().ores[node.ore].name);
     }
 
     /// Mine test: sweep the crosshair over the ground ahead, mining a shallow pit, then aim ahead and
@@ -1399,7 +1436,7 @@ impl State {
             },
             grounded: self.player.grounded,
             speed: self.player.velocity.length(),
-            target: self.mining.target_material().map(crate::content::Content::sample_name),
+            target: self.mining.target_name(),
             physics_ms: self.worst_physics_ms,
             frame_ms: self.frame_ms,
             position: self.camera.position,

@@ -452,7 +452,17 @@ impl WorldGen {
     /// Density and material at any world point. Matches [`Self::generate`] exactly at sample positions.
     pub fn sample(&self, p: Vec3) -> (f32, u8) {
         let col = self.column(p.x, p.z);
-        let (d, m) = self.point(p, &col, &[]);
+        self.sample_in(p, &col)
+    }
+
+    /// [`Self::sample`] down one vertical line: the column is worked out once for every height.
+    pub fn line(&self, x: f32, z: f32) -> impl Fn(f32) -> (f32, u8) + '_ {
+        let col = self.column(x, z);
+        move |y| self.sample_in(Vec3::new(x, y, z), &col)
+    }
+
+    fn sample_in(&self, p: Vec3, col: &Column) -> (f32, u8) {
+        let (d, m) = self.point(p, col, &[]);
         // Only rock can hold ore: look the veins up just for that.
         if (m == Material::Rock as u8 || m == Material::Sandstone as u8)
             && let Some((ore, _)) = self.ores.ore_in(&self.veins_touching(p, p), p)

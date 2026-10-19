@@ -10,6 +10,7 @@ mod input;
 mod inventory;
 mod inventory_ui;
 mod mining;
+mod ore_nodes;
 mod player;
 mod save;
 mod scatter;
