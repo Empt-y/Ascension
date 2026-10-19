@@ -65,16 +65,16 @@ fn place(in: VsIn, wind: bool) -> vec3<f32> {
         let world = in.origin.xyz + globals.camera.xyz;
         let phase = dot(world.xz, vec2(0.37, 0.61));
         let t = globals.camera.w;
-        // Movement smaller than a pixel only makes edges flicker, so it dies away with distance:
-        // flutter by 35 m, most of the bending by 110 m.
+        // Movement smaller than a pixel only makes thin edges (birch branches, twig tips) flicker,
+        // so it dies away with distance: flutter by 30 m, all bending by 60 m.
         let dist = length(in.origin.xyz);
         // The whole model bends with height (trunks stay rooted)...
         let h = max(local.y, 0.0);
         let gust = sin(t * 1.1 + phase) + 0.45 * sin(t * 2.7 + phase * 1.7);
-        let bend = mix(1.0, 0.15, smoothstep(30.0, 110.0, dist));
+        let bend = 1.0 - smoothstep(20.0, 60.0, dist);
         rel += vec3(1.0, 0.0, 0.55) * gust * h * h * 0.0011 * sway * bend;
         // ...and leaf cards flutter, more towards their free ends.
-        let flutter = 1.0 - smoothstep(15.0, 35.0, dist);
+        let flutter = 1.0 - smoothstep(12.0, 30.0, dist);
         if material.extra.w > 0.5 && flutter > 0.0 {
             let f = sin(t * 5.3 + phase * 3.0 + dot(local, vec3(2.1, 1.7, 2.9)));
             rel += vec3(0.5, 0.35, -0.4) * f * 0.035 * in.uv.y * sway * flutter;
