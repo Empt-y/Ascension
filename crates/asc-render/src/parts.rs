@@ -445,8 +445,8 @@ impl Parts {
                 }
                 let rel = i.position - camera;
                 let radius = self.models[m].radius * i.scale;
-                for c in 0..CASCADES {
-                    if casts[c] && covers(c, rel, radius) {
+                for (c, cast) in casts.iter().enumerate() {
+                    if *cast && covers(c, rel, radius) {
                         // Full models in the nearest cascade, impostors in the wider ones: the
                         // switch happens at a cascade boundary, where cascades blend, so it fades.
                         let model = match lod {
