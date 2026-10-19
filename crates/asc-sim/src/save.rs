@@ -1,7 +1,7 @@
 //! Saving and loading worlds.
 //!
-//! A world is a directory: `world.toml` (seed, time), `player.toml` (position, inventory) and
-//! `edits.bin` (every terrain edit, postcard-encoded), `structures.bin` (building pieces) and
+//! A world is a directory: `world.toml` (seed, time), `players/<name>.toml` (each player's position
+//! and inventory; `player.toml` before format 4), `edits.bin` (every terrain edit, postcard-encoded), `structures.bin` (building pieces) and
 //! `nodes.bin` (the ore nodes mined away). Terrain itself is never saved: it is rebuilt
 //! from the seed plus the edits. Each file is written atomically (to `.tmp`, the old copy kept as
 //! `.bak`, then renamed into place) and loading falls back to `.bak` if a file is damaged.
@@ -15,9 +15,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::Mode;
 
-/// Bumped when the save layout changes. 2 added `structures.bin`, 3 `nodes.bin`; older saves load
-/// without them.
-pub const FORMAT_VERSION: u32 = 3;
+/// Bumped when the save layout changes. 2 added `structures.bin`, 3 `nodes.bin` (older saves load
+/// without them); 4 moved `player.toml` to `players/<name>.toml` (older saves load theirs as the
+/// local player).
+pub const FORMAT_VERSION: u32 = 4;
+
+/// The single-player player's name.
+pub const LOCAL_PLAYER: &str = "local";
+
+/// A player name as a file name: letters, digits, `-` and `_` only.
+fn player_file(name: &str) -> String {
+    let clean: String =
+        name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+    format!("{clean}.toml")
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorldMeta {
@@ -58,7 +69,8 @@ struct EditsFile {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SaveGame {
     pub meta: WorldMeta,
-    pub player: PlayerSave,
+    /// By player name.
+    pub players: std::collections::BTreeMap<String, PlayerSave>,
     pub ops: Vec<EditOp>,
     pub structures: Vec<asc_build::Piece>,
     /// Ore nodes mined away, by `scatter::node_id`.
@@ -123,7 +135,11 @@ fn decode_toml<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 pub fn save(dir: &Path, game: &SaveGame) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     write_atomic(&dir.join("world.toml"), toml::to_string(&game.meta)?.as_bytes())?;
-    write_atomic(&dir.join("player.toml"), toml::to_string(&game.player)?.as_bytes())?;
+    let players = dir.join("players");
+    std::fs::create_dir_all(&players).with_context(|| format!("creating {}", players.display()))?;
+    for (name, player) in &game.players {
+        write_atomic(&players.join(player_file(name)), toml::to_string(player)?.as_bytes())?;
+    }
     let edits = EditsFile { format_version: FORMAT_VERSION, ops: game.ops.clone() };
     write_atomic(&dir.join("edits.bin"), &postcard::to_stdvec(&edits)?)?;
     let structures = StructuresFile { format_version: FORMAT_VERSION, pieces: game.structures.clone() };
@@ -154,7 +170,26 @@ pub fn load(dir: &Path) -> Result<Option<SaveGame>> {
             asc_world::WORLDGEN_VERSION
         );
     }
-    let player: PlayerSave = read_with_backup(&dir.join("player.toml"), decode_toml)?;
+    let mut players = std::collections::BTreeMap::new();
+    let players_dir = dir.join("players");
+    if meta.format_version < 4 && !players_dir.is_dir() {
+        let player: PlayerSave = read_with_backup(&dir.join("player.toml"), decode_toml)?;
+        players.insert(LOCAL_PLAYER.to_owned(), player);
+    } else {
+        let mut names = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir(&players_dir).with_context(|| format!("reading {}", players_dir.display()))? {
+            let file = entry?.file_name().to_string_lossy().into_owned();
+            // A player whose file was lost mid-save still has its backup.
+            let name = file.strip_suffix(".toml.bak").or_else(|| file.strip_suffix(".toml"));
+            if let Some(name) = name {
+                names.insert(name.to_owned());
+            }
+        }
+        for name in names {
+            let player: PlayerSave = read_with_backup(&players_dir.join(player_file(&name)), decode_toml)?;
+            players.insert(name, player);
+        }
+    }
     let edits: EditsFile = read_with_backup(&dir.join("edits.bin"), |b| Ok(postcard::from_bytes(b)?))?;
     let structures_path = dir.join("structures.bin");
     let structures = if meta.format_version < 2 && !structures_path.exists() {
@@ -170,7 +205,7 @@ pub fn load(dir: &Path) -> Result<Option<SaveGame>> {
         let file: NodesFile = read_with_backup(&nodes_path, |b| Ok(postcard::from_bytes(b)?))?;
         file.mined
     };
-    Ok(Some(SaveGame { meta, player, ops: edits.ops, structures, nodes }))
+    Ok(Some(SaveGame { meta, players, ops: edits.ops, structures, nodes }))
 }
 
 #[cfg(test)]
@@ -194,7 +229,7 @@ mod tests {
                 ticks: 4242,
                 time_of_day: 0.61,
             },
-            player: PlayerSave {
+            players: [(LOCAL_PLAYER.to_owned(), PlayerSave {
                 mode: Mode::Walk,
                 feet: [1.5, 20.25, -3.0],
                 yaw: 0.7,
@@ -205,7 +240,8 @@ mod tests {
                     SlotSave { index: 12, item: "soil".into(), count: 5 },
                 ],
                 remainders: [("rock".to_owned(), 0.375)].into(),
-            },
+            })]
+            .into(),
             ops: (0..50)
                 .map(|i| EditOp {
                     center: Vec3::new(i as f32 * 0.7, 9.0 - (i % 4) as f32, 2.0),
@@ -242,6 +278,34 @@ mod tests {
         assert!(loaded.structures.is_empty());
         assert!(loaded.nodes.is_empty());
         assert_eq!(loaded.ops, game.ops);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn version_3_saves_load_their_player_as_the_local_one() {
+        let dir = temp_dir("v3");
+        let mut game = sample_game();
+        game.meta.format_version = 3;
+        save(&dir, &game).unwrap();
+        let player = game.players[LOCAL_PLAYER].clone();
+        std::fs::remove_dir_all(dir.join("players")).unwrap();
+        std::fs::write(dir.join("player.toml"), toml::to_string(&player).unwrap()).unwrap();
+        let loaded = load(&dir).unwrap().unwrap();
+        assert_eq!(loaded.players[LOCAL_PLAYER], player);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn several_players_each_get_a_file() {
+        let dir = temp_dir("players");
+        let mut game = sample_game();
+        let mut other = game.players[LOCAL_PLAYER].clone();
+        other.feet = [9.0, 9.0, 9.0];
+        game.players.insert("Ash/../x".to_owned(), other);
+        save(&dir, &game).unwrap();
+        assert!(dir.join("players").join("Ash____x.toml").is_file(), "names are made safe for files");
+        let loaded = load(&dir).unwrap().unwrap();
+        assert_eq!(loaded.players.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

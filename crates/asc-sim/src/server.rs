@@ -126,8 +126,8 @@ impl Server {
             held: None,
             seq: 0,
         };
-        if let Some(game) = &loaded {
-            restore_player(&game.player, &content, &mut player);
+        if let Some(saved) = loaded.as_ref().and_then(|g| g.players.get(save::LOCAL_PLAYER)) {
+            restore_player(saved, &content, &mut player);
         }
         let ticks = sim.ticks;
         Ok(Self {
@@ -344,7 +344,7 @@ impl Server {
                 ticks: self.sim.ticks,
                 time_of_day: self.sim.time_of_day,
             },
-            player: PlayerSave {
+            players: [(save::LOCAL_PLAYER.to_owned(), PlayerSave {
                 mode: p.mode,
                 feet: p.feet.into(),
                 yaw: p.yaw,
@@ -357,7 +357,8 @@ impl Server {
                     .filter_map(|(index, s)| s.map(|s| SlotSave { index, item: item_id(s.item), count: s.count }))
                     .collect(),
                 remainders: inventory.remainders.iter().map(|(id, v)| (item_id(*id), *v)).collect(),
-            },
+            })]
+            .into(),
             ops: self.world.edits.ops().to_vec(),
             structures: self.structures.iter().copied().collect(),
             nodes: self.mined.iter().copied().collect(),
