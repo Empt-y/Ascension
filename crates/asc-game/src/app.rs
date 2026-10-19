@@ -684,6 +684,7 @@ impl State {
                 sub,
                 pre,
             );
+            log::info!("server: {:.1} tps, slowest tick {:.2} ms", self.server_stats.0, self.server_stats.1);
             if let Some(stages) = self.renderer.gpu_stages() {
                 log::info!("gpu ms: {stages} | parts drawn {}", self.last_stats.parts_drawn);
             }

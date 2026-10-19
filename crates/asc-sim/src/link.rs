@@ -64,13 +64,21 @@ pub fn spawn(mut server: Server) -> LocalLink {
 }
 
 fn run(server: &mut Server, rx: &Receiver<ClientMsg>, tx: &Sender<ServerMsg>) {
+    // Machines tick on all cores but two, which stay free for the render thread and the driver
+    // (and chunk workers), so a busy factory can't take frames.
+    let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(cores.saturating_sub(2).max(1))
+        .thread_name(|i| format!("sim {i}"))
+        .build()
+        .expect("building the simulation thread pool");
     let mut next = Instant::now() + TICK;
     let mut stats = Stats::default();
     loop {
         let now = Instant::now();
         if now >= next {
             let t = Instant::now();
-            server.tick();
+            pool.install(|| server.tick());
             stats.tick(t.elapsed());
             next += TICK;
             if now > next + TICK * MAX_BEHIND {
@@ -109,7 +117,11 @@ struct Stats {
 
 impl Stats {
     fn tick(&mut self, took: Duration) {
-        self.since.get_or_insert_with(Instant::now);
+        if self.since.is_none() {
+            // The first window starts at its first tick, which isn't counted.
+            self.since = Some(Instant::now());
+            return;
+        }
         self.ticks += 1;
         self.worst = self.worst.max(took);
     }
@@ -120,7 +132,7 @@ impl Stats {
             return None;
         }
         let out = (self.ticks as f32 / elapsed.as_secs_f32(), self.worst.as_secs_f32() * 1e3);
-        *self = Self::default();
+        *self = Self { since: Some(Instant::now()), ..Self::default() };
         Some(out)
     }
 }
