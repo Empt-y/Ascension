@@ -66,15 +66,15 @@ fn place(in: VsIn, wind: bool) -> vec3<f32> {
         let phase = dot(world.xz, vec2(0.37, 0.61));
         let t = globals.camera.w;
         // Movement smaller than a pixel only makes edges flicker, so it dies away with distance:
-        // flutter by 50 m, most of the bending by 150 m.
+        // flutter by 35 m, most of the bending by 110 m.
         let dist = length(in.origin.xyz);
         // The whole model bends with height (trunks stay rooted)...
         let h = max(local.y, 0.0);
         let gust = sin(t * 1.1 + phase) + 0.45 * sin(t * 2.7 + phase * 1.7);
-        let bend = mix(1.0, 0.25, smoothstep(40.0, 150.0, dist));
+        let bend = mix(1.0, 0.15, smoothstep(30.0, 110.0, dist));
         rel += vec3(1.0, 0.0, 0.55) * gust * h * h * 0.0011 * sway * bend;
         // ...and leaf cards flutter, more towards their free ends.
-        let flutter = 1.0 - smoothstep(20.0, 50.0, dist);
+        let flutter = 1.0 - smoothstep(15.0, 35.0, dist);
         if material.extra.w > 0.5 && flutter > 0.0 {
             let f = sin(t * 5.3 + phase * 3.0 + dot(local, vec3(2.1, 1.7, 2.9)));
             rel += vec3(0.5, 0.35, -0.4) * f * 0.035 * in.uv.y * sway * flutter;
@@ -106,7 +106,9 @@ fn vs_main(in: VsIn) -> VsOut {
         let ground_amb = vec3(0.10, 0.08, 0.06) * (0.15 + 0.85 * daylight());
         let moon = vec3(0.05, 0.065, 0.12) * (1.0 - daylight()) * max(dot(n, -sun_dir()), 0.0);
         out.ambient = mix(ground_amb, sky_amb, n.y * 0.5 + 0.5) + moon;
-        out.sun = sun_light() * shadow_factor_fast(out.rel, n);
+        // Shadow from where the leaf rests, not where the wind has pushed it: a swaying leaf near a
+        // shadow edge would otherwise flash between lit and shadowed (sparkle).
+        out.sun = sun_light() * shadow_factor_fast(place(in, false), n);
         let edge = smoothstep(globals.far.x * 0.75, globals.far.x * 0.97, length(out.rel.xz));
         out.fog = vec4(sky_base(normalize(out.rel)), max(fog_amount(out.rel), edge));
     }
