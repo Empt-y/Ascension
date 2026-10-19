@@ -27,7 +27,7 @@ struct VsIn {
     @location(3) color: vec4<f32>,
     // xyz = camera-relative origin, w = yaw (radians).
     @location(4) origin: vec4<f32>,
-    // x = scale, y = ghost state (0 none, 1 valid, 2 invalid), z = sway, w = fade (1 = solid).
+    // x = scale, y = ghost state (0 none, 1 valid, 2 invalid), z = sway, w = fade (1 solid, 0 gone).
     @location(5) params: vec4<f32>,
 }
 
@@ -65,14 +65,19 @@ fn place(in: VsIn, wind: bool) -> vec3<f32> {
         let world = in.origin.xyz + globals.camera.xyz;
         let phase = dot(world.xz, vec2(0.37, 0.61));
         let t = globals.camera.w;
+        // Movement smaller than a pixel only makes edges flicker, so it dies away with distance:
+        // flutter by 50 m, most of the bending by 150 m.
+        let dist = length(in.origin.xyz);
         // The whole model bends with height (trunks stay rooted)...
         let h = max(local.y, 0.0);
         let gust = sin(t * 1.1 + phase) + 0.45 * sin(t * 2.7 + phase * 1.7);
-        rel += vec3(1.0, 0.0, 0.55) * gust * h * h * 0.0011 * sway;
+        let bend = mix(1.0, 0.25, smoothstep(40.0, 150.0, dist));
+        rel += vec3(1.0, 0.0, 0.55) * gust * h * h * 0.0011 * sway * bend;
         // ...and leaf cards flutter, more towards their free ends.
-        if material.extra.w > 0.5 {
+        let flutter = 1.0 - smoothstep(20.0, 50.0, dist);
+        if material.extra.w > 0.5 && flutter > 0.0 {
             let f = sin(t * 5.3 + phase * 3.0 + dot(local, vec3(2.1, 1.7, 2.9)));
-            rel += vec3(0.5, 0.35, -0.4) * f * 0.035 * in.uv.y * sway;
+            rel += vec3(0.5, 0.35, -0.4) * f * 0.035 * in.uv.y * sway * flutter;
         }
     }
     return rel;
@@ -183,14 +188,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
         color = apply_fog(shade_pbr(albedo, material.base.a, material.extra.x, n, in.rel, occlusion, shadow), in.rel);
     }
-    // Distance and LOD fades: a screen-space dither. A positive fade keeps pixels whose dither value
-    // is below it, a negative one the rest, so a model and its replacement cross-fade exactly.
-    let dither = fract(52.9829189 * fract(dot(in.clip.xy, vec2(0.06711056, 0.00583715))));
-    if (in.fade >= 0.0 && dither >= in.fade) || (in.fade < 0.0 && dither < 1.0 + in.fade) {
-        discard;
-    }
-    if !ALPHA_TO_COVERAGE && alpha < 0.5 {
-        discard;
+    // Distance and LOD fades. With MSAA they go through coverage, which blends smoothly over the
+    // samples; a screen-space dither pattern stays put while things move across it and fizzes.
+    // Without MSAA, fall back to a dither.
+    if ALPHA_TO_COVERAGE {
+        alpha *= in.fade;
+    } else {
+        let dither = fract(52.9829189 * fract(dot(in.clip.xy, vec2(0.06711056, 0.00583715))));
+        if dither >= in.fade {
+            discard;
+        }
+        if alpha < 0.5 {
+            discard;
+        }
     }
     return vec4(color, alpha);
 }

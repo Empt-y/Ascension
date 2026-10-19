@@ -93,9 +93,8 @@ struct MaterialUniform {
 struct InstanceData {
     /// xyz = camera-relative origin, w = yaw.
     origin: [f32; 4],
-    /// x = scale, y = ghost state (0 none, 1 valid, 2 invalid), z = sway, w = fade: 1 is solid,
-    /// f in 0..1 keeps the pixels whose dither value is below f, and -t keeps the complementary
-    /// ones (so a model fading out and its replacement fading in never overlap or leave holes).
+    /// x = scale, y = ghost state (0 none, 1 valid, 2 invalid), z = sway, w = fade (1 solid, 0 gone;
+    /// applied through MSAA coverage).
     params: [f32; 4],
 }
 
@@ -428,16 +427,16 @@ impl Parts {
                     let fade = ((b.distance - dist) / b.fade.max(1e-3)).clamp(0.0, 1.0);
                     match lod {
                         Some((far, at)) => {
-                            // t: 0 fully near model .. 1 fully far model.
+                            // t: 0 fully near model .. 1 fully far model. The far model comes in
+                            // solid and the near one fades out over it (fading both would leave
+                            // holes, since coverage fades of equal amounts cover the same samples).
                             let t = ((dist - at) / LOD_BAND + 0.5).clamp(0.0, 1.0);
                             if t < 1.0 {
-                                let keep = if t > 0.0 { 1.0 - t } else { fade };
-                                self.buckets[m].push(instance_data(i, camera, 0, keep));
+                                self.buckets[m].push(instance_data(i, camera, 0, (1.0 - t).min(fade)));
                             }
                             if t > 0.0 {
-                                let keep = if t < 1.0 { -t } else { fade };
                                 let far_i = PartInstance { model: far, ..*i };
-                                self.buckets[far.0 as usize].push(instance_data(&far_i, camera, 0, keep));
+                                self.buckets[far.0 as usize].push(instance_data(&far_i, camera, 0, fade));
                             }
                         }
                         None => self.buckets[m].push(instance_data(i, camera, 0, fade)),
