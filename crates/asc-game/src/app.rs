@@ -47,6 +47,9 @@ const EDIT_REPEAT: Duration = Duration::from_millis(110);
 
 #[derive(Clone, Debug, Default)]
 pub struct Options {
+    /// Run a stand-in factory on the server every tick (light: mostly waiting machines; heavy:
+    /// enough work to overrun the tick).
+    pub tick_stress: Option<asc_sim::stress::StressConfig>,
     /// Fly a fixed route, dig once, log stats and quit. For unattended performance checks.
     pub autopilot: bool,
     /// Walk and jump across the terrain, logging collision clearance. For unattended checks.
@@ -154,6 +157,13 @@ impl Options {
                 "--hide-hud" => opts.hide_hud = true,
                 "--time" => opts.time_of_day = Some(value("--time")?.parse()?),
                 "--exit-after" => opts.exit_after = Some(value("--exit-after")?.parse()?),
+                "--tick-stress" => {
+                    opts.tick_stress = Some(match value("--tick-stress")?.as_str() {
+                        "light" => asc_sim::stress::StressConfig::LIGHT,
+                        "heavy" => asc_sim::stress::StressConfig::HEAVY,
+                        other => anyhow::bail!("--tick-stress wants light or heavy, not {other}"),
+                    });
+                }
                 "--view-radius" => opts.view_radius = Some(value("--view-radius")?.parse()?),
                 "--camera" => {
                     let parts: Vec<f32> =
@@ -274,7 +284,13 @@ impl State {
         let save_dir = options.saves_dir.clone().unwrap_or_else(save::default_saves_dir).join(&options.world);
         // Scripted tests and tools build and dig from wherever they stand.
         let check_reach = !(options.build_test || options.build_stress || options.autopilot);
-        let config = srv::Config { save_dir, seed: options.seed, new_world: options.new_world, check_reach };
+        let config = srv::Config {
+            save_dir,
+            seed: options.seed,
+            new_world: options.new_world,
+            check_reach,
+            stress: options.tick_stress,
+        };
         let mut server = Server::open(config, asc_build::Lattice::new(&parts.spec))?;
         if let Some(t) = options.time_of_day {
             server.handle(ClientMsg::SetTime(t));

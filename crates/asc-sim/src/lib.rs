@@ -4,13 +4,16 @@
 
 pub mod content;
 pub mod inventory;
+pub mod islands;
 pub mod link;
 pub mod ore_nodes;
 pub mod protocol;
 pub mod rules;
 pub mod save;
+pub mod schedule;
 pub mod server;
 pub mod sim;
+pub mod stress;
 
 use serde::{Deserialize, Serialize};
 

@@ -38,6 +38,7 @@ dirs = "6"
 gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names"] }
 pollster = "0.4"
 thread-priority = "3"
+rayon = "1.10"
 
 [profile.dev]
 opt-level = 1

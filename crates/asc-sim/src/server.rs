@@ -40,6 +40,8 @@ pub struct Config {
     pub new_world: bool,
     /// Check reach on players' actions. Off for scripted tests and tools that build far away.
     pub check_reach: bool,
+    /// Run a stand-in factory every tick, to measure the tick (`--tick-stress`).
+    pub stress: Option<crate::stress::StressConfig>,
 }
 
 /// The one player, for now.
@@ -72,6 +74,7 @@ pub struct Server {
     seed: i32,
     save_dir: PathBuf,
     check_reach: bool,
+    stress: Option<crate::stress::Stress>,
     last_save: u64,
     outbox: Vec<ServerMsg>,
 }
@@ -126,11 +129,12 @@ impl Server {
         if let Some(game) = &loaded {
             restore_player(&game.player, &content, &mut player);
         }
+        let ticks = sim.ticks;
         Ok(Self {
             world,
             structures,
             mined,
-            last_save: sim.ticks,
+            last_save: ticks,
             sim,
             content,
             player,
@@ -138,6 +142,10 @@ impl Server {
             seed,
             save_dir,
             check_reach: config.check_reach,
+            stress: config.stress.map(|c| {
+                log::info!("tick stress: {c:?}");
+                crate::stress::Stress::new(c, ticks)
+            }),
             outbox: Vec::new(),
         })
     }
@@ -185,6 +193,9 @@ impl Server {
     /// One fixed step of the simulation.
     pub fn tick(&mut self) {
         self.sim.tick();
+        if let Some(stress) = &mut self.stress {
+            stress.tick();
+        }
         self.outbox.push(ServerMsg::Time { ticks: self.sim.ticks, time_of_day: self.sim.time_of_day });
         if self.sim.ticks - self.last_save >= AUTOSAVE_TICKS {
             self.save("autosaved");

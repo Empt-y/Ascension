@@ -13,7 +13,8 @@ fn temp_dir(name: &str) -> PathBuf {
 }
 
 fn server(name: &str) -> Server {
-    let config = Config { save_dir: temp_dir(name), seed: Some(1337), new_world: false, check_reach: true };
+    let config =
+        Config { save_dir: temp_dir(name), seed: Some(1337), new_world: false, check_reach: true, stress: None };
     Server::open(config, lattice()).unwrap()
 }
 
@@ -117,7 +118,7 @@ fn inventory_ops_echo_their_sequence_number() {
 fn a_saved_world_reopens_the_same() {
     let dir = temp_dir("reopen");
     let config =
-        |dir: &PathBuf| Config { save_dir: dir.clone(), seed: Some(77), new_world: false, check_reach: false };
+        |dir: &PathBuf| Config { save_dir: dir.clone(), seed: Some(77), new_world: false, check_reach: false, stress: None };
     let mut s = Server::open(config(&dir), lattice()).unwrap();
     let hit = ground(&s, 5.0, 5.0);
     s.handle(ClientMsg::Bite { point: hit.point, normal: hit.normal });

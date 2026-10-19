@@ -19,3 +19,4 @@ serde.workspace = true
 toml.workspace = true
 postcard.workspace = true
 dirs.workspace = true
+rayon.workspace = true
