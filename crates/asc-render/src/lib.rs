@@ -773,7 +773,8 @@ impl Renderer {
                 *cascade = Some((shadow_view_proj[layer], CASCADE_RADII[c]));
             }
         }
-        self.parts.prepare(&self.gpu.device, queue, cam.position, view_proj, cascades);
+        let pixels_per_radian = height as f32 / (2.0 * (cam.fov_y * 0.5).tan());
+        self.parts.prepare(&self.gpu.device, queue, cam.position, view_proj, pixels_per_radian, cascades);
         stats.parts_drawn = self.parts.drawn;
         stats.far_levels = if self.far.enabled { self.far.ready_levels() } else { 0 };
         stats.far_triangles = self.far.triangles();

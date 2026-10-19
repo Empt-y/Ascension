@@ -54,6 +54,10 @@ impl PartInstance {
 /// Distant instances of a model switch to a cheaper one (an impostor) around this distance,
 /// cross-fading over `LOD_BAND` metres.
 const LOD_BAND: f32 = 12.0;
+/// Scatter fades out as it shrinks on screen from SMALL_FADE_PX to SMALL_PX pixels of (bounding)
+/// radius: anything that small is a speck that can only flicker as it falls between pixels.
+const SMALL_PX: f32 = 1.5;
+const SMALL_FADE_PX: f32 = 3.5;
 
 /// A group of scatter instances (one terrain column of one kind) drawn and culled together.
 #[derive(Clone, Debug, PartialEq)]
@@ -365,6 +369,7 @@ impl Parts {
         queue: &wgpu::Queue,
         camera: Vec3,
         view_proj: Mat4,
+        pixels_per_radian: f32,
         cascades: [Option<(Mat4, f32)>; CASCADES],
     ) {
         let frustum = Frustum::from_view_proj(view_proj);
@@ -427,8 +432,10 @@ impl Parts {
                 let m = i.model.0 as usize;
                 let dist = (i.position - camera).length();
                 let chain: &[(ModelId, f32)] = self.lods.get(m).map_or(&[], |v| v.as_slice());
-                if in_view && dist < b.distance {
-                    let fade = ((b.distance - dist) / b.fade.max(1e-3)).clamp(0.0, 1.0);
+                let pixels = self.models[m].radius * i.scale * pixels_per_radian / dist.max(1e-3);
+                let small = ((pixels - SMALL_PX) / (SMALL_FADE_PX - SMALL_PX)).clamp(0.0, 1.0);
+                if in_view && dist < b.distance && small > 0.0 {
+                    let fade = ((b.distance - dist) / b.fade.max(1e-3)).clamp(0.0, 1.0).min(small);
                     // The level for this distance: past each threshold's band, the next model.
                     let level = chain.iter().filter(|(_, at)| dist >= at + LOD_BAND * 0.5).count();
                     let model_at = |l: usize| if l == 0 { i.model } else { chain[l - 1].0 };

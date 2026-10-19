@@ -19,8 +19,8 @@
 #   shadow_distance  casts into the shadow cascades no wider than this (16, 50 or 120 m half-width;
 #              0 for none): small things only need the near ones
 #   collide    "trunk" (a capsule up the trunk), "rock" (a sphere), or "none"
-#   mid_lod    beyond this distance draw the mid-distance model (<id>_mid.glb: the same tree
-#              without its twigs, with fewer, larger leaf cards)
+#   mid_lod    beyond this distance draw the mid-distance model (<id>_mid.glb: the same model
+#              without its twigs, with fewer, larger leaf cards, coarser grass and flowers)
 #   lod        beyond this distance draw the impostor (<id>_far.glb: cards showing pictures of the
 #              tree from three sides)
 
@@ -53,6 +53,7 @@ sway = 0.8
 max_slope = 0.9
 shadow_distance = 0.0
 collide = "none"
+mid_lod = 12.0
 
 [kinds.grass]
 distance = 45.0

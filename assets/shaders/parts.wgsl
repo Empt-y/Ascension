@@ -192,7 +192,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         if dot(geometric, sun_dir()) > 0.0 {
             shadow = shadow_factor(in.rel, geometric);
         }
-        color = apply_fog(shade_pbr(albedo, material.base.a, material.extra.x, n, in.rel, occlusion, shadow), in.rel);
+        let roughness = aa_roughness(material.base.a, detail.widen);
+        color = apply_fog(shade_pbr(albedo, roughness, material.extra.x, n, in.rel, occlusion, shadow), in.rel);
     }
     // Distance and LOD fades. With MSAA they go through coverage, which blends smoothly over the
     // samples; a screen-space dither pattern stays put while things move across it and fizzes.

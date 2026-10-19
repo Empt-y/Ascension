@@ -834,6 +834,15 @@ def base_leaves(m, rng, mat):
 
 def petal_ring(m, center, count, length, width, mat, rng, lift=0.15, cup=0.0):
     rot = rng.uniform(0, TAU)
+    if m.mid:
+        # Mid version: separate petals are sub-pixel specks at a distance; one flat disc of the same
+        # colour and spread reads the same and stays steady.
+        rim = [center + horizontal(rot + TAU * k / 6) * length * 0.8 + UP * length * (lift + cup * 0.6) for k in range(6)]
+        for k in range(6):
+            tri = [Vector(center), rim[k], rim[(k + 1) % 6]]
+            m.face(m.verts(tri), mat, facing=UP)
+            m.face(m.verts(tri), mat, facing=-UP)
+        return
     for k in range(count):
         d = horizontal(rot + TAU * k / count)
         side = UP.cross(d).normalized()
@@ -903,12 +912,16 @@ def alpine_flowers(m, rng):
 
 
 def mushroom(m, rng, base, stem_h, cap_r, cap_mat, stem_mat, spots=None, subdiv=3):
+    m.min_radius = 0.0
+    if m.mid:
+        subdiv = max(1, subdiv - 1)
     b = Vector(base)
     lean = horizontal(rng.uniform(0, TAU)) * stem_h * 0.12
     tube(m, [b - UP * 0.02, b + UP * stem_h * 0.5 + lean * 0.5, b + UP * stem_h + lean], [cap_r * 0.24, cap_r * 0.2, cap_r * 0.22], 6, stem_mat, cap_end=False)
     c = b + UP * stem_h + lean
     blob(m, c, (cap_r, cap_r * 0.62, cap_r), cap_mat, rng, subdiv=subdiv, amp=0.06, floor=c.y - cap_r * 0.08)
-    if spots:
+    # Spots are tiny bright specks: the mid version leaves them out.
+    if spots and not m.mid:
         for _ in range(7):
             d = random_unit(rng)
             d.y = abs(d.y) * 0.7 + 0.3
@@ -949,6 +962,7 @@ def blades(m, rng, count, height, mats, spread=0.12, lean=(0.2, 0.5), width=0.03
 
 
 def cattails(m, rng):
+    m.min_radius = 0.0
     green = [leaf("reed_a", (0.12, 0.26, 0.06)), leaf("reed_b", (0.18, 0.3, 0.08))]
     brown = material("cattail", (0.2, 0.1, 0.04), 0.85)
     blades(m, rng, rng.randint(12, 16), (0.9, 1.5), green, spread=0.2, lean=(0.15, 0.4), width=0.05)
@@ -1389,7 +1403,7 @@ def main():
             center, size = render_impostor(obj, far_name, report[model["id"]])
             far = build_impostor(far_name, center, size)
             export(far, os.path.join(out_dir, f"{far_name}.glb"))
-        if model["kind"] in ("tree", "shrub", "grass"):
+        if model["kind"] in ("tree", "shrub", "grass", "plant"):
             # The mid-distance version: the same model from the same seed, without its twigs and
             # with fewer, larger cards (or coarser grass).
             global BUILDING_MID

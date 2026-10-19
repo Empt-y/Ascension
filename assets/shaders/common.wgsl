@@ -179,6 +179,17 @@ struct Detail {
     tone: f32,
     // Normal with the fine relief applied.
     normal: vec3<f32>,
+    // How much that normal varies across the pixel, as extra GGX alpha squared: pass the material's
+    // roughness through `aa_roughness` with it.
+    widen: f32,
+}
+
+// Specular anti-aliasing (Tokuyoshi & Kaplanyan): a pixel covering bumps or curvature sees a spread
+// of normals, which a sharp highlight samples at one point and so flickers between frames. Widening
+// the lobe by that spread gives the pixel the average highlight instead.
+fn aa_roughness(roughness: f32, widen: f32) -> f32 {
+    let a = roughness * roughness;
+    return sqrt(sqrt(clamp(a * a + widen, 0.0, 1.0)));
 }
 
 const DETAIL_OCTAVES: u32 = 5u;
@@ -228,6 +239,9 @@ fn surface_detail(world: vec3<f32>, n: vec3<f32>) -> Detail {
     if abs(det) < 1e-12 {
         d.normal = n;
     }
+    let dnx = dpdx(d.normal);
+    let dny = dpdy(d.normal);
+    d.widen = min(0.5 * (dot(dnx, dnx) + dot(dny, dny)), 0.18);
     return d;
 }
 

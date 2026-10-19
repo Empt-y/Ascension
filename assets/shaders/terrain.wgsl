@@ -43,7 +43,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let world = in.rel + globals.camera.xyz;
     let detail = surface_detail(world, geometric);
     let n = detail.normal;
-    let s = terrain_surface(in.weights_a, in.weights_b, in.weights_c, world, geometric, detail.tone);
+    var s = terrain_surface(in.weights_a, in.weights_b, in.weights_c, world, geometric, detail.tone);
+    s.roughness = aa_roughness(s.roughness, detail.widen);
     var shadow = 1.0;
     if dot(geometric, sun_dir()) > 0.0 {
         shadow = shadow_factor(in.rel, geometric);

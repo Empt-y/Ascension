@@ -138,7 +138,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
     let w = far_weights(in.level, in.world_xz);
-    let s = terrain_surface(w[0], w[1], w[2], world, geometric, detail.tone);
+    var s = terrain_surface(w[0], w[1], w[2], world, geometric, detail.tone);
+    s.roughness = aa_roughness(s.roughness, detail.widen);
     let color = shade_terrain(s, detail.normal, in.rel, 1.0, 1.0);
     return vec4(apply_fog(color, in.rel), 1.0);
 }
