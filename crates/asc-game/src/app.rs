@@ -82,6 +82,8 @@ pub struct Options {
     pub scatter: bool,
     /// Sun shadows (on by default).
     pub shadows: bool,
+    /// Temporal anti-aliasing (on by default).
+    pub taa: bool,
     /// Accessibility: no wind motion in plants.
     pub reduce_motion: bool,
     /// Turn the camera slowly in place at this many radians per second (for testing aliasing:
@@ -95,8 +97,14 @@ pub struct Options {
 
 impl Options {
     pub fn from_args() -> anyhow::Result<Self> {
-        let mut opts =
-            Self { world: "world1".into(), far: true, scatter: true, shadows: true, ..Self::default() };
+        let mut opts = Self {
+            world: "world1".into(),
+            far: true,
+            scatter: true,
+            shadows: true,
+            taa: true,
+            ..Self::default()
+        };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             let mut value = |name: &str| args.next().ok_or_else(|| anyhow::anyhow!("{name} needs a value"));
@@ -117,6 +125,13 @@ impl Options {
                 "--msaa" => opts.msaa = Some(value("--msaa")?.parse()?),
                 "--showcase" => opts.showcase = true,
                 "--reduce-motion" => opts.reduce_motion = true,
+                "--taa" => {
+                    opts.taa = match value("--taa")?.as_str() {
+                        "on" => true,
+                        "off" => false,
+                        other => anyhow::bail!("--taa wants on or off, not {other}"),
+                    }
+                }
                 "--orbit" => opts.orbit = Some(value("--orbit")?.parse()?),
                 "--shadows" => {
                     opts.shadows = match value("--shadows")?.as_str() {
@@ -288,6 +303,7 @@ impl State {
             renderer.set_msaa(samples)?;
         }
         renderer.set_shadows(options.shadows);
+        renderer.set_taa(options.taa);
         renderer.set_wind(if options.reduce_motion { 0.0 } else { 1.0 });
         if let Some(d) = options.fog_density {
             renderer.fog_density = d;

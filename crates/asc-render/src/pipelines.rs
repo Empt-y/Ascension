@@ -16,6 +16,31 @@ pub struct Layouts {
     pub far: wgpu::BindGroupLayout,
     /// One model material: its uniform, plus the shared model texture array and sampler.
     pub material: wgpu::BindGroupLayout,
+    /// TAA: this frame, the history, a linear sampler and the scene depth (multisampled or not).
+    pub taa_ms: wgpu::BindGroupLayout,
+    pub taa_ss: wgpu::BindGroupLayout,
+}
+
+fn taa_layout(device: &wgpu::Device, multisampled: bool) -> wgpu::BindGroupLayout {
+    let float = wgpu::TextureSampleType::Float { filterable: true };
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("taa"),
+        entries: &[
+            texture_entry(0, float),
+            texture_entry(1, float),
+            sampler_entry(2, wgpu::SamplerBindingType::Filtering),
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled,
+                },
+                count: None,
+            },
+        ],
+    })
 }
 
 fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -158,6 +183,8 @@ impl Layouts {
                     sampler_entry(2, wgpu::SamplerBindingType::Filtering),
                 ],
             }),
+            taa_ms: taa_layout(device, true),
+            taa_ss: taa_layout(device, false),
         }
     }
 }
@@ -175,6 +202,7 @@ pub struct Pipelines {
     pub parts: wgpu::RenderPipeline,
     pub parts_shadow: wgpu::RenderPipeline,
     pub ghost: wgpu::RenderPipeline,
+    pub taa: wgpu::RenderPipeline,
 }
 
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] =
@@ -263,6 +291,8 @@ impl Pipelines {
         let far_src = shaders.module(device, "far")?;
         let water_src = shaders.module(device, "water")?;
         let parts_src = shaders.module(device, "parts")?;
+        let depth_type = if msaa > 1 { "texture_depth_multisampled_2d" } else { "texture_depth_2d" };
+        let taa_src = shaders.module_with(device, "taa", &[("DEPTH_TEXTURE", depth_type)])?;
 
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let b = Builder { device, samples: 1, alpha_to_coverage: false };
@@ -360,6 +390,18 @@ impl Pipelines {
         let bloom_prefilter = bloom("bloom prefilter", "fs_prefilter", None);
         let bloom_down = bloom("bloom down", "fs_down", None);
         let bloom_up = bloom("bloom up", "fs_up", Some(additive));
+        let taa_layout =
+            b.layout(&[&layouts.scene, if msaa > 1 { &layouts.taa_ms } else { &layouts.taa_ss }]);
+        let taa = b.pipeline(
+            "taa",
+            &taa_layout,
+            &taa_src,
+            ("vs_main", Some("fs_main")),
+            &[],
+            fullscreen,
+            None,
+            replace(HDR_FORMAT),
+        );
         let post = b.pipeline(
             "post",
             &textures,
@@ -476,6 +518,7 @@ impl Pipelines {
             parts,
             parts_shadow,
             ghost,
+            taa,
         })
     }
 }

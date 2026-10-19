@@ -14,6 +14,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("far", include_str!("../../../assets/shaders/far.wgsl")),
     ("water", include_str!("../../../assets/shaders/water.wgsl")),
     ("parts", include_str!("../../../assets/shaders/parts.wgsl")),
+    ("taa", include_str!("../../../assets/shaders/taa.wgsl")),
 ];
 
 pub struct ShaderLib {
@@ -71,7 +72,20 @@ impl ShaderLib {
 
     /// Compile a shader, returning validation errors instead of panicking.
     pub fn module(&self, device: &wgpu::Device, name: &str) -> Result<wgpu::ShaderModule> {
-        let src = self.source(name)?;
+        self.module_with(device, name, &[])
+    }
+
+    /// Compile a shader with textual substitutions applied (`from`, `to`) first.
+    pub fn module_with(
+        &self,
+        device: &wgpu::Device,
+        name: &str,
+        replace: &[(&str, &str)],
+    ) -> Result<wgpu::ShaderModule> {
+        let mut src = self.source(name)?;
+        for (from, to) in replace {
+            src = src.replace(from, to);
+        }
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(name),

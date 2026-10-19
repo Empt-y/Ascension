@@ -69,6 +69,26 @@ struct Globals {
     shadow: [f32; 4],
     /// xyz = each cascade's half-width, w = the current set (0 or 1).
     shadow_radii: [f32; 4],
+    /// TAA: this frame's unjittered NDC and depth to last frame's clip space.
+    taa_reproject: [[f32; 4]; 4],
+    /// x = 1 if the history is usable, y = weight of the new frame, zw = this frame's jitter (NDC).
+    taa: [f32; 4],
+}
+
+/// Weight of each new frame in the TAA history (the rest is the history).
+const TAA_FEEDBACK: f32 = 0.1;
+/// The history is thrown away when the camera jumps further than this between frames.
+const TAA_RESET_DISTANCE: f32 = 8.0;
+
+/// Element `i` of the Halton sequence in base `b`, in [0, 1).
+fn halton(mut i: u32, b: u32) -> f32 {
+    let (mut f, mut r) = (1.0, 0.0);
+    while i > 0 {
+        f /= b as f32;
+        r += f * (i % b) as f32;
+        i /= b;
+    }
+    r
 }
 
 /// Build every pipeline against an sRGB target without a window. Used by tests.
@@ -140,6 +160,15 @@ pub struct Renderer {
     shadow_bgs: Vec<wgpu::BindGroup>,
     post_bg: wgpu::BindGroup,
     bloom_bgs: BloomBindGroups,
+    taa_bgs: TaaBindGroups,
+    /// Temporal anti-aliasing on, which history target this frame writes, and whether the
+    /// history holds a usable image.
+    taa_on: bool,
+    taa_index: usize,
+    taa_valid: bool,
+    /// Last frame's unjittered view-projection and camera position, for reprojection.
+    prev_view_proj: Mat4,
+    prev_camera: Vec3,
     chunks: AHashMap<ChunkCoord, GpuChunk>,
     vertices: Arena,
     indices: Arena,
@@ -172,6 +201,14 @@ pub struct Renderer {
     offset_data: Vec<[f32; 4]>,
     egui: egui_wgpu::Renderer,
     start: Instant,
+}
+
+/// Per history target `i` (this frame writes `taa[i]` and reads `taa[1 - i]`): the TAA pass, and
+/// post and bloom reading the anti-aliased result.
+struct TaaBindGroups {
+    pass: [wgpu::BindGroup; 2],
+    post: [wgpu::BindGroup; 2],
+    prefilter: [wgpu::BindGroup; 2],
 }
 
 struct BloomBindGroups {
@@ -241,8 +278,8 @@ impl Renderer {
             &shadow_map,
             &shadow_sampler,
         );
-        let (post_bg, bloom_bgs) =
-            Self::texture_bind_groups(device, &layouts, &targets, &placeholder, &linear_sampler);
+        let (post_bg, bloom_bgs, taa_bgs) =
+            Self::texture_bind_groups(device, &layouts, &targets, &placeholder, &linear_sampler, msaa);
         Ok(Self {
             gpu,
             shaders,
@@ -262,6 +299,12 @@ impl Renderer {
             shadow_bgs,
             post_bg,
             bloom_bgs,
+            taa_bgs,
+            taa_on: true,
+            taa_index: 0,
+            taa_valid: false,
+            prev_view_proj: Mat4::IDENTITY,
+            prev_camera: Vec3::ZERO,
             chunks: AHashMap::new(),
             vertices,
             indices,
@@ -339,7 +382,8 @@ impl Renderer {
         targets: &Targets,
         placeholder: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
-    ) -> (wgpu::BindGroup, BloomBindGroups) {
+        msaa: u32,
+    ) -> (wgpu::BindGroup, BloomBindGroups, TaaBindGroups) {
         let pair = |a: &wgpu::TextureView, b: &wgpu::TextureView| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("textures"),
@@ -357,7 +401,36 @@ impl Renderer {
             down: (0..BLOOM_LEVELS - 1).map(|i| pair(&targets.bloom[i], placeholder)).collect(),
             up: (0..BLOOM_LEVELS - 1).map(|i| pair(&targets.bloom[i + 1], placeholder)).collect(),
         };
-        (post, bloom)
+        let taa_layout = if msaa > 1 { &layouts.taa_ms } else { &layouts.taa_ss };
+        let taa = TaaBindGroups {
+            pass: [0, 1].map(|i| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("taa"),
+                    layout: taa_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&targets.hdr),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&targets.taa[1 - i]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(&targets.depth),
+                        },
+                    ],
+                })
+            }),
+            post: [0, 1].map(|i| pair(&targets.taa[i], &targets.bloom[0])),
+            prefilter: [0, 1].map(|i| pair(&targets.taa[i], placeholder)),
+        };
+        (post, bloom, taa)
     }
 
     pub fn gpu(&self) -> &Gpu {
@@ -378,13 +451,21 @@ impl Renderer {
         }
         self.gpu.resize(width, height);
         self.targets = Targets::new(&self.gpu.device, self.gpu.size(), self.msaa);
-        (self.post_bg, self.bloom_bgs) = Self::texture_bind_groups(
+        (self.post_bg, self.bloom_bgs, self.taa_bgs) = Self::texture_bind_groups(
             &self.gpu.device,
             &self.layouts,
             &self.targets,
             &self.placeholder,
             &self.linear_sampler,
+            self.msaa,
         );
+        self.taa_valid = false;
+    }
+
+    /// Temporal anti-aliasing on or off.
+    pub fn set_taa(&mut self, on: bool) {
+        self.taa_on = on;
+        self.taa_valid = false;
     }
 
     /// Recompile every shader from disk. On failure the old pipelines stay in use.
@@ -578,6 +659,32 @@ impl Renderer {
         snapped.position = (snapped.position * asc_world::POSITION_GRID).round() / asc_world::POSITION_GRID;
         let cam = &snapped;
         let view_proj = cam.view_proj(aspect);
+        // TAA: shift the whole projection by a different sub-pixel offset each frame (Halton 2, 3
+        // over 8 frames), so over a few frames every pixel is sampled across its whole area.
+        let jumped = cam.position.distance(self.prev_camera) > TAA_RESET_DISTANCE;
+        let taa = self.taa_on;
+        let jitter = if taa {
+            let i = (self.frame % 8) as u32 + 1;
+            glam::Vec2::new(
+                (halton(i, 2) - 0.5) * 2.0 / width as f32,
+                (halton(i, 3) - 0.5) * 2.0 / height as f32,
+            )
+        } else {
+            glam::Vec2::ZERO
+        };
+        let jittered = Mat4::from_cols(
+            glam::Vec4::X,
+            glam::Vec4::Y,
+            glam::Vec4::Z,
+            glam::Vec4::new(jitter.x, jitter.y, 0.0, 1.0),
+        ) * view_proj;
+        // This frame's NDC (unjittered) and depth to last frame's clip space: back to a
+        // camera-relative position, shifted by how far the camera moved, then last frame's
+        // projection.
+        let taa_reproject = self.prev_view_proj
+            * Mat4::from_translation(cam.position - self.prev_camera)
+            * view_proj.inverse();
+        let history_ok = taa && self.taa_valid && !jumped;
         // Shadows hold still (no wind, a stepped sun), so a cascade is only redrawn when the camera
         // has moved a fair way across it or something that casts shadows changed; in between it's
         // looked up through the matrix it was drawn with. When the sun steps, a fresh set of cascades
@@ -628,8 +735,8 @@ impl Renderer {
         let night = 1.0 - smoothstep(-0.15, 0.03, frame.sun_dir.y);
         let exposure = 1.0 + night;
         let globals = Globals {
-            view_proj: view_proj.to_cols_array_2d(),
-            inv_view_proj: view_proj.inverse().to_cols_array_2d(),
+            view_proj: jittered.to_cols_array_2d(),
+            inv_view_proj: jittered.inverse().to_cols_array_2d(),
             shadow_view_proj: shadow_view_proj.map(|m| m.to_cols_array_2d()),
             camera: cam.position.extend(self.start.elapsed().as_secs_f32()).into(),
             sun: frame.sun_dir.extend(daylight).into(),
@@ -642,6 +749,8 @@ impl Renderer {
             far: [if self.far.enabled { FAR_RANGE } else { frame.view_distance }, 0.0, 0.0, 0.0],
             shadow: [0.0, f32::from(u8::from(self.shadows)), self.wind, fade],
             shadow_radii: [CASCADE_RADII[0], CASCADE_RADII[1], CASCADE_RADII[2], self.shadow_set as f32],
+            taa_reproject: taa_reproject.to_cols_array_2d(),
+            taa: [f32::from(u8::from(history_ok)), TAA_FEEDBACK, jitter.x, jitter.y],
         };
         let queue = &self.gpu.queue;
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
@@ -672,14 +781,21 @@ impl Renderer {
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         self.shadow_pass(&mut encoder);
         self.scene_pass(&mut encoder);
-        self.bloom_passes(&mut encoder);
+        if taa {
+            let mut pass = color_pass(&mut encoder, "taa", &self.targets.taa[self.taa_index], None);
+            pass.set_pipeline(&self.pipelines.taa);
+            pass.set_bind_group(0, &self.scene_bg, &[]);
+            pass.set_bind_group(1, &self.taa_bgs.pass[self.taa_index], &[]);
+            pass.draw(0..3, 0..1);
+        }
+        self.bloom_passes(&mut encoder, taa);
 
         let view = surface.texture.create_view(&wgpu::TextureViewDescriptor::default());
         {
             let mut pass = color_pass(&mut encoder, "post", &view, Some(wgpu::Color::BLACK));
             pass.set_pipeline(&self.pipelines.post);
             pass.set_bind_group(0, &self.scene_bg, &[]);
-            pass.set_bind_group(1, &self.post_bg, &[]);
+            pass.set_bind_group(1, if taa { &self.taa_bgs.post[self.taa_index] } else { &self.post_bg }, &[]);
             pass.draw(0..3, 0..1);
         }
 
@@ -713,6 +829,13 @@ impl Renderer {
         let t_present = Instant::now();
         queue.present(surface);
         stats.present_ms = t_present.elapsed().as_secs_f32() * 1e3;
+        // Next frame reprojects into this one.
+        self.prev_view_proj = view_proj;
+        self.prev_camera = cam.position;
+        self.taa_valid = taa;
+        if taa {
+            self.taa_index ^= 1;
+        }
         stats
     }
 
@@ -893,7 +1016,7 @@ impl Renderer {
         self.parts.draw_ghost(&mut pass);
     }
 
-    fn bloom_passes(&self, encoder: &mut wgpu::CommandEncoder) {
+    fn bloom_passes(&self, encoder: &mut wgpu::CommandEncoder, taa: bool) {
         let fullscreen = |encoder: &mut wgpu::CommandEncoder,
                           target: &wgpu::TextureView,
                           pipeline: &wgpu::RenderPipeline,
@@ -907,7 +1030,8 @@ impl Renderer {
         };
         let p = &self.pipelines;
         let levels = &self.targets.bloom;
-        fullscreen(encoder, &levels[0], &p.bloom_prefilter, &self.bloom_bgs.prefilter, true);
+        let source = if taa { &self.taa_bgs.prefilter[self.taa_index] } else { &self.bloom_bgs.prefilter };
+        fullscreen(encoder, &levels[0], &p.bloom_prefilter, source, true);
         for i in 0..BLOOM_LEVELS - 1 {
             fullscreen(encoder, &levels[i + 1], &p.bloom_down, &self.bloom_bgs.down[i], true);
         }

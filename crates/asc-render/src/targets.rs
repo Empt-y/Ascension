@@ -12,6 +12,8 @@ pub struct Targets {
     pub depth: wgpu::TextureView,
     /// Half resolution and down; `bloom[0]` holds the final blurred result.
     pub bloom: Vec<wgpu::TextureView>,
+    /// Temporal anti-aliasing history, ping-ponged: each frame reads one and writes the other.
+    pub taa: [wgpu::TextureView; 2],
 }
 
 fn target(
@@ -54,14 +56,31 @@ impl Targets {
         let hdr_msaa = (samples > 1).then(|| {
             target_ms(device, "hdr msaa", (width, height), HDR_FORMAT, U::RENDER_ATTACHMENT, samples)
         });
-        let depth = target_ms(device, "depth", (width, height), DEPTH_FORMAT, U::RENDER_ATTACHMENT, samples);
+        // Sampled too: TAA reprojects from it.
+        let depth = target_ms(
+            device,
+            "depth",
+            (width, height),
+            DEPTH_FORMAT,
+            U::RENDER_ATTACHMENT | U::TEXTURE_BINDING,
+            samples,
+        );
+        let taa = [0, 1].map(|_| {
+            target(
+                device,
+                "taa history",
+                (width, height),
+                HDR_FORMAT,
+                U::RENDER_ATTACHMENT | U::TEXTURE_BINDING,
+            )
+        });
         let bloom = (0..BLOOM_LEVELS)
             .map(|i| {
                 let size = ((width >> (i + 1)).max(1), (height >> (i + 1)).max(1));
                 target(device, "bloom", size, HDR_FORMAT, U::RENDER_ATTACHMENT | U::TEXTURE_BINDING)
             })
             .collect();
-        Self { hdr, hdr_msaa, depth, bloom }
+        Self { hdr, hdr_msaa, depth, bloom, taa }
     }
 }
 

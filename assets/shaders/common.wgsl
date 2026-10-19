@@ -25,6 +25,10 @@ struct Globals {
     shadow: vec4<f32>,
     // xyz = half-width in metres of each cascade, w = the current set.
     shadow_radii: vec4<f32>,
+    // TAA: this frame's (unjittered) NDC and depth to last frame's clip space.
+    taa_reproject: mat4x4<f32>,
+    // x = 1 if the history is usable, y = weight of the new frame, zw = this frame's jitter in NDC.
+    taa: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;

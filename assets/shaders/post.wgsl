@@ -21,7 +21,20 @@ fn aces(x: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let uv = frag.xy * globals.screen.zw;
-    var col = textureLoad(hdr, vec2<i32>(frag.xy), 0).rgb;
+    let px = vec2<i32>(frag.xy);
+    let size = vec2<i32>(textureDimensions(hdr));
+    var col = textureLoad(hdr, px, 0).rgb;
+    if globals.taa.x > 0.5 {
+        // TAA softens a little; give back some edge contrast (a light unsharp mask, limited so it
+        // can't ring).
+        let n = textureLoad(hdr, clamp(px + vec2(0, -1), vec2(0), size - 1), 0).rgb;
+        let s = textureLoad(hdr, clamp(px + vec2(0, 1), vec2(0), size - 1), 0).rgb;
+        let e = textureLoad(hdr, clamp(px + vec2(1, 0), vec2(0), size - 1), 0).rgb;
+        let w = textureLoad(hdr, clamp(px + vec2(-1, 0), vec2(0), size - 1), 0).rgb;
+        let lo = min(min(min(n, s), min(e, w)), col);
+        let hi = max(max(max(n, s), max(e, w)), col);
+        col = clamp(col + (col * 4.0 - n - s - e - w) * 0.12, lo, hi);
+    }
     col += textureSampleLevel(bloom, linear_sampler, uv, 0.0).rgb * 0.06;
     col *= globals.fog.w;
     col = aces(col);
