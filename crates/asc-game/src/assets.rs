@@ -89,6 +89,9 @@ pub struct KindSpec {
     /// Beyond this distance the kind is drawn as its impostor (`<id>_far.glb`), if it has one.
     #[serde(default)]
     pub lod: Option<f32>,
+    /// Beyond this distance, its mid-distance model (`<id>_mid.glb`: no twigs, fewer cards).
+    #[serde(default)]
+    pub mid_lod: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
@@ -144,16 +147,22 @@ impl NatureModels {
                 .with_context(|| format!("loading {}", path.display()))?;
             triangles += data.triangles();
             let id = renderer.add_model(&data);
-            let far_path = root.join("models").join("nature").join(format!("{}_far.glb", spec.id));
-            if let Some(distance) = file.kinds[&spec.kind].lod
-                && far_path.is_file()
-            {
-                let bytes =
-                    std::fs::read(&far_path).with_context(|| format!("reading {}", far_path.display()))?;
-                let far = asc_render::models::load_glb(&bytes)
-                    .with_context(|| format!("loading {}", far_path.display()))?;
-                let far = renderer.add_model(&far);
-                renderer.set_lod(id, far, distance);
+            let kind = &file.kinds[&spec.kind];
+            let mut levels = Vec::new();
+            for (suffix, distance) in [("mid", kind.mid_lod), ("far", kind.lod)] {
+                let path = root.join("models").join("nature").join(format!("{}_{suffix}.glb", spec.id));
+                if let Some(distance) = distance
+                    && path.is_file()
+                {
+                    let bytes =
+                        std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+                    let level = asc_render::models::load_glb(&bytes)
+                        .with_context(|| format!("loading {}", path.display()))?;
+                    levels.push((renderer.add_model(&level), distance));
+                }
+            }
+            if !levels.is_empty() {
+                renderer.set_lods(id, levels);
             }
             models.push(NatureModel { spec, id, min: data.min, max: data.max });
         }

@@ -592,8 +592,8 @@ impl Renderer {
     }
 
     /// Draw scatter instances of `near` as `far` beyond `distance`.
-    pub fn set_lod(&mut self, near: ModelId, far: ModelId, distance: f32) {
-        self.parts.set_lod(near, far, distance);
+    pub fn set_lods(&mut self, near: ModelId, levels: Vec<(ModelId, f32)>) {
+        self.parts.set_lods(near, levels);
     }
 
     pub fn scatter_count(&self) -> usize {

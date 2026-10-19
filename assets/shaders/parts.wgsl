@@ -164,8 +164,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let t = textureSample(model_textures, model_sampler, in.uv, i32(material.extra.y));
         albedo *= t.rgb;
         if material.extra.z > 0.0 {
-            // Sharpen alpha around the cutoff so coverage gives crisp, antialiased edges.
-            alpha = clamp((t.a - material.extra.z) / max(fwidth(t.a), 1e-4) + 0.5, 0.0, 1.0);
+            // Up close: sharpen alpha around the cutoff so coverage gives crisp, antialiased
+            // edges. Further out, crisp leaf edges become pixel-sized noise, so they soften into
+            // partial coverage instead.
+            let sharp = clamp((t.a - material.extra.z) / max(fwidth(t.a), 1e-4) + 0.5, 0.0, 1.0);
+            let soft = smoothstep(material.extra.z - 0.3, material.extra.z + 0.3, t.a);
+            alpha = mix(sharp, soft, smoothstep(12.0, 45.0, length(in.rel)));
         }
     }
     let occlusion = in.color.a;

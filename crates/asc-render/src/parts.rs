@@ -126,7 +126,9 @@ pub struct Parts {
     scratch: Vec<InstanceData>,
     scatter: HashMap<u64, StoredBatch>,
     /// Per model: the far model it turns into, and at what distance.
-    lods: Vec<Option<(ModelId, f32)>>,
+    /// Per model: the simpler models it turns into further away, as (model, from distance), nearest
+    /// first (for trees: the mid-distance model, then the impostor).
+    lods: Vec<Vec<(ModelId, f32)>>,
     /// Per-model buckets reused each frame while sorting instances.
     buckets: Vec<Vec<InstanceData>>,
     shadow_buckets: [Vec<Vec<InstanceData>>; CASCADES],
@@ -341,12 +343,14 @@ impl Parts {
     }
 
     /// Draw `near` as `far` beyond `distance` (scatter only).
-    pub fn set_lod(&mut self, near: ModelId, far: ModelId, distance: f32) {
+    /// Draw scatter instances of `near` as each of `levels` (model, from distance) further out.
+    pub fn set_lods(&mut self, near: ModelId, mut levels: Vec<(ModelId, f32)>) {
+        levels.sort_by(|a, b| a.1.total_cmp(&b.1));
         let i = near.0 as usize;
         if self.lods.len() <= i {
-            self.lods.resize(i + 1, None);
+            self.lods.resize(i + 1, Vec::new());
         }
-        self.lods[i] = Some((far, distance));
+        self.lods[i] = levels;
     }
 
     /// Scatter instances held (not just drawn).
@@ -422,24 +426,30 @@ impl Parts {
             for i in &b.instances {
                 let m = i.model.0 as usize;
                 let dist = (i.position - camera).length();
-                let lod = self.lods.get(m).copied().flatten();
+                let chain: &[(ModelId, f32)] = self.lods.get(m).map_or(&[], |v| v.as_slice());
                 if in_view && dist < b.distance {
                     let fade = ((b.distance - dist) / b.fade.max(1e-3)).clamp(0.0, 1.0);
-                    match lod {
-                        Some((far, at)) => {
-                            // t: 0 fully near model .. 1 fully far model. The far model comes in
-                            // solid and the near one fades out over it (fading both would leave
-                            // holes, since coverage fades of equal amounts cover the same samples).
-                            let t = ((dist - at) / LOD_BAND + 0.5).clamp(0.0, 1.0);
-                            if t < 1.0 {
-                                self.buckets[m].push(instance_data(i, camera, 0, (1.0 - t).min(fade)));
-                            }
-                            if t > 0.0 {
-                                let far_i = PartInstance { model: far, ..*i };
-                                self.buckets[far.0 as usize].push(instance_data(&far_i, camera, 0, fade));
-                            }
-                        }
-                        None => self.buckets[m].push(instance_data(i, camera, 0, fade)),
+                    // The level for this distance: past each threshold's band, the next model.
+                    let level = chain.iter().filter(|(_, at)| dist >= at + LOD_BAND * 0.5).count();
+                    let model_at = |l: usize| if l == 0 { i.model } else { chain[l - 1].0 };
+                    let here = model_at(level);
+                    // Inside the band before the next threshold, cross-fade: the next model comes
+                    // in solid and this one fades out over it (fading both would leave holes,
+                    // since coverage fades of equal amounts cover the same samples).
+                    let t = chain
+                        .get(level)
+                        .map_or(0.0, |(_, at)| ((dist - at) / LOD_BAND + 0.5).clamp(0.0, 1.0));
+                    let here_i = PartInstance { model: here, ..*i };
+                    self.buckets[here.0 as usize].push(instance_data(
+                        &here_i,
+                        camera,
+                        0,
+                        (1.0 - t).min(fade),
+                    ));
+                    if t > 0.0 {
+                        let next = model_at(level + 1);
+                        let next_i = PartInstance { model: next, ..*i };
+                        self.buckets[next.0 as usize].push(instance_data(&next_i, camera, 0, fade));
                     }
                 }
                 let rel = i.position - camera;
@@ -448,8 +458,8 @@ impl Parts {
                     if *cast && covers(c, rel, radius) {
                         // Full models in the nearest cascade, impostors in the wider ones: the
                         // switch happens at a cascade boundary, where cascades blend, so it fades.
-                        let model = match lod {
-                            Some((far, _)) if c > 0 => far,
+                        let model = match chain.last() {
+                            Some((far, _)) if c > 0 => *far,
                             _ => i.model,
                         };
                         let shadow_i = PartInstance { model, ..*i };

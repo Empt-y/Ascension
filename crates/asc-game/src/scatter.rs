@@ -497,6 +497,7 @@ mod tests {
             shadow_distance: 100.0,
             collide,
             lod: None,
+            mid_lod: None,
         };
         let all: Vec<&str> = Biome::ALL.iter().map(|b| b.name()).collect();
         let nature = NatureModels {

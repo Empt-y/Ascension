@@ -60,6 +60,11 @@ class Mesh:
         self.mats = []
         # Per-vertex normals that override the geometric ones (leaf cards shade as one crown).
         self.custom = {}
+        # The mid-distance version of a tree: built from the same random sequence (so it's the same
+        # tree), but tubes thinner than MID_MIN_RADIUS aren't drawn and only every other leaf card
+        # is, larger. Thin twigs and many small card edges are what shimmer at a distance.
+        self.mid = False
+        self.cards = 0
         self.uv = self.bm.loops.layers.uv.verify()
         # Baked ambient occlusion (vertex colour alpha): ellipsoids that darken what's deep inside
         # them (crowns), and how much the bottom of the model darkens towards its roots.
@@ -94,6 +99,12 @@ class Mesh:
     def card(self, corners, mat, normals, uvs=((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))):
         """A double-sided textured quad: `corners` in (0,0) (1,0) (1,1) (0,1) texture order (or the
         given `uvs`), with `normals` (one per corner, game space) used on both sides."""
+        if self.mid:
+            self.cards += 1
+            if self.cards % 2:
+                return
+            centre = sum(corners, Vector()) / 4
+            corners = [centre + (c - centre) * MID_CARD_SCALE for c in corners]
         a, b = corners[1] - corners[0], corners[3] - corners[0]
         front = a.cross(b)
         for facing in (front, -front):
@@ -147,10 +158,16 @@ def perpendicular(t):
     return t.cross(a).normalized()
 
 
+MID_MIN_RADIUS = 0.07
+MID_CARD_SCALE = 1.4
+
+
 def tube(m, points, radii, sides, mat, cap_end=True, cap_start=False, cap_mat=None, smooth=True, mat_fn=None, ribs=0.0):
     """A tube through `points` with a radius per point, framed by parallel transport so it doesn't
     twist. `mat_fn(segment, side)` can vary the material per face; `ribs` pulls every other side in
     by that fraction (cactus ribs)."""
+    if m.mid and max(radii) < MID_MIN_RADIUS:
+        return
     pts = [Vector(p) for p in points]
     n = len(pts)
     tangents = [(pts[min(i + 1, n - 1)] - pts[max(i - 1, 0)]).normalized() for i in range(n)]
@@ -534,7 +551,7 @@ def maple(m, rng):
 
 
 def birch(m, rng):
-    white = bark("birch", (0.72, 0.70, 0.65), 0.75)
+    white = bark("birch", (0.6, 0.58, 0.54), 0.75)
     dark = bark("birch_mark", (0.12, 0.11, 0.10))
     grey = bark("birch_grey", (0.42, 0.40, 0.37), 0.85)
     # Only the trunk is white: the branches and the thin top are dark grey-brown, as on real
@@ -1348,14 +1365,22 @@ def main():
         obj = m.finish()
         report[model["id"]] = measure(obj)
         export(obj, os.path.join(out_dir, f"{model['id']}.glb"))
+        render_preview(obj, os.path.join(out_dir, "previews", f"{model['id']}.png"))
         if model["kind"] == "tree":
             os.makedirs(IMPOSTORS, exist_ok=True)
             far_name = f"{model['id']}_far"
             center, size = render_impostor(obj, far_name, report[model["id"]])
             far = build_impostor(far_name, center, size)
             export(far, os.path.join(out_dir, f"{far_name}.glb"))
-            bpy.data.objects.remove(far)
-        render_preview(obj, os.path.join(out_dir, "previews", f"{model['id']}.png"))
+            # The mid-distance version: the same tree from the same seed, without its twigs.
+            bpy.ops.wm.read_factory_settings(use_empty=True)
+            MATERIALS.clear()
+            mid = Mesh(f"{model['id']}_mid")
+            mid.mid = True
+            BUILDERS[model["builder"]](mid, random.Random(model["seed"]))
+            mid_obj = mid.finish()
+            report[f"{model['id']}_mid"] = measure(mid_obj)
+            export(mid_obj, os.path.join(out_dir, f"{model['id']}_mid.glb"))
         print(f"PART {model['id']}: {report[model['id']]['triangles']} triangles", flush=True)
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2)
