@@ -150,8 +150,8 @@ pub struct Renderer {
     // Per-frame scratch, kept to avoid allocating every frame.
     draw_list: Vec<(f32, ChunkCoord)>,
     shadow_list: Vec<ChunkCoord>,
-    /// How many of `shadow_list` (sorted by distance) reach into each cascade.
-    shadow_counts: [usize; CASCADES],
+    /// Per cascade, the indices into `shadow_list` of the chunks that cast into it.
+    shadow_sets: [Vec<u32>; CASCADES],
     shadows: bool,
     wind: f32,
     /// Each layer's matrix and the camera position it was rendered from. Layers are only redrawn when
@@ -271,7 +271,7 @@ impl Renderer {
             msaa,
             draw_list: Vec::new(),
             shadow_list: Vec::new(),
-            shadow_counts: [0; CASCADES],
+            shadow_sets: Default::default(),
             shadows: true,
             wind: 1.0,
             cascade_state: [(Mat4::IDENTITY, Vec3::ZERO); SHADOW_LAYERS],
@@ -613,7 +613,9 @@ impl Renderer {
         // A layer drawn from an earlier camera position: shift today's camera-relative positions back.
         let shadow_view_proj =
             self.cascade_state.map(|(m, from)| m * Mat4::from_translation(cam.position - from));
-        let mut stats = self.build_draw_lists(cam.position, view_proj, frame.view_distance);
+        let current: [Mat4; CASCADES] =
+            std::array::from_fn(|c| shadow_view_proj[self.shadow_set * CASCADES + c]);
+        let mut stats = self.build_draw_lists(cam.position, view_proj, frame.view_distance, current);
         stats.acquire_ms = t_acquire.elapsed().as_secs_f32() * 1e3;
 
         let daylight = smoothstep(-0.08, 0.25, frame.sun_dir.y);
@@ -648,13 +650,14 @@ impl Renderer {
         }
         queue.write_buffer(&self.offsets, 0, bytemuck::cast_slice(&self.offset_data));
         self.far.write_levels(queue, glam::Vec2::new(cam.position.x, cam.position.z), frame.view_distance);
-        let mut reach = [0.0; CASCADES];
-        for c in 0..CASCADES {
-            if self.shadows && self.cascade_update[self.shadow_set * CASCADES + c] {
-                reach[c] = CASCADE_RADII[c] * 1.25 + 6.0;
+        let mut cascades = [None; CASCADES];
+        for (c, cascade) in cascades.iter_mut().enumerate() {
+            let layer = self.shadow_set * CASCADES + c;
+            if self.shadows && self.cascade_update[layer] {
+                *cascade = Some((shadow_view_proj[layer], CASCADE_RADII[c]));
             }
         }
-        self.parts.prepare(&self.gpu.device, queue, cam.position, view_proj, reach);
+        self.parts.prepare(&self.gpu.device, queue, cam.position, view_proj, cascades);
         stats.parts_drawn = self.parts.drawn;
         stats.far_levels = if self.far.enabled { self.far.ready_levels() } else { 0 };
         stats.far_triangles = self.far.triangles();
@@ -710,20 +713,41 @@ impl Renderer {
 
     /// Pick visible and shadow-casting chunks and lay out their camera-relative offsets: visible chunks
     /// first (front to back), then shadow casters. Instance index = position in this array.
-    fn build_draw_lists(&mut self, camera_pos: Vec3, view_proj: Mat4, view_distance: f32) -> FrameStats {
+    /// Visible chunks (front to back), and the chunks casting into each shadow cascade: those whose
+    /// bounds land in the area the cascade covers (`cascades`: camera-relative light matrices).
+    fn build_draw_lists(
+        &mut self,
+        camera_pos: Vec3,
+        view_proj: Mat4,
+        view_distance: f32,
+        cascades: [Mat4; CASCADES],
+    ) -> FrameStats {
         let frustum = Frustum::from_view_proj(view_proj);
         self.draw_list.clear();
         self.shadow_list.clear();
+        for set in &mut self.shadow_sets {
+            set.clear();
+        }
         let mut stats = FrameStats::default();
-        let reach = CASCADE_RADII.map(|r| r * 1.25 + 32.0);
-        let mut casters: Vec<(f32, ChunkCoord)> = Vec::new();
         for (coord, chunk) in &self.chunks {
             let origin = chunk_origin(*coord) - camera_pos;
             let (min, max) = (origin + chunk.min, origin + chunk.max);
             let nearest = Vec3::ZERO.clamp(min, max);
             let dist = nearest.length();
-            if self.shadows && dist < reach[CASCADES - 1] {
-                casters.push((dist, *coord));
+            if self.shadows {
+                let (center, extent) = ((min + max) * 0.5, (max - min).length() * 0.5);
+                let mut listed = false;
+                for (c, m) in cascades.iter().enumerate() {
+                    let p = m.transform_point3(center);
+                    let r = extent / CASCADE_RADII[c];
+                    if p.x.abs() <= 1.0 + r && p.y.abs() <= 1.0 + r {
+                        if !listed {
+                            self.shadow_list.push(*coord);
+                            listed = true;
+                        }
+                        self.shadow_sets[c].push(self.shadow_list.len() as u32 - 1);
+                    }
+                }
             }
             if nearest.truncate().length() < view_distance && frustum.intersects_box(min, max) {
                 self.draw_list.push((dist, *coord));
@@ -731,10 +755,6 @@ impl Renderer {
             }
         }
         self.draw_list.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-        // Casters nearest first, so each cascade draws a prefix of the list.
-        casters.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-        self.shadow_counts = reach.map(|r| casters.partition_point(|(d, _)| *d < r));
-        self.shadow_list.extend(casters.into_iter().map(|(_, c)| c));
         stats.chunks_drawn = self.draw_list.len();
         stats.shadow_chunks = self.shadow_list.len();
 
@@ -802,8 +822,8 @@ impl Renderer {
             pass.set_bind_group(0, &self.shadow_bgs[index], &[]);
             self.bind_arenas(&mut pass);
             let base = self.draw_list.len() as u32;
-            for (i, coord) in self.shadow_list.iter().take(self.shadow_counts[c]).enumerate() {
-                self.draw_chunk(&mut pass, *coord, base + i as u32);
+            for &i in &self.shadow_sets[c] {
+                self.draw_chunk(&mut pass, self.shadow_list[i as usize], base + i);
             }
             pass.set_pipeline(&self.pipelines.parts_shadow);
             self.parts.draw_shadows(&mut pass, c);

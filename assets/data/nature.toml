@@ -16,7 +16,8 @@
 #   scale      random uniform scale range
 #   sway       how much it moves in the wind
 #   max_slope  not placed on ground steeper than this (rise over run)
-#   shadow_distance  casts sun shadows out to this far (0 for none); small things only need them close
+#   shadow_distance  casts into the shadow cascades no wider than this (16, 50 or 120 m half-width;
+#              0 for none): small things only need the near ones
 #   collide    "trunk" (a capsule up the trunk), "rock" (a sphere), or "none"
 #   lod        beyond this distance draw the model's impostor (<id>_far.glb, two crossed cards
 #              rendered by tools/blender/nature.py) instead of the model
@@ -37,7 +38,7 @@ fade = 30.0
 scale = [0.75, 1.3]
 sway = 0.6
 max_slope = 0.9
-shadow_distance = 30.0
+shadow_distance = 50.0
 collide = "none"
 
 [kinds.plant]
@@ -64,7 +65,7 @@ fade = 30.0
 scale = [0.6, 1.5]
 sway = 0.0
 max_slope = 1.6
-shadow_distance = 80.0
+shadow_distance = 200.0
 collide = "rock"
 
 [kinds.debris]
@@ -73,7 +74,7 @@ fade = 25.0
 scale = [0.8, 1.2]
 sway = 0.0
 max_slope = 0.5
-shadow_distance = 25.0
+shadow_distance = 16.0
 collide = "none"
 
 # Instances of each kind per square metre, by biome. Trees in woodland biomes are also thinned

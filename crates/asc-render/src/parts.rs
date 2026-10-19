@@ -54,8 +54,6 @@ impl PartInstance {
 /// Distant instances of a model switch to a cheaper one (an impostor) around this distance,
 /// cross-fading over `LOD_BAND` metres.
 const LOD_BAND: f32 = 12.0;
-/// In the shadow pass, impostors take over from this distance.
-const SHADOW_LOD: f32 = 40.0;
 
 /// A group of scatter instances (one terrain column of one kind) drawn and culled together.
 #[derive(Clone, Debug, PartialEq)]
@@ -65,7 +63,7 @@ pub struct ScatterBatch {
     pub distance: f32,
     /// ...fading out over this last stretch of it.
     pub fade: f32,
-    /// Instances cast sun shadows out to this distance (0 for none).
+    /// Instances cast into the shadow cascades no wider than this (half-width, metres; 0 for none).
     pub shadow_distance: f32,
 }
 
@@ -364,7 +362,7 @@ impl Parts {
         queue: &wgpu::Queue,
         camera: Vec3,
         view_proj: Mat4,
-        shadow_reach: [f32; CASCADES],
+        cascades: [Option<(Mat4, f32)>; CASCADES],
     ) {
         let frustum = Frustum::from_view_proj(view_proj);
         let n = self.models.len();
@@ -378,7 +376,17 @@ impl Parts {
                 b.clear();
             }
         }
-        let farthest = shadow_reach[CASCADES - 1];
+        // A caster goes into a cascade if it lands anywhere in the area that cascade covers, never
+        // by distance from the camera: a distance cut-off moves with the camera, so shadows popped
+        // in and out as you walked. `cascades[c]` is its (camera-relative) light matrix and
+        // half-width, for the cascades redrawn this frame.
+        let covers = |c: usize, rel: Vec3, radius: f32| {
+            cascades[c].is_some_and(|(m, half)| {
+                let p = m.transform_point3(rel);
+                let r = radius / half;
+                p.x.abs() <= 1.0 + r && p.y.abs() <= 1.0 + r
+            })
+        };
 
         // Placed parts: culled one by one.
         for i in &self.instances {
@@ -388,8 +396,8 @@ impl Parts {
             if rel.length() < DRAW_DISTANCE + radius && frustum.intersects_box(rel - radius, rel + radius) {
                 self.buckets[m].push(instance_data(i, camera, 0, 1.0));
             }
-            for (c, reach) in shadow_reach.iter().enumerate() {
-                if rel.length() < reach + radius {
+            for c in 0..CASCADES {
+                if covers(c, rel, radius) {
                     self.shadow_buckets[c][m].push(instance_data(i, camera, 0, 1.0));
                 }
             }
@@ -400,9 +408,16 @@ impl Parts {
             let nearest = camera.clamp(stored.min, stored.max).distance(camera);
             let in_view =
                 nearest < b.distance && frustum.intersects_box(stored.min - camera, stored.max - camera);
-            let shadow_reach_here = farthest.min(b.shadow_distance);
-            let casts = nearest < shadow_reach_here;
-            if !in_view && !casts {
+            // Which cascades this batch casts into: those no wider than its kind's shadow distance,
+            // that its bounds reach.
+            let center = (stored.min + stored.max) * 0.5 - camera;
+            let extent = (stored.max - stored.min).length() * 0.5;
+            let mut casts = [false; CASCADES];
+            for (c, cast) in casts.iter_mut().enumerate() {
+                *cast = cascades[c].is_some_and(|(_, half)| half <= b.shadow_distance)
+                    && covers(c, center, extent);
+            }
+            if !in_view && !casts.iter().any(|c| *c) {
                 continue;
             }
             for i in &b.instances {
@@ -428,18 +443,19 @@ impl Parts {
                         None => self.buckets[m].push(instance_data(i, camera, 0, fade)),
                     }
                 }
-                if casts && dist < shadow_reach_here {
-                    // Shadows don't need the full model nearly as far out: switch much sooner.
-                    let model = match lod {
-                        Some((far, at)) if dist > at.min(SHADOW_LOD) => far,
-                        _ => i.model,
-                    };
-                    let shadow_i = PartInstance { model, ..*i };
-                    let data = instance_data(&shadow_i, camera, 0, 1.0);
-                    for (c, reach) in shadow_reach.iter().enumerate() {
-                        if dist < *reach {
-                            self.shadow_buckets[c][model.0 as usize].push(data);
-                        }
+                let rel = i.position - camera;
+                let radius = self.models[m].radius * i.scale;
+                for c in 0..CASCADES {
+                    if casts[c] && covers(c, rel, radius) {
+                        // Full models in the nearest cascade, impostors in the wider ones: the
+                        // switch happens at a cascade boundary, where cascades blend, so it fades.
+                        let model = match lod {
+                            Some((far, _)) if c > 0 => far,
+                            _ => i.model,
+                        };
+                        let shadow_i = PartInstance { model, ..*i };
+                        self.shadow_buckets[c][model.0 as usize]
+                            .push(instance_data(&shadow_i, camera, 0, 1.0));
                     }
                 }
             }
