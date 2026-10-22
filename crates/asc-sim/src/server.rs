@@ -202,7 +202,7 @@ impl Server {
             }
             None => log::info!("new world {} (seed {seed})", save_dir.display()),
         }
-        let spawn = rules::find_ground(&world, 0.0, 0.0);
+        let spawn = rules::spawn_point(&world);
         let mut player = PlayerState {
             feet: spawn,
             yaw: 0.0,

@@ -42,10 +42,13 @@ fn ripples(xz: vec2<f32>, t: f32) -> vec2<f32> {
 
 // Molten rock: a glowing orange body under a dark crust that drifts and cracks slowly.
 fn lava_color(world: vec3<f32>, t: f32) -> vec3<f32> {
-    let flow = vec3(world.x * 0.35 + t * 0.05, world.y * 0.2, world.z * 0.35 - t * 0.03);
-    let crust = smoothstep(0.45, 0.7, value_noise(flow) * 0.65 + value_noise(flow * 2.7 + vec3(t * 0.1)) * 0.35);
-    let hot = vec3(6.0, 1.7, 0.25) * (0.85 + 0.3 * value_noise(world * 1.3 + vec3(0.0, t * 0.4, 0.0)));
-    let dark = vec3(0.06, 0.02, 0.012);
+    let flow = vec3(world.x * 0.6 + t * 0.05, world.y * 0.3, world.z * 0.6 - t * 0.03);
+    // Plates of cooling crust with glowing cracks between them, and a brighter churn under them.
+    let plates = value_noise(flow) * 0.6 + value_noise(flow * 3.1 + vec3(t * 0.08)) * 0.4;
+    let crust = smoothstep(0.38, 0.55, plates);
+    let glow = 0.75 + 0.5 * value_noise(world * 0.9 + vec3(0.0, t * 0.3, 0.0));
+    let hot = vec3(3.2, 0.85, 0.12) * glow;
+    let dark = mix(vec3(0.05, 0.018, 0.01), vec3(0.4, 0.08, 0.02), 1.0 - smoothstep(0.55, 0.8, plates));
     return mix(hot, dark, crust);
 }
 
@@ -70,10 +73,10 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let ndv = clamp(dot(n, v), 0.0, 1.0);
     let fresnel = 0.02 + 0.98 * pow(1.0 - ndv, 5.0);
     let reflected = sky_base(reflect(-v, n));
-    let body = vec3(0.04, 0.16, 0.17) * (0.25 + 0.75 * daylight());
+    let body = vec3(0.03, 0.13, 0.15) * (0.25 + 0.75 * daylight());
     var color = mix(body, reflected, fresnel);
     let h = normalize(v + sun_dir());
     color += sun_light() * pow(max(dot(n, h), 0.0), 300.0) * 4.0 * flat;
-    let alpha = clamp(0.62 + 0.35 * fresnel, 0.0, 0.95);
+    let alpha = clamp(0.78 + 0.2 * fresnel, 0.0, 0.97);
     return vec4(debug_hot(apply_fog(color, in.rel), 6.0), alpha);
 }

@@ -116,8 +116,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let ndv = clamp(dot(up, v), 0.0, 1.0);
     let fresnel = 0.02 + 0.98 * pow(1.0 - ndv, 5.0);
     let reflected = sky_base(reflect(-v, up));
-    let shallow = vec3(0.06, 0.22, 0.22);
-    let deep = vec3(0.005, 0.03, 0.06);
+    let shallow = vec3(0.03, 0.13, 0.15);
+    let deep = vec3(0.004, 0.025, 0.05);
     let body = mix(shallow, deep, smoothstep(0.5, 12.0, in.depth)) * (0.25 + 0.75 * daylight());
     var color = mix(body, reflected, fresnel);
     // Sun glint.
@@ -125,10 +125,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     color += sun_light() * pow(max(dot(up, h), 0.0), 300.0) * 4.0;
 
     // Clear at the very edge so shores blend into the sand, more opaque with depth and at grazing angles.
+    // (Depth comes from the coarse far heights, so it's only rough near shores: keep a floor of
+    // opacity, or shallow patches turned see-through and the sand glared through in blotches.)
     let alpha = clamp(
-        smoothstep(0.0, 1.2, in.depth) * (0.65 + 0.35 * fresnel) + smoothstep(2.0, 10.0, in.depth) * 0.3,
+        0.72 * smoothstep(0.0, 0.3, in.depth) + 0.2 * smoothstep(0.5, 4.0, in.depth) + 0.25 * fresnel,
         0.0,
-        1.0,
+        0.97,
     );
     return vec4(debug_hot(apply_fog(color, in.rel), 6.0), alpha);
 }

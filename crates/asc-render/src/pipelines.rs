@@ -493,7 +493,9 @@ impl Pipelines {
             wgpu::PrimitiveState::default(),
             Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: Some(false),
+                // Written: lava is opaque, and the nearest face of a fluid mesh must win over the
+                // faces inside it (it's drawn last, so nothing behind it is lost).
+                depth_write_enabled: Some(true),
                 depth_compare: Some(wgpu::CompareFunction::Greater),
                 stencil: Default::default(),
                 bias: Default::default(),

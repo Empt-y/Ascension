@@ -98,6 +98,23 @@ pub fn flatten_ops(center: Vec2, half_cell: f32, height: f32) -> [EditOp; 2] {
     EditOp::flatten(center, half_cell + FLATTEN_OVERLAP, height, 6.0, 8.0, Material::Soil)
 }
 
+/// Where new players start: the nearest dry, gentle ground to the origin (spiralling out in 8 m
+/// steps), so nobody spawns in a river or on a cliff.
+pub fn spawn_point(world: &World) -> Vec3 {
+    let wg = &world.worldgen;
+    for ring in 0..200i32 {
+        for i in 0..(8 * ring.max(1)) {
+            let a = i as f32 / (8 * ring.max(1)) as f32 * std::f32::consts::TAU;
+            let (x, z) = (a.cos() * ring as f32 * 8.0, a.sin() * ring as f32 * 8.0);
+            let g = wg.ground(x, z);
+            if wg.water_level(x, z).is_none() && g.slope < 0.35 && g.height > asc_world::SEA_LEVEL + 1.0 {
+                return find_ground(world, x, z);
+            }
+        }
+    }
+    find_ground(world, 0.0, 0.0)
+}
+
 /// Feet position standing on the ground in column (x, z).
 pub fn find_ground(world: &World, x: f32, z: f32) -> Vec3 {
     let top = Vec3::new(x, 400.0, z);
