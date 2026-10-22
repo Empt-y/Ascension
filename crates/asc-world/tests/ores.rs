@@ -119,7 +119,6 @@ fn shallow_veins_show_at_the_surface() {
         let top_depth = worldgen.height(v.center.x, v.center.z) - (v.center.y + v.thickness * 0.5);
         if top_depth <= asc_world::ores::HINT_DEPTH {
             shallow += 1;
-            assert!(!h.is_empty());
             for (ore, p) in &h {
                 let def = &t.veins[v.kind];
                 assert!(*ore == def.ores[0] || *ore == def.ores[1]);
@@ -131,6 +130,8 @@ fn shallow_veins_show_at_the_surface() {
         }
     }
     assert!(shallow > 20, "{shallow}");
+    // About a quarter of the possible outcrops show (1 + radius / 8 per shallow vein).
+    assert!(hints > 0 && hints < shallow * 2, "{hints} outcrops for {shallow} shallow veins");
     println!("{shallow} shallow veins, {hints} surface hints");
 }
 

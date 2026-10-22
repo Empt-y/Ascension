@@ -30,6 +30,8 @@ pub const VEIN_CHANCE: f32 = 0.65;
 pub const ABUNDANCE_POWER: f32 = 0.25;
 /// Veins whose top comes within this many metres of the surface show outcrops above them.
 pub const HINT_DEPTH: f32 = 25.0;
+/// Share of a shallow vein's possible outcrops that actually show: they're rare finds, not a map.
+pub const HINT_CHANCE: f32 = 0.25;
 
 /// One ore, as listed in `ores.toml` (fields the world doesn't need are ignored).
 #[derive(Clone, Debug, Deserialize)]
@@ -239,12 +241,12 @@ impl OreTable {
         let mut r = Rng::new(vein.seed as i32, IVec2::ZERO, 7);
         let count = 1 + (vein.radius / 8.0) as usize;
         (0..count)
-            .map(|_| {
+            .filter_map(|_| {
                 let a = r.next() * std::f32::consts::TAU;
                 let d = vein.radius * 0.8 * r.next().sqrt();
                 let (x, z) = (vein.center.x + a.cos() * d, vein.center.z + a.sin() * d);
                 let ore = if r.next() < 0.7 { t.ores[0] } else { t.ores[1] };
-                (ore, Vec3::new(x, worldgen.height(x, z), z))
+                (r.next() < HINT_CHANCE).then(|| (ore, Vec3::new(x, worldgen.height(x, z), z)))
             })
             .collect()
     }
