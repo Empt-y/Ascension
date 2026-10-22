@@ -49,3 +49,23 @@ drop = "ice"
 [sandstone]
 hardness = 1.2
 drop = "sandstone"
+
+[basalt]
+hardness = 1.8
+drop = "basalt"
+
+[obsidian]
+hardness = 4.0
+drop = "obsidian"
+
+[pumice]
+hardness = 0.8
+drop = "pumice"
+
+[ash]
+hardness = 0.3
+drop = "ash"
+
+[sulfur]
+hardness = 0.9
+drop = "sulfur"

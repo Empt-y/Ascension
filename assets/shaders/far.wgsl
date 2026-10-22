@@ -101,22 +101,27 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) level: u32) 
 
 // Terrain material weights at a point: the bilinear blend of the four surrounding samples' materials,
 // in the slot layout terrain_surface expects (slot = material id - 1).
-fn far_weights(level: u32, xz: vec2<f32>) -> array<vec4<f32>, 3> {
+fn far_weights(level: u32, xz: vec2<f32>) -> array<vec4<f32>, 4> {
     let g = xz / levels[level].spacing;
     let g0 = vec2<i32>(floor(g));
     let f = g - floor(g);
-    var w: array<f32, 12>;
+    var w: array<f32, 16>;
     for (var k = 0; k < 4; k++) {
         let o = vec2(k & 1, k >> 1u);
         let p = g0 + o;
         let id = textureLoad(materials, vec2(wrap(p.x), wrap(p.y)), i32(level), 0).r;
         let fx = select(1.0 - f.x, f.x, o.x == 1);
         let fy = select(1.0 - f.y, f.y, o.y == 1);
-        if id >= 1u && id <= 12u {
+        if id >= 1u && id <= 16u {
             w[id - 1u] += fx * fy;
         }
     }
-    return array(vec4(w[0], w[1], w[2], w[3]), vec4(w[4], w[5], w[6], w[7]), vec4(w[8], w[9], w[10], w[11]));
+    return array(
+        vec4(w[0], w[1], w[2], w[3]),
+        vec4(w[4], w[5], w[6], w[7]),
+        vec4(w[8], w[9], w[10], w[11]),
+        vec4(w[12], w[13], w[14], w[15]),
+    );
 }
 
 @fragment
@@ -138,7 +143,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
     let w = far_weights(in.level, in.world_xz);
-    var s = terrain_surface(w[0], w[1], w[2], vec4(0.0), world, geometric, detail.tone);
+    var s = terrain_surface(w[0], w[1], w[2], w[3], vec4(0.0), world, geometric, detail.tone);
     s.roughness = aa_roughness(s.roughness, detail.widen);
     let color = shade_terrain(s, detail.normal, in.rel, 1.0, 1.0);
     return vec4(debug_hot(apply_fog(color, in.rel), 4.0), 1.0);

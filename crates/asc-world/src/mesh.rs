@@ -15,9 +15,9 @@ use crate::material::{Material, ore_index};
 pub const POSITION_GRID: f32 = 1024.0;
 
 /// Materials that can be blended per vertex: slot `i` holds material id `i + 1` (0 is air).
-pub const MATERIAL_SLOTS: usize = 12;
+pub const MATERIAL_SLOTS: usize = 16;
 
-/// 32 bytes. The renderer reads `normal` as snorm8x4, `weights` as three unorm8x4 and `ore` as
+/// 36 bytes. The renderer reads `normal` as snorm8x4, `weights` as four unorm8x4 and `ore` as
 /// one unorm8x4.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]

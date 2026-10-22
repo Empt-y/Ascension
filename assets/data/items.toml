@@ -46,3 +46,32 @@ id = "sandstone"
 name = "Sandstone"
 color = [0.56, 0.38, 0.23]
 places = "sandstone"
+
+[[item]]
+id = "basalt"
+name = "Basalt"
+color = [0.06, 0.06, 0.065]
+places = "basalt"
+
+[[item]]
+id = "obsidian"
+name = "Obsidian"
+color = [0.03, 0.025, 0.05]
+places = "obsidian"
+
+[[item]]
+id = "pumice"
+name = "Pumice"
+color = [0.5, 0.48, 0.44]
+places = "pumice"
+
+[[item]]
+id = "ash"
+name = "Ash"
+color = [0.16, 0.15, 0.145]
+places = "ash"
+
+[[item]]
+id = "sulfur"
+name = "Sulfur"
+color = [0.75, 0.65, 0.1]

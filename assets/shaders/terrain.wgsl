@@ -7,12 +7,13 @@ struct VsIn {
     @location(0) position: vec3<f32>,
     // xyz normal, w ambient occlusion (1 = open sky).
     @location(1) normal: vec4<f32>,
-    // Blend weights for material slots 0..3, 4..7 and 8..11 (material id = slot + 1).
+    // Blend weights for material slots 0..3, 4..7, 8..11 and 12..15 (material id = slot + 1).
     @location(2) weights_a: vec4<f32>,
     @location(3) weights_b: vec4<f32>,
     @location(4) weights_c: vec4<f32>,
+    @location(5) weights_d: vec4<f32>,
     // How the ore here looks (see terrain_surface).
-    @location(5) ore: vec4<f32>,
+    @location(6) ore: vec4<f32>,
     @builtin(instance_index) instance: u32,
 }
 
@@ -23,7 +24,8 @@ struct VsOut {
     @location(2) weights_a: vec4<f32>,
     @location(3) weights_b: vec4<f32>,
     @location(4) weights_c: vec4<f32>,
-    @location(5) ore: vec4<f32>,
+    @location(5) weights_d: vec4<f32>,
+    @location(6) ore: vec4<f32>,
 }
 
 @vertex
@@ -36,6 +38,7 @@ fn vs_main(in: VsIn) -> VsOut {
     out.weights_a = in.weights_a;
     out.weights_b = in.weights_b;
     out.weights_c = in.weights_c;
+    out.weights_d = in.weights_d;
     out.ore = in.ore;
     return out;
 }
@@ -47,7 +50,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let world = in.rel + globals.camera.xyz;
     let detail = surface_detail(world, geometric);
     let n = detail.normal;
-    var s = terrain_surface(in.weights_a, in.weights_b, in.weights_c, in.ore, world, geometric, detail.tone);
+    var s = terrain_surface(in.weights_a, in.weights_b, in.weights_c, in.weights_d, in.ore, world, geometric, detail.tone);
     s.roughness = aa_roughness(s.roughness, detail.widen);
     var shadow = 1.0;
     if dot(geometric, sun_dir()) > 0.0 {

@@ -36,10 +36,20 @@ pub enum Material {
     Ice = 10,
     /// Desert bedrock and cliffs.
     Sandstone = 11,
+    /// Lava that cooled as it flowed; the rock of volcanoes.
+    Basalt = 12,
+    /// Lava quenched still (by water): black glass.
+    Obsidian = 13,
+    /// Frothy volcanic rock, light enough to float.
+    Pumice = 14,
+    /// Volcanic ash, settled.
+    Ash = 15,
+    /// Sulfur crust round vents and fumaroles.
+    Sulfur = 16,
 }
 
 impl Material {
-    pub const COUNT: usize = 12;
+    pub const COUNT: usize = 17;
 
     pub const ALL: [Self; Self::COUNT] = [
         Self::Air,
@@ -54,6 +64,11 @@ impl Material {
         Self::Mud,
         Self::Ice,
         Self::Sandstone,
+        Self::Basalt,
+        Self::Obsidian,
+        Self::Pumice,
+        Self::Ash,
+        Self::Sulfur,
     ];
 
     /// Stable lowercase name, as used in content files and saves.
@@ -71,6 +86,11 @@ impl Material {
             Self::Mud => "mud",
             Self::Ice => "ice",
             Self::Sandstone => "sandstone",
+            Self::Basalt => "basalt",
+            Self::Obsidian => "obsidian",
+            Self::Pumice => "pumice",
+            Self::Ash => "ash",
+            Self::Sulfur => "sulfur",
         }
     }
 
@@ -91,6 +111,11 @@ impl Material {
             9 => Self::Mud,
             10 => Self::Ice,
             11 => Self::Sandstone,
+            12 => Self::Basalt,
+            13 => Self::Obsidian,
+            14 => Self::Pumice,
+            15 => Self::Ash,
+            16 => Self::Sulfur,
             v if v >= ORE_BASE => Self::Ore,
             _ => Self::Air,
         }

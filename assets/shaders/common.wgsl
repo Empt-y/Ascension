@@ -282,10 +282,11 @@ fn surface_detail(world: vec3<f32>, n: vec3<f32>) -> Detail {
 }
 
 // Base colours are linear and deliberately saturated. Materials blend by the interpolated weights:
-// wa = grass, soil, rock, sand; wb = snow, ore, dry grass, moss; wc = mud, ice, sandstone.
+// wa = grass, soil, rock, sand; wb = snow, ore, dry grass, moss; wc = mud, ice, sandstone, basalt;
+// wd = obsidian, pumice, ash, sulfur.
 // `ore` is how the ore there looks: rgb = square root of its linear colour, a = metallic (high
 // nibble) and roughness (low nibble), as packed by OreTable::look.
-fn terrain_surface(wa: vec4<f32>, wb: vec4<f32>, wc: vec4<f32>, ore: vec4<f32>, world: vec3<f32>, n: vec3<f32>, tone: f32) -> Surface {
+fn terrain_surface(wa: vec4<f32>, wb: vec4<f32>, wc: vec4<f32>, wd: vec4<f32>, ore: vec4<f32>, world: vec3<f32>, n: vec3<f32>, tone: f32) -> Surface {
     let broad = fbm3(world * 0.035);
     let detail = 1.0 + tone;
     let fine = 0.5 + tone;
@@ -316,12 +317,19 @@ fn terrain_surface(wa: vec4<f32>, wb: vec4<f32>, wc: vec4<f32>, ore: vec4<f32>, 
     let ice = mix(vec3(0.50, 0.68, 0.86), vec3(0.62, 0.78, 0.92), broad);
     let sandstone = mix(vec3(0.44, 0.28, 0.16), vec3(0.56, 0.38, 0.23), broad);
 
-    let total = max(dot(wa, vec4(1.0)) + dot(wb, vec4(1.0)) + dot(wc, vec4(1.0)), 1e-4);
+    let basalt = mix(vec3(0.045, 0.045, 0.05), vec3(0.08, 0.075, 0.075), broad);
+    let obsidian = vec3(0.015, 0.014, 0.02);
+    let pumice = mix(vec3(0.42, 0.40, 0.37), vec3(0.55, 0.52, 0.48), broad);
+    let ash = mix(vec3(0.12, 0.115, 0.11), vec3(0.2, 0.19, 0.18), broad);
+    let sulfur = mix(vec3(0.62, 0.52, 0.06), vec3(0.78, 0.68, 0.14), broad);
+    let total = max(dot(wa, vec4(1.0)) + dot(wb, vec4(1.0)) + dot(wc, vec4(1.0)) + dot(wd, vec4(1.0)), 1e-4);
     var s: Surface;
     s.albedo = (grass * wa.x + soil * wa.y + rock * wa.z + sand * wa.w + snow * wb.x + ore_albedo * wb.y
-        + dry * wb.z + moss * wb.w + mud * wc.x + ice * wc.y + sandstone * wc.z) / total;
+        + dry * wb.z + moss * wb.w + mud * wc.x + ice * wc.y + sandstone * wc.z + basalt * wc.w
+        + obsidian * wd.x + pumice * wd.y + ash * wd.z + sulfur * wd.w) / total;
     s.roughness = (0.9 * (wa.x + wa.y + wa.w + wb.z + wb.w) + 0.75 * wa.z + 0.5 * wb.x
-        + mix(0.8, max(ore_rough, 0.2), fleck) * wb.y + 0.45 * wc.x + 0.12 * wc.y + 0.85 * wc.z) / total;
+        + mix(0.8, max(ore_rough, 0.2), fleck) * wb.y + 0.45 * wc.x + 0.12 * wc.y + 0.85 * wc.z + 0.85 * wc.w
+        + 0.2 * wd.x + 0.95 * wd.y + 1.0 * wd.z + 0.8 * wd.w) / total;
     s.metallic = ore_metal * fleck * wb.y / total;
     s.albedo *= detail;
     return s;
