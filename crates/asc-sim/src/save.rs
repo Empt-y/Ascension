@@ -94,6 +94,40 @@ pub struct SaveGame {
     /// Ore nodes mined away, by `scatter::node_id`.
     pub nodes: Vec<[i32; 3]>,
     pub stashes: Vec<StashSave>,
+    /// Materialised fluid chunks: coordinate, kinds and amounts (`fluid::CELLS` each).
+    pub fluids: Vec<(glam::IVec3, Vec<u8>, Vec<u16>)>,
+}
+
+/// One fluid chunk as runs of (count, kind, amount).
+type FluidRuns = Vec<(u16, u8, u16)>;
+
+#[derive(Serialize, Deserialize)]
+struct FluidsFile {
+    format_version: u32,
+    /// Run-length packed: (run, kind, amount) per chunk.
+    chunks: Vec<([i32; 3], FluidRuns)>,
+}
+
+fn pack_fluid(kind: &[u8], amount: &[u16]) -> Vec<(u16, u8, u16)> {
+    let mut runs: Vec<(u16, u8, u16)> = Vec::new();
+    for (&k, &a) in kind.iter().zip(amount) {
+        match runs.last_mut() {
+            Some((n, rk, ra)) if *rk == k && *ra == a && *n < u16::MAX => *n += 1,
+            _ => runs.push((1, k, a)),
+        }
+    }
+    runs
+}
+
+fn unpack_fluid(runs: &[(u16, u8, u16)]) -> (Vec<u8>, Vec<u16>) {
+    let (mut kind, mut amount) = (Vec::new(), Vec::new());
+    for &(n, k, a) in runs {
+        for _ in 0..n {
+            kind.push(k);
+            amount.push(a);
+        }
+    }
+    (kind, amount)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -167,6 +201,11 @@ pub fn save(dir: &Path, game: &SaveGame) -> Result<()> {
     write_atomic(&dir.join("nodes.bin"), &postcard::to_stdvec(&nodes)?)?;
     let stashes = StashesFile { format_version: FORMAT_VERSION, stashes: game.stashes.clone() };
     write_atomic(&dir.join("stashes.bin"), &postcard::to_stdvec(&stashes)?)?;
+    let fluids = FluidsFile {
+        format_version: FORMAT_VERSION,
+        chunks: game.fluids.iter().map(|(c, k, a)| (c.to_array(), pack_fluid(k, a))).collect(),
+    };
+    write_atomic(&dir.join("fluids.bin"), &postcard::to_stdvec(&fluids)?)?;
     Ok(())
 }
 
@@ -233,7 +272,20 @@ pub fn load(dir: &Path) -> Result<Option<SaveGame>> {
         let file: StashesFile = read_with_backup(&stashes_path, |b| Ok(postcard::from_bytes(b)?))?;
         file.stashes
     };
-    Ok(Some(SaveGame { meta, players, ops: edits.ops, structures, nodes, stashes }))
+    let fluids_path = dir.join("fluids.bin");
+    let fluids = if !fluids_path.exists() && !with_suffix(&fluids_path, ".bak").exists() {
+        Vec::new()
+    } else {
+        let file: FluidsFile = read_with_backup(&fluids_path, |b| Ok(postcard::from_bytes(b)?))?;
+        file.chunks
+            .into_iter()
+            .map(|(c, runs)| {
+                let (k, a) = unpack_fluid(&runs);
+                (glam::IVec3::from_array(c), k, a)
+            })
+            .collect()
+    };
+    Ok(Some(SaveGame { meta, players, ops: edits.ops, structures, nodes, stashes, fluids }))
 }
 
 #[cfg(test)]
@@ -298,6 +350,7 @@ mod tests {
                 slots: vec![SlotSave { index: 0, item: "soil".into(), count: 9 }],
                 remainders: Default::default(),
             }],
+            fluids: vec![(glam::IVec3::new(1, -1, 2), vec![1; 32768], vec![700; 32768])],
         }
     }
 

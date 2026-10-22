@@ -6,6 +6,7 @@ use asc_sim::{content, inventory, ore_nodes, save, sim};
 mod assets;
 mod building;
 mod far;
+mod fluids;
 mod hud;
 mod input;
 mod inventory_ui;

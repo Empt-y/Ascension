@@ -185,6 +185,18 @@ impl Layouts {
                         },
                         count: None,
                     },
+                    // Chunk columns with simulated water, which the sea plane leaves to the
+                    // fluid meshes.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             }),
             textures: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -211,6 +223,7 @@ pub struct Pipelines {
     pub post: wgpu::RenderPipeline,
     pub far: wgpu::RenderPipeline,
     pub water: wgpu::RenderPipeline,
+    pub fluid: wgpu::RenderPipeline,
     pub parts: wgpu::RenderPipeline,
     pub parts_shadow: wgpu::RenderPipeline,
     pub ghost: wgpu::RenderPipeline,
@@ -309,6 +322,7 @@ impl Pipelines {
         let post_src = shaders.module(device, "post")?;
         let far_src = shaders.module(device, "far")?;
         let water_src = shaders.module(device, "water")?;
+        let fluid_src = shaders.module(device, "fluid")?;
         let parts_src = shaders.module(device, "parts")?;
         let depth_type = if msaa > 1 { "texture_depth_multisampled_2d" } else { "texture_depth_2d" };
         let taa_src = shaders.module_with(device, "taa", &[("DEPTH_TEXTURE", depth_type)])?;
@@ -459,6 +473,26 @@ impl Pipelines {
             }),
             replace(HDR_FORMAT),
         );
+        let fluid = scene_builder.pipeline(
+            "fluid",
+            &scene,
+            &fluid_src,
+            ("vs_main", Some("fs_main")),
+            &vertex,
+            wgpu::PrimitiveState::default(),
+            Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Greater),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            Some(wgpu::ColorTargetState {
+                format: HDR_FORMAT,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            }),
+        );
         let water = scene_builder.pipeline(
             "water",
             &far_layout,
@@ -545,6 +579,7 @@ impl Pipelines {
             post,
             far,
             water,
+            fluid,
             parts,
             parts_shadow,
             ghost,

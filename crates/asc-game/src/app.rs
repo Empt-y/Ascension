@@ -49,6 +49,8 @@ const EDIT_REPEAT: Duration = Duration::from_millis(110);
 pub struct Options {
     /// Fall from 30 m (dying), respawn, then walk back to the stash. For unattended checks.
     pub fall_test: bool,
+    /// Dig a trench from the nearest shore inland below sea level and watch the sea fill it.
+    pub fluid_test: bool,
     /// Render the scene at this fraction of the window's resolution and upscale it (`--render-scale`).
     pub render_scale: Option<f32>,
     /// Run a stand-in factory on the server every tick (light: mostly waiting machines; heavy:
@@ -172,6 +174,7 @@ impl Options {
                 "--time" => opts.time_of_day = Some(value("--time")?.parse()?),
                 "--exit-after" => opts.exit_after = Some(value("--exit-after")?.parse()?),
                 "--fall-test" => opts.fall_test = true,
+                "--fluid-test" => opts.fluid_test = true,
                 "--tick-stress" => {
                     opts.tick_stress = Some(match value("--tick-stress")?.as_str() {
                         "light" => asc_sim::stress::StressConfig::LIGHT,
@@ -252,8 +255,12 @@ struct State {
     /// The red edge after being hurt, fading from 1.
     hurt_flash: f32,
     fall_test_stage: u8,
+    fluid_test_stage: u8,
+    fluid_test_end: Vec3,
     /// Where things left at death lie.
     stashes: std::collections::BTreeMap<u32, Vec3>,
+    /// The simulated water, as the server sends it.
+    fluids: crate::fluids::ClientFluids,
     inventory_open: bool,
     notice: Option<(String, Instant)>,
     /// Derived from the player every frame.
@@ -305,7 +312,11 @@ impl State {
         let parts = PartModels::load(&mut renderer)?;
         let save_dir = options.saves_dir.clone().unwrap_or_else(save::default_saves_dir).join(&options.world);
         // Scripted tests and tools build and dig from wherever they stand.
-        let validate = !(options.build_test || options.build_stress || options.autopilot || options.fall_test);
+        let validate = !(options.build_test
+            || options.build_stress
+            || options.autopilot
+            || options.fall_test
+            || options.fluid_test);
         let config = srv::Config {
             save_dir,
             seed: options.seed,
@@ -361,6 +372,10 @@ impl State {
         let held = inventory.restore(&welcome.inventory);
         let vitals = welcome.vitals;
         let stashes: std::collections::BTreeMap<u32, Vec3> = welcome.stashes.iter().copied().collect();
+        let mut fluids = crate::fluids::ClientFluids::new();
+        for (coord, packed) in &welcome.fluids {
+            fluids.apply(*coord, packed);
+        }
         if options.autopilot {
             player.mode = Mode::Fly;
             player.teleport(spawn + Vec3::Y * 25.0);
@@ -413,6 +428,9 @@ impl State {
             vitals,
             hurt_flash: 0.0,
             fall_test_stage: 0,
+            fluid_test_stage: 0,
+            fluid_test_end: Vec3::ZERO,
+            fluids,
             stashes,
             pending_ops: Vec::new(),
             inventory_seq: welcome.inventory.seq,
@@ -517,6 +535,9 @@ impl State {
         if self.options.fall_test {
             self.fall_test_step();
         }
+        if self.options.fluid_test {
+            self.fluid_test_step();
+        }
         if self.build_tool.is_some() {
             self.mining.reset();
             self.use_build_tool();
@@ -546,6 +567,7 @@ impl State {
         let (w, h) = self.renderer.gpu().size();
         let frustum = Frustum::from_view_proj(self.camera.view_proj(w as f32 / h as f32));
         self.streamer.update(&self.world, self.camera.position, &frustum, &mut self.renderer);
+        self.fluids.update(&self.world, &mut self.renderer);
         if self.renderer.far_enabled() {
             let p = self.camera.position;
             self.far.update(glam::Vec2::new(p.x, p.z), &mut self.renderer);
@@ -870,6 +892,13 @@ impl State {
             // Walk straight in through the doorway, towards the back wall.
             input = MoveInput { forward: 1.0, ..Default::default() };
         }
+        // How deep in water the body is: sampled at the knees, waist and chest.
+        let feet = self.player.feet;
+        self.player.submerged = [0.4, 0.9, 1.4]
+            .iter()
+            .map(|h| self.fluids.fraction_at(&self.world, feet + Vec3::Y * h).min(1.0))
+            .sum::<f32>()
+            / 3.0;
         let t = Instant::now();
         let world = &self.world;
         let building = &self.building;
@@ -1010,6 +1039,7 @@ impl State {
                 self.stashes.insert(id, at);
                 self.sync_stashes();
             }
+            ServerMsg::Fluid { coord, data } => self.fluids.apply(coord, &data),
             ServerMsg::StashTaken { id } => {
                 self.stashes.remove(&id);
                 self.sync_stashes();
@@ -1043,6 +1073,37 @@ impl State {
         if t > 12.0 && self.fall_test_stage == 2 {
             self.fall_test_stage = 3;
             log::info!("fall test: stashes left {:?} | inventory {}", self.stashes, self.inventory_summary());
+        }
+    }
+
+    /// Fluid test: find a shore near spawn, dig a trench from the sea 16 m inland below sea level,
+    /// hover above it, and log how full its far end is as the sea flows in.
+    fn fluid_test_step(&mut self) {
+        let t = self.started.elapsed().as_secs_f32();
+        let sea = asc_world::SEA_LEVEL;
+        if self.fluid_test_stage == 0 && t > 2.0 {
+            self.fluid_test_stage = 1;
+            let wg = self.world.worldgen.clone();
+            let shore = (0..40000)
+                .map(|i| ((i % 200) as f32 * 4.0 - 400.0, (i / 200) as f32 * 4.0 - 400.0))
+                .find(|&(x, z)| wg.height(x, z) < sea - 2.0 && (wg.height(x + 14.0, z) - (sea + 1.0)).abs() < 1.0);
+            let Some((x, z)) = shore else {
+                log::warn!("fluid test: no shore near spawn");
+                return;
+            };
+            for k in 0..12 {
+                let center = Vec3::new(x + 2.0 + k as f32 * 1.4, sea - 1.4, z);
+                self.send(ClientMsg::Edit(EditOp { center, radius: 1.6, kind: EditKind::Dig, material: Material::Air }));
+            }
+            self.fluid_test_end = Vec3::new(x + 16.0, sea - 1.4, z);
+            self.player.mode = Mode::Fly;
+            self.player.teleport(Vec3::new(x + 8.0, sea + 9.0, z - 11.0));
+            (self.player.yaw, self.player.pitch) = (1.45, -0.6);
+            log::info!("fluid test: trench from the shore at ({x:.0}, {z:.0}) to {:.1}", self.fluid_test_end);
+        }
+        if self.fluid_test_stage == 1 && (t * 2.0).fract() < 0.03 {
+            let fill = self.fluids.fraction_at(&self.world, self.fluid_test_end);
+            log::info!("fluid test t={t:.1}: trench end {:.2} full, {} fluid chunks here", fill, self.fluids.fluids.chunks.len());
         }
     }
 

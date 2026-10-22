@@ -183,6 +183,10 @@ fn every_message_survives_postcard() {
         ServerMsg::Died { cause: crate::vitals::Cause::Lava },
         ServerMsg::StashPlaced { id: 2, at: Vec3::ONE },
         ServerMsg::StashTaken { id: 2 },
+        ServerMsg::Fluid {
+            coord: IVec3::new(1, 0, -1),
+            data: asc_world::fluid::PackedFluid::pack(&asc_world::fluid::FluidChunk::empty()),
+        },
     ];
     for m in server_msgs {
         let bytes = postcard::to_stdvec(&m).unwrap();

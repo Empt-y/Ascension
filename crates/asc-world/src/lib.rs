@@ -7,6 +7,7 @@
 mod chunk;
 mod collide;
 mod edit;
+pub mod fluid;
 mod material;
 mod mesh;
 pub mod ores;
@@ -19,7 +20,7 @@ pub use edit::{EditKind, EditLog, EditOp};
 pub use material::{Material, ORE_BASE, ore_byte, ore_index};
 pub use mesh::{ChunkMesh, MATERIAL_SLOTS, POSITION_GRID, Vertex, mesh_chunk};
 pub use raycast::{RayHit, raycast};
-pub use worldgen::{Biome, Ground, WorldGen};
+pub use worldgen::{Biome, Ground, SEA_LEVEL, WorldGen};
 
 use std::sync::Arc;
 

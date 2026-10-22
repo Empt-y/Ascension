@@ -148,6 +148,8 @@ pub struct Server {
     pub spawn: Vec3,
     /// What players left where they died.
     pub stashes: Vec<save::StashSave>,
+    /// Water (and later lava) where something has disturbed it.
+    pub fluid_sim: crate::fluids::FluidSim,
     next_stash: u32,
     seed: i32,
     save_dir: PathBuf,
@@ -178,6 +180,10 @@ impl Server {
         let mut structures = Structures::new(lattice.clone());
         let mut mined = BTreeSet::new();
         let stashes = loaded.as_ref().map_or_else(Vec::new, |g| g.stashes.clone());
+        let mut fluid_sim = crate::fluids::FluidSim::new();
+        if let Some(game) = &loaded {
+            fluid_sim.restore(&world, game.fluids.clone());
+        }
         let next_stash = stashes.iter().map(|s| s.id + 1).max().unwrap_or(0);
         match &loaded {
             Some(game) => {
@@ -226,6 +232,7 @@ impl Server {
             player,
             spawn,
             stashes,
+            fluid_sim,
             next_stash,
             seed,
             save_dir,
@@ -259,6 +266,13 @@ impl Server {
             inventory: p.inventory.snapshot(p.held, p.seq),
             vitals: p.vitals,
             stashes: self.stashes.iter().map(|s| (s.id, Vec3::from(s.at))).collect(),
+            fluids: self
+                .fluid_sim
+                .fluids
+                .chunks
+                .iter()
+                .map(|(c, ch)| (*c, asc_world::fluid::PackedFluid::pack(ch)))
+                .collect(),
         }
     }
 
@@ -283,9 +297,16 @@ impl Server {
     /// One fixed step of the simulation.
     pub fn tick(&mut self) {
         self.sim.tick();
+        self.fluid_sim.tick(&self.world);
+        for coord in self.fluid_sim.take_changed() {
+            if let Some(ch) = self.fluid_sim.fluids.chunks.get(&coord) {
+                self.outbox.push(ServerMsg::Fluid { coord, data: asc_world::fluid::PackedFluid::pack(ch) });
+            }
+        }
         let before = self.player.vitals;
-        // (Underwater once there is water to be under.)
-        let outcome = self.player.vitals.tick(false);
+        let head = self.player.eye();
+        let underwater = self.fluid_sim.fraction_at(&self.world, head).1 > 0.5;
+        let outcome = self.player.vitals.tick(underwater);
         self.apply(outcome);
         if self.player.vitals != before {
             self.outbox.push(ServerMsg::Vitals(self.player.vitals));
@@ -318,6 +339,7 @@ impl Server {
                 }
                 let bite = rules::bite(&mut self.world, &self.content, &mut self.player.inventory, point, normal);
                 log::debug!("bite at {} removed {:.2} m3", bite.op.center, bite.removed.total_solid());
+                self.fluid_sim.disturb(&self.world, &bite.op);
                 self.outbox.push(ServerMsg::Edited(bite.op));
                 self.send_inventory();
                 if bite.overflow > 0 {
@@ -333,6 +355,7 @@ impl Server {
                 let feet = self.player.feet;
                 match rules::fill(&mut self.world, &self.content, &mut self.player.inventory, point, normal, feet) {
                     FillOutcome::Placed(op) => {
+                        self.fluid_sim.disturb(&self.world, &op);
                         self.outbox.push(ServerMsg::Edited(op));
                         self.send_inventory();
                     }
@@ -378,6 +401,7 @@ impl Server {
                 }
                 for op in rules::flatten_ops(center, self.structures.lattice.cell / 2.0, height) {
                     self.world.edits.push(op);
+                    self.fluid_sim.disturb(&self.world, &op);
                     self.outbox.push(ServerMsg::Edited(op));
                 }
             }
@@ -385,6 +409,7 @@ impl Server {
                 // The fly-mode brush, a development tool.
                 if self.player.cheats || !self.validate {
                     self.world.edits.push(op);
+                    self.fluid_sim.disturb(&self.world, &op);
                     self.outbox.push(ServerMsg::Edited(op));
                 }
             }
@@ -455,7 +480,13 @@ impl Server {
             return;
         }
         let below = p.feet - Vec3::Y * 0.15;
-        let grounded = self.world.density_at(below) < 0.0 || self.structures.sdf(below) < 0.05;
+        // Landing in water doesn't hurt: it counts as ground, and so does swimming.
+        let in_water = self.fluid_sim.fraction_at(&self.world, p.feet + Vec3::Y * 0.5).1 > 0.3;
+        let grounded = in_water || self.world.density_at(below) < 0.0 || self.structures.sdf(below) < 0.05;
+        if in_water {
+            p.fall_from = None;
+            return;
+        }
         match (grounded, p.fall_from) {
             (false, from) => p.fall_from = Some(from.map_or(p.feet.y, |f| f.max(p.feet.y))),
             (true, Some(from)) => {
@@ -624,6 +655,13 @@ impl Server {
             structures: self.structures.iter().copied().collect(),
             nodes: self.mined.iter().copied().collect(),
             stashes: self.stashes.clone(),
+            fluids: self
+                .fluid_sim
+                .fluids
+                .chunks
+                .iter()
+                .map(|(c, ch)| (*c, ch.kind.clone(), ch.amount.clone()))
+                .collect(),
         }
     }
 

@@ -18,7 +18,7 @@ use crate::ores::{OreTable, VEIN_CELL, Vein};
 
 /// Surfaces within a few metres of this height are sandy shores. Deeper basins are lowland
 /// meadows rather than vast sand plains (there is no water yet to make them seas).
-const SEA_LEVEL: f32 = 2.0;
+pub const SEA_LEVEL: f32 = 2.0;
 const SHORE_BELOW: f32 = 4.0;
 const SHORE_ABOVE: f32 = 1.0;
 /// Temperature falls by this much per metre above 20 m, so mountains grow cold belts (taiga, then

@@ -30,6 +30,15 @@ const UNBURY_SPEED: f32 = 6.0;
 const STEP_HEIGHT: f32 = 0.55;
 /// Below this the player is put back at the spawn point.
 pub const KILL_Y: f32 = -400.0;
+/// Swimming: top speeds (normal and sprinting), how hard strokes accelerate, the drag of water per
+/// second at full depth, and how fast the player can swim up or down.
+const SWIM_SPEED: f32 = 3.2;
+const SWIM_SPRINT: f32 = 4.8;
+const SWIM_ACCEL: f32 = 12.0;
+const WATER_DRAG: f32 = 2.5;
+const SWIM_VERTICAL: f32 = 3.0;
+/// Body in water above this share swims rather than walks.
+const SWIMMING: f32 = 0.35;
 
 pub use asc_sim::Mode;
 
@@ -52,6 +61,8 @@ pub struct Player {
     pub pitch: f32,
     pub mode: Mode,
     pub grounded: bool,
+    /// How much of the body is in water, 0..1 (set by the caller each frame from the fluids).
+    pub submerged: f32,
     prev_feet: Vec3,
     accumulator: f32,
 }
@@ -65,6 +76,7 @@ impl Player {
             pitch: 0.0,
             mode: Mode::Walk,
             grounded: false,
+            submerged: 0.0,
             prev_feet: feet,
             accumulator: 0.0,
         }
@@ -124,24 +136,51 @@ impl Player {
         let forward = Vec3::new(cy, 0.0, sy);
         let right = Vec3::new(-sy, 0.0, cy);
         let wish = (forward * input.forward + right * input.right).normalize_or_zero();
-        let speed = if input.sprint { SPRINT_SPEED } else { WALK_SPEED };
+        let swimming = self.submerged > SWIMMING;
+        let speed = match (swimming, input.sprint) {
+            (true, false) => SWIM_SPEED,
+            (true, true) => SWIM_SPRINT,
+            (false, false) => WALK_SPEED,
+            (false, true) => SPRINT_SPEED,
+        };
 
         // Accelerate the horizontal velocity toward the wished velocity; on the ground this also acts
         // as friction when there's no input.
         let horizontal = Vec3::new(self.velocity.x, 0.0, self.velocity.z);
         let target = wish * speed;
-        let accel = GROUND_ACCEL * if self.grounded { 1.0 } else { AIR_CONTROL };
+        let accel = if swimming {
+            SWIM_ACCEL
+        } else {
+            GROUND_ACCEL * if self.grounded { 1.0 } else { AIR_CONTROL }
+        };
         let change = target - horizontal;
         let max_change = accel * STEP;
         let horizontal = horizontal + change.clamp_length_max(max_change);
         self.velocity.x = horizontal.x;
         self.velocity.z = horizontal.z;
 
-        let jumped = self.grounded && input.up > 0.0;
-        if jumped {
-            self.velocity.y = JUMP_SPEED;
+        let mut jumped = false;
+        if swimming {
+            // Buoyancy nearly cancels gravity (a body floats with its head out); water drags; Space
+            // and Ctrl swim up and down; near the surface Space climbs out.
+            let s = self.submerged.min(1.0);
+            self.velocity.y -= GRAVITY * (1.0 - s * 1.05).max(-0.1) * STEP;
+            self.velocity *= 1.0 - (WATER_DRAG * s * STEP).min(0.9);
+            if input.up != 0.0 {
+                let target = input.up.signum() * SWIM_VERTICAL;
+                self.velocity.y += (target - self.velocity.y).clamp(-SWIM_ACCEL * STEP, SWIM_ACCEL * STEP);
+            }
+            if input.up > 0.0 && s < 0.6 && self.grounded {
+                self.velocity.y = JUMP_SPEED * 0.8;
+                jumped = true;
+            }
+        } else {
+            jumped = self.grounded && input.up > 0.0;
+            if jumped {
+                self.velocity.y = JUMP_SPEED;
+            }
+            self.velocity.y = (self.velocity.y - GRAVITY * STEP).max(-TERMINAL_SPEED);
         }
-        self.velocity.y = (self.velocity.y - GRAVITY * STEP).max(-TERMINAL_SPEED);
 
         if self.buried(density) {
             // Rise straight up through the ground until the capsule is clear again.

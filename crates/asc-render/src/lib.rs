@@ -239,6 +239,10 @@ pub struct Renderer {
     msaa: u32,
     // Per-frame scratch, kept to avoid allocating every frame.
     draw_list: Vec<(f32, ChunkCoord)>,
+    /// Simulated water meshes, per chunk (sharing the terrain arenas), and the ones visible this
+    /// frame (their offsets follow the terrain's).
+    fluid_chunks: AHashMap<ChunkCoord, GpuChunk>,
+    fluid_draw: Vec<ChunkCoord>,
     shadow_list: Vec<ChunkCoord>,
     /// Per cascade, the indices into `shadow_list` of the chunks that cast into it.
     shadow_sets: [Vec<u32>; CASCADES],
@@ -396,6 +400,8 @@ impl Renderer {
             fog_density: DEFAULT_FOG_DENSITY,
             msaa,
             draw_list: Vec::new(),
+            fluid_chunks: AHashMap::new(),
+            fluid_draw: Vec::new(),
             shadow_list: Vec::new(),
             shadow_sets: Default::default(),
             shadows: true,
@@ -655,6 +661,46 @@ impl Renderer {
         );
         let origin = chunk_origin(coord);
         self.shadow_changed(origin + min, origin + max, f32::MAX);
+    }
+
+    /// Replace the simulated water mesh of a chunk (an empty mesh removes it).
+    pub fn upload_fluid(&mut self, coord: ChunkCoord, mesh: &ChunkMesh) {
+        self.remove_fluid(coord);
+        if mesh.is_empty() {
+            return;
+        }
+        let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        for v in &mesh.vertices {
+            let p = Vec3::from(v.position);
+            min = min.min(p);
+            max = max.max(p);
+        }
+        let (device, queue) = (&self.gpu.device, &self.gpu.queue);
+        let first_vertex = self.vertices.upload(device, queue, bytemuck::cast_slice(&mesh.vertices));
+        let first_index = self.indices.upload(device, queue, bytemuck::cast_slice(&mesh.indices));
+        self.fluid_chunks.insert(
+            coord,
+            GpuChunk {
+                first_vertex,
+                vertex_count: mesh.vertices.len() as u32,
+                first_index,
+                index_count: mesh.indices.len() as u32,
+                min,
+                max,
+            },
+        );
+    }
+
+    pub fn remove_fluid(&mut self, coord: ChunkCoord) {
+        if let Some(chunk) = self.fluid_chunks.remove(&coord) {
+            self.vertices.free(chunk.first_vertex, chunk.vertex_count);
+            self.indices.free(chunk.first_index, chunk.index_count);
+        }
+    }
+
+    /// Chunk columns with simulated water (the sea plane leaves them to the fluid meshes).
+    pub fn set_fluid_columns(&mut self, columns: &[[i32; 2]]) {
+        self.far.set_fluid_columns(&self.gpu.queue, columns);
     }
 
     pub fn remove_chunk(&mut self, coord: ChunkCoord) {
@@ -1099,9 +1145,17 @@ impl Renderer {
         stats.chunks_drawn = self.draw_list.len();
         stats.shadow_chunks = self.shadow_list.len();
 
+        self.fluid_draw.clear();
+        for (coord, chunk) in &self.fluid_chunks {
+            let origin = chunk_origin(*coord) - camera_pos;
+            let (min, max) = (origin + chunk.min, origin + chunk.max);
+            if Vec3::ZERO.clamp(min, max).truncate().length() < view_distance && frustum.intersects_box(min, max) {
+                self.fluid_draw.push(*coord);
+            }
+        }
         self.offset_data.clear();
         let draws = self.draw_list.iter().map(|(_, c)| *c);
-        for coord in draws.chain(self.shadow_list.iter().copied()) {
+        for coord in draws.chain(self.shadow_list.iter().copied()).chain(self.fluid_draw.iter().copied()) {
             self.offset_data.push((chunk_origin(coord) - camera_pos).extend(0.0).into());
         }
         if self.offset_data.len() > self.offsets_capacity {
@@ -1251,6 +1305,21 @@ impl Renderer {
         // Water last: it blends over terrain and sky and doesn't write depth.
         pass.set_pipeline(&self.pipelines.water);
         self.far.draw_water(&mut pass);
+        // Then the simulated water, through the terrain arenas (bind group 0 again: the sea used 1).
+        if !self.fluid_draw.is_empty() {
+            pass.set_bind_group(0, &self.scene_bg, &[]);
+            pass.set_pipeline(&self.pipelines.fluid);
+            self.bind_arenas(&mut pass);
+            let base = (self.draw_list.len() + self.shadow_list.len()) as u32;
+            for (i, coord) in self.fluid_draw.iter().enumerate() {
+                let c = &self.fluid_chunks[coord];
+                pass.draw_indexed(
+                    c.first_index..c.first_index + c.index_count,
+                    c.first_vertex as i32,
+                    base + i as u32..base + i as u32 + 1,
+                );
+            }
+        }
         self.mark_in(&mut pass, "water");
         // The placement ghost blends over everything, including water.
         pass.set_bind_group(0, &self.scene_bg, &[]);

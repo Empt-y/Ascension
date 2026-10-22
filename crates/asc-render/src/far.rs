@@ -16,11 +16,16 @@ struct LevelInfo {
     pad: [u32; 3],
 }
 
+/// How many chunk columns with simulated water the sea plane can skip.
+pub const MAX_FLUID_COLUMNS: usize = 1024;
+
 pub struct FarTerrain {
     texture: wgpu::Texture,
     /// Surface material id per sample (R8Uint), alongside the heights.
     materials: wgpu::Texture,
     levels: wgpu::Buffer,
+    /// x = count, then (min x, min z, max x, max z) chunk columns with simulated water.
+    fluid_columns: wgpu::Buffer,
     indices: wgpu::Buffer,
     /// Index offset where each ring of quads starts; the last entry is the total.
     ring_starts: Vec<u32>,
@@ -75,6 +80,12 @@ impl FarTerrain {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let fluid_columns = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fluid columns"),
+            size: (16 * (MAX_FLUID_COLUMNS + 1)) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let (index_data, ring_starts) = ring_indices();
         let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("far grid indices"),
@@ -91,12 +102,14 @@ impl FarTerrain {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(&material_view),
                 },
+                wgpu::BindGroupEntry { binding: 3, resource: fluid_columns.as_entire_binding() },
             ],
         });
         Self {
             texture,
             materials,
             levels,
+            fluid_columns,
             indices,
             ring_starts,
             first_ring: [0; LEVELS],
@@ -129,6 +142,18 @@ impl FarTerrain {
             }
         }
         self.centers[level] = Some(to);
+    }
+
+    /// The chunk columns (x, z) whose water is simulated: the sea plane leaves them to the fluid
+    /// meshes. (Beyond `MAX_FLUID_COLUMNS` the furthest are dropped.)
+    pub fn set_fluid_columns(&mut self, queue: &wgpu::Queue, columns: &[[i32; 2]]) {
+        let n = columns.len().min(MAX_FLUID_COLUMNS);
+        let mut data = vec![[0i32; 4]; n + 1];
+        data[0][0] = n as i32;
+        for (i, c) in columns[..n].iter().enumerate() {
+            data[i + 1] = [c[0], c[1], c[0], c[1]];
+        }
+        queue.write_buffer(&self.fluid_columns, 0, bytemuck::cast_slice(&data));
     }
 
     pub fn ready_levels(&self) -> usize {

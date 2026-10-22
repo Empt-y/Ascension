@@ -62,6 +62,8 @@ pub struct Welcome {
     pub vitals: crate::vitals::Vitals,
     /// Where things left at death lie.
     pub stashes: Vec<(u32, Vec3)>,
+    /// Every materialised fluid chunk (everything else is pristine).
+    pub fluids: Vec<(glam::IVec3, asc_world::fluid::PackedFluid)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -89,4 +91,6 @@ pub enum ServerMsg {
     Died { cause: crate::vitals::Cause },
     StashPlaced { id: u32, at: Vec3 },
     StashTaken { id: u32 },
+    /// A fluid chunk changed (or came to life).
+    Fluid { coord: glam::IVec3, data: asc_world::fluid::PackedFluid },
 }

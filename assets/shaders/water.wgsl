@@ -17,6 +17,10 @@ struct LevelInfo {
 @group(1) @binding(0) var heights: texture_2d_array<f32>;
 @group(1) @binding(1) var<storage, read> levels: array<LevelInfo, 7>;
 
+// x of the first entry = count; then (min x, min z, max x, max z) chunk columns where the water
+// is simulated and drawn by fluid.wgsl instead.
+@group(1) @binding(3) var<storage, read> fluid_columns: array<vec4<i32>, 1025>;
+
 const SEA_LEVEL: f32 = 2.0;
 const TEX: i32 = 256;
 const SAMPLE_HALF: i32 = 127;
@@ -84,6 +88,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let depth = SEA_LEVEL - terrain_height(world.xz);
     if depth <= 0.0 {
         discard;
+    }
+    let column = vec2<i32>(floor(world.xz / 32.0));
+    let count = fluid_columns[0].x;
+    for (var i = 1; i <= count; i++) {
+        let c = fluid_columns[i];
+        if all(column >= c.xy) && all(column <= c.zw) {
+            discard;
+        }
     }
     let dist = length(in.rel);
     let v = -in.rel / dist;
