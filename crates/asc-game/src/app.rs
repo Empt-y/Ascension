@@ -567,6 +567,7 @@ impl State {
         let (w, h) = self.renderer.gpu().size();
         let frustum = Frustum::from_view_proj(self.camera.view_proj(w as f32 / h as f32));
         self.streamer.update(&self.world, self.camera.position, &frustum, &mut self.renderer);
+        self.fluids.near_lava(self.camera.position, &mut self.renderer);
         self.fluids.update(&self.world, &mut self.renderer);
         if self.renderer.far_enabled() {
             let p = self.camera.position;
@@ -651,6 +652,7 @@ impl State {
             sun_dir: self.sim.sun_dir(),
             view_distance: self.streamer.view_radius as f32 * 32.0,
             underwater: self.fluids.fraction_at(&self.world, self.camera.position) > 0.5,
+            lights: self.fluids.lava_lights(self.camera.position),
             brush: self
                 .hit
                 .filter(|_| self.captured || self.options.autopilot || self.options.mine_test)

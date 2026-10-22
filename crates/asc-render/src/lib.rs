@@ -80,8 +80,21 @@ struct Globals {
     output: [f32; 4],
     /// x = render scale, y = RCAS sharpness.
     upscale: [f32; 4],
-    /// x = 1 when the camera is underwater.
+    /// x = 1 when the camera is underwater, y = point light count.
     env: [f32; 4],
+    light_pos: [[f32; 4]; MAX_LIGHTS],
+    light_color: [[f32; 4]; MAX_LIGHTS],
+}
+
+/// Point lights passed to the shaders each frame (the nearest of those set).
+pub const MAX_LIGHTS: usize = 16;
+
+/// A point light: world position, reach in metres, and colour times intensity.
+#[derive(Clone, Copy, Debug)]
+pub struct PointLight {
+    pub position: Vec3,
+    pub radius: f32,
+    pub color: Vec3,
 }
 
 /// Render scales of the upscaling presets: native, quality, balanced, performance.
@@ -158,6 +171,8 @@ pub struct FrameParams {
     pub brush: Option<(Vec3, f32)>,
     /// The camera is underwater.
     pub underwater: bool,
+    /// Point lights near the camera (the nearest `MAX_LIGHTS` are used).
+    pub lights: Vec<PointLight>,
 }
 
 /// egui output for this frame.
@@ -935,6 +950,13 @@ impl Renderer {
         let night = 1.0 - smoothstep(-0.15, 0.03, frame.sun_dir.y);
         let exposure = 1.0 + night;
         let time = self.start.elapsed().as_secs_f32();
+        let mut lights: Vec<PointLight> = frame.lights.clone();
+        lights.sort_by(|a, b| {
+            let da = a.position.distance(cam.position) - a.radius;
+            let db = b.position.distance(cam.position) - b.radius;
+            da.total_cmp(&db)
+        });
+        lights.truncate(MAX_LIGHTS);
         let globals = Globals {
             view_proj: jittered.to_cols_array_2d(),
             inv_view_proj: jittered.inverse().to_cols_array_2d(),
@@ -965,7 +987,11 @@ impl Renderer {
                 f32::from(u8::from(self.taa_debug.is_some())),
                 self.sun_disc,
             ],
-            env: [f32::from(u8::from(frame.underwater)), 0.0, 0.0, 0.0],
+            env: [f32::from(u8::from(frame.underwater)), lights.len() as f32, 0.0, 0.0],
+            light_pos: std::array::from_fn(|i| {
+                lights.get(i).map_or([0.0; 4], |l| (l.position - cam.position).extend(l.radius).into())
+            }),
+            light_color: std::array::from_fn(|i| lights.get(i).map_or([0.0; 4], |l| l.color.extend(0.0).into())),
         };
         let queue = &self.gpu.queue;
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));

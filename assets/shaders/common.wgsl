@@ -36,8 +36,12 @@ struct Globals {
     // x = render scale (render size / output size), y = RCAS sharpness (0 = none, 1 = most),
     // z = 1 to count and tint TAA fireflies (ASC_DEBUG_TAA), w = sun disc brightness (0 hides it).
     upscale: vec4<f32>,
-    // x = 1 when the camera is underwater.
+    // x = 1 when the camera is underwater, y = how many point lights are set.
     env: vec4<f32>,
+    // Point lights (lava, later fires and lamps): xyz camera-relative position, w radius; then rgb
+    // colour times intensity.
+    light_pos: array<vec4<f32>, 16>,
+    light_color: array<vec4<f32>, 16>,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -444,6 +448,26 @@ fn shadow_factor_foliage(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     return shadow_lookup(rel, n, 8u, FOLIAGE_PENUMBRA);
 }
 
+// Light from the point lights reaching a surface at `rel` facing `n` (unshadowed, smooth falloff
+// to zero at each light's radius). `wrap` softens the n.l term (foliage).
+fn point_light(rel: vec3<f32>, n: vec3<f32>, wrap: f32) -> vec3<f32> {
+    var sum = vec3(0.0);
+    let count = u32(globals.env.y);
+    for (var i = 0u; i < count; i++) {
+        let d = globals.light_pos[i].xyz - rel;
+        let r = globals.light_pos[i].w;
+        let dist2 = dot(d, d);
+        if dist2 > r * r {
+            continue;
+        }
+        let dist = sqrt(dist2);
+        let falloff = pow(1.0 - dist / r, 2.0) / (1.0 + dist2 * 0.05);
+        let ndl = max((dot(n, d / max(dist, 1e-3)) + wrap) / (1.0 + wrap), 0.0);
+        sum += globals.light_color[i].rgb * falloff * ndl;
+    }
+    return sum;
+}
+
 // Sun, sky ambient and moonlight on any opaque surface (metallic-roughness PBR, stylised ambient).
 // Shared by terrain, far terrain and building parts so they all sit in the same light.
 fn shade_pbr(albedo: vec3<f32>, roughness: f32, metallic: f32, n: vec3<f32>, rel: vec3<f32>, occlusion: f32, shadow: f32) -> vec3<f32> {
@@ -462,7 +486,7 @@ fn shade_pbr(albedo: vec3<f32>, roughness: f32, metallic: f32, n: vec3<f32>, rel
     let diffuse = albedo * (1.0 - metallic);
     let f0 = mix(vec3(0.04), albedo, metallic);
     let fres = fresnel_schlick(f0, v, normalize(v + l));
-    var color = diffuse * (sun * ndl + ambient + moon);
+    var color = diffuse * (sun * ndl + ambient + moon + point_light(rel, n, 0.0));
     // Metals have no diffuse, so give them a dim reflection of the ambient instead.
     color += f0 * ambient * metallic * 0.8;
     color += sun * fres * ggx_lobe(n, v, l, roughness);

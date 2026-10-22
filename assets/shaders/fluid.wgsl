@@ -7,6 +7,8 @@
 struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec4<f32>,
+    // Material weights: slot 0 water, slot 1 lava (see the client's fluid mesher).
+    @location(2) weights_a: vec4<f32>,
     @builtin(instance_index) instance: u32,
 }
 
@@ -14,6 +16,7 @@ struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) rel: vec3<f32>,
     @location(1) @interpolate(perspective, centroid) normal: vec3<f32>,
+    @location(2) @interpolate(perspective, centroid) lava: f32,
 }
 
 @vertex
@@ -22,6 +25,7 @@ fn vs_main(in: VsIn) -> VsOut {
     out.rel = in.position + chunk_offsets[in.instance].xyz;
     out.clip = globals.view_proj * vec4(out.rel, 1.0);
     out.normal = in.normal.xyz;
+    out.lava = in.weights_a.y / max(in.weights_a.x + in.weights_a.y, 1e-4);
     return out;
 }
 
@@ -36,9 +40,22 @@ fn ripples(xz: vec2<f32>, t: f32) -> vec2<f32> {
     return vec2(dx, dz) * 0.9;
 }
 
+// Molten rock: a glowing orange body under a dark crust that drifts and cracks slowly.
+fn lava_color(world: vec3<f32>, t: f32) -> vec3<f32> {
+    let flow = vec3(world.x * 0.35 + t * 0.05, world.y * 0.2, world.z * 0.35 - t * 0.03);
+    let crust = smoothstep(0.45, 0.7, value_noise(flow) * 0.65 + value_noise(flow * 2.7 + vec3(t * 0.1)) * 0.35);
+    let hot = vec3(6.0, 1.7, 0.25) * (0.85 + 0.3 * value_noise(world * 1.3 + vec3(0.0, t * 0.4, 0.0)));
+    let dark = vec3(0.06, 0.02, 0.012);
+    return mix(hot, dark, crust);
+}
+
 @fragment
 fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let world = in.rel + globals.camera.xyz;
+    if in.lava > 0.5 {
+        // Lava is opaque and gives its own light (it blooms); fog still covers it at a distance.
+        return vec4(debug_hot(apply_fog(lava_color(world, globals.camera.w), in.rel), 7.0), 1.0);
+    }
     let dist = length(in.rel);
     let v = -in.rel / dist;
     // The mesh normal points out of the water; seen from inside it, flip it towards the eye.

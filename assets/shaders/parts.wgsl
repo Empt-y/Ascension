@@ -183,7 +183,7 @@ fn shade_foliage(in: VsOut, albedo: vec3<f32>, n: vec3<f32>, occlusion: f32) -> 
     let wrap = max(dot(n, l) + 0.45, 0.0) / 1.45;
     let through = pow(max(dot(-v, l), 0.0), 3.0) * 0.55 + 0.12;
     let sun = in.sun * (wrap + through * vec3(1.0, 1.08, 0.75)) * mix(0.35, 1.0, occlusion);
-    let color = albedo * (sun + in.ambient * occlusion);
+    let color = albedo * (sun + in.ambient * occlusion + point_light(in.rel, n, 0.5));
     return mix(color, in.fog.rgb, in.fog.a);
 }
 

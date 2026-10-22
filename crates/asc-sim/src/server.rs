@@ -303,6 +303,16 @@ impl Server {
     pub fn tick(&mut self) {
         self.sim.tick();
         self.fluid_sim.tick(&self.world);
+        for (cell, material) in self.fluid_sim.take_solidified() {
+            let op = asc_world::EditOp {
+                center: cell.as_vec3(),
+                radius: 0.55,
+                kind: asc_world::EditKind::FillBox { half_height: 0.55 },
+                material,
+            };
+            self.world.edits.push(op);
+            self.outbox.push(ServerMsg::Edited(op));
+        }
         for coord in self.fluid_sim.take_changed() {
             if let Some(ch) = self.fluid_sim.fluids.chunks.get(&coord) {
                 self.outbox.push(ServerMsg::Fluid { coord, data: asc_world::fluid::PackedFluid::pack(ch) });
@@ -310,9 +320,17 @@ impl Server {
         }
         let before = self.player.vitals;
         let head = self.player.eye();
-        let underwater = self.fluid_sim.fraction_at(&self.world, head).1 > 0.5;
+        let (head_kind, head_fill) = self.fluid_sim.fraction_at(&self.world, head);
+        let underwater = head_kind == asc_world::fluid::FluidKind::Water && head_fill > 0.5;
         let outcome = self.player.vitals.tick(underwater);
         self.apply(outcome);
+        // Lava burns fast: anything of the body in it.
+        let body = self.player.feet + Vec3::Y * 0.5;
+        let (k, fill) = self.fluid_sim.fraction_at(&self.world, body);
+        if k == asc_world::fluid::FluidKind::Lava && fill > 0.1 && self.sim.ticks.is_multiple_of(5) {
+            let outcome = self.player.vitals.hurt(60, Cause::Lava);
+            self.apply(outcome);
+        }
         if self.player.vitals != before {
             self.outbox.push(ServerMsg::Vitals(self.player.vitals));
         }

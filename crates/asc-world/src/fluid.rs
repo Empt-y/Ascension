@@ -26,6 +26,8 @@ pub const FULL: u16 = 1000;
 pub const COMPRESS: u16 = 20;
 /// Cells per chunk.
 pub const CELLS: usize = (CHUNK * CHUNK * CHUNK) as usize;
+/// Deep down, open cave space below this height is a sea of lava.
+pub const LAVA_LEVEL: f32 = -160.0;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -103,6 +105,13 @@ pub fn water_level(worldgen: &WorldGen, x: f32, z: f32) -> Option<f32> {
 /// ground (caves under the sea floor stay dry until something opens them).
 pub fn pristine(worldgen: &WorldGen, c: IVec3) -> (FluidKind, u16) {
     let (x, z) = (c.x as f32, c.z as f32);
+    if (c.y as f32) < LAVA_LEVEL + 0.5 {
+        let a = fill(c.y, LAVA_LEVEL);
+        if a > 0 && worldgen.sample(Vec3::new(x, c.y as f32, z)).0 > 0.0 {
+            return (FluidKind::Lava, a);
+        }
+        return (FluidKind::None, 0);
+    }
     let Some(level) = water_level(worldgen, x, z) else { return (FluidKind::None, 0) };
     let amount = fill(c.y, level);
     if amount == 0 || c.y as f32 + 0.5 < worldgen.height(x, z) - 1.0 {
@@ -134,6 +143,16 @@ pub fn pristine_chunk(worldgen: &WorldGen, terrain: &ChunkData) -> FluidChunk {
                     continue;
                 }
                 let wy = base.y + y as i32;
+                if (wy as f32) < LAVA_LEVEL + 0.5 {
+                    // The deep lava sea: every open cell below its level (from the built terrain:
+                    // tunnels dug down there fill too).
+                    let a = fill(wy, LAVA_LEVEL);
+                    if a > 0 {
+                        out.kind[i] = FluidKind::Lava as u8;
+                        out.amount[i] = a;
+                    }
+                    continue;
+                }
                 if let Some(level) = level {
                     let a = fill(wy, level);
                     // Natural water only down to the natural ground, and only where the ground was

@@ -22,6 +22,14 @@ use rayon::prelude::*;
 
 /// Smaller sideways differences than this don't flow (or settled water would ripple forever).
 const MIN_DIFFERENCE: i32 = 6;
+/// Lava is viscous: it spreads a twelfth as readily and stops at a far steeper slope, so it piles
+/// into thick lobes instead of thin sheets.
+const LAVA_SPREAD: i32 = 12;
+const LAVA_MIN_DIFFERENCE: i32 = 150;
+/// Lava fuller than this is "still" and quenches to obsidian; thinner, flowing lava to basalt.
+const STILL_LAVA: u16 = 900;
+/// Water lost to steam each time it quenches a lava cell.
+const STEAM: u16 = 250;
 /// A chunk with no change for this many ticks falls asleep.
 const SLEEP_AFTER: u32 = 3;
 const N: i32 = CHUNK;
@@ -76,10 +84,12 @@ fn sideways(a: Cell, b: Cell) -> i32 {
         return 0;
     }
     let diff = a.amount - b.amount;
-    if diff.abs() < MIN_DIFFERENCE {
+    let lava = a.kind == FluidKind::Lava as u8 || b.kind == FluidKind::Lava as u8;
+    let (min, spread) = if lava { (LAVA_MIN_DIFFERENCE, LAVA_SPREAD) } else { (MIN_DIFFERENCE, 5) };
+    if diff.abs() < min {
         return 0;
     }
-    let flow = diff / 5;
+    let flow = diff / spread;
     if (flow > 0 && b.ghost && b.kind == 0) || (flow < 0 && a.ghost && a.kind == 0) {
         return 0;
     }
@@ -95,6 +105,8 @@ pub struct FluidSim {
     awake: BTreeMap<[i32; 3], u32>,
     /// Chunks changed since the last `take_changed`, to send to clients.
     changed: BTreeSet<[i32; 3]>,
+    /// Lava cells that met water and set into rock since the last `take_solidified`.
+    solidified: Vec<(IVec3, asc_world::Material)>,
 }
 
 const FACES: [IVec3; 6] =
@@ -107,6 +119,61 @@ impl FluidSim {
             ghosts: AHashMap::new(),
             awake: BTreeMap::new(),
             changed: BTreeSet::new(),
+            solidified: Vec::new(),
+        }
+    }
+
+    /// Cells where lava met water and became rock, for the server to turn into terrain.
+    pub fn take_solidified(&mut self) -> Vec<(IVec3, asc_world::Material)> {
+        std::mem::take(&mut self.solidified)
+    }
+
+    /// Where lava touches water, the lava sets into rock (obsidian where it was still, basalt where
+    /// it flowed) and the water loses some to steam. Run after the passes, one chunk at a time in
+    /// coordinate order (it writes across chunk edges), so it stays deterministic.
+    fn react(&mut self, any_changed: &mut BTreeSet<[i32; 3]>) {
+        let coords: Vec<[i32; 3]> = self.awake.keys().copied().collect();
+        for k in coords {
+            let coord = IVec3::from_array(k);
+            let Some(ch) = self.fluids.chunks.get(&coord) else { continue };
+            if !ch.kind.contains(&(FluidKind::Lava as u8)) {
+                continue;
+            }
+            let mut hits: Vec<(IVec3, u16, IVec3)> = Vec::new();
+            for i in 0..CELLS {
+                if ch.kind[i] != FluidKind::Lava as u8 || ch.amount[i] == 0 {
+                    continue;
+                }
+                let p = IVec3::new((i % 32) as i32, ((i / 32) % 32) as i32, (i / 1024) as i32);
+                for f in FACES {
+                    let other = self.peek(coord, p + f);
+                    if other.kind == FluidKind::Water as u8 && other.amount > 0 && !other.ghost {
+                        hits.push((p, ch.amount[i], p + f));
+                        break;
+                    }
+                }
+            }
+            for (p, amount, water) in hits {
+                let material = if amount >= STILL_LAVA { asc_world::Material::Obsidian } else { asc_world::Material::Basalt };
+                let cell = coord * N + p;
+                self.solidified.push((cell, material));
+                let ch = self.fluids.chunks.get_mut(&coord).expect("still there");
+                let i = cell_index(p.x as usize, p.y as usize, p.z as usize);
+                ch.amount[i] = 0;
+                ch.kind[i] = 0;
+                ch.solid[i] = true;
+                // The water side gives some up as steam.
+                let (wc, wl) = fluid::split(coord * N + water);
+                if let Some(wch) = self.fluids.chunks.get_mut(&wc) {
+                    let j = cell_index(wl.x as usize, wl.y as usize, wl.z as usize);
+                    wch.amount[j] = wch.amount[j].saturating_sub(STEAM);
+                    if wch.amount[j] == 0 {
+                        wch.kind[j] = 0;
+                    }
+                    any_changed.insert(wc.to_array());
+                }
+                any_changed.insert(k);
+            }
         }
     }
 
@@ -313,6 +380,7 @@ impl FluidSim {
                 wanted.extend(want.into_iter().map(|c| c.to_array()));
             }
         }
+        self.react(&mut any_changed);
         for coord in wanted {
             self.materialise(world, IVec3::from_array(coord));
         }
@@ -479,5 +547,60 @@ mod tests {
         // And the sea is still at sea level just offshore.
         let sea = Vec3::new(x - 4.0, asc_world::SEA_LEVEL - 0.6, z);
         assert!(sim.fraction_at(&world, sea).1 > 0.9);
+    }
+
+    #[test]
+    fn lava_spreads_less_than_water_and_sets_into_rock_on_meeting_it() {
+        let world = World::new(1);
+        // Lava: a block spreads into a thick lobe, not a film.
+        let mut sim = boxed(&world);
+        let coord = IVec3::new(1000, 1000, 1000);
+        for k in sim.fluids.chunks.get_mut(&coord).unwrap().kind.iter_mut() {
+            if *k == 1 {
+                *k = FluidKind::Lava as u8;
+            }
+        }
+        for _ in 0..3000 {
+            sim.tick(&world);
+        }
+        let ch = &sim.fluids.chunks[&coord];
+        let covered = (1..31).flat_map(|z| (1..31).map(move |x| (x, z))).filter(|&(x, z)| ch.amount[cell_index(x, 1, z)] > 0).count();
+        assert!(covered < 600, "lava covered {covered} of 900 floor cells: too runny");
+        assert!(covered > 100, "lava covered only {covered}");
+
+        // Lava next to water: the lava cells touching it become rock.
+        let mut sim = boxed(&world);
+        let ch = sim.fluids.chunks.get_mut(&coord).unwrap();
+        for z in 2..12 {
+            for x in 2..12 {
+                let i = cell_index(x, 1, z);
+                ch.kind[i] = FluidKind::Lava as u8;
+                ch.amount[i] = FULL;
+                let j = cell_index(x, 1, z + 12);
+                ch.kind[j] = FluidKind::Water as u8;
+                ch.amount[j] = FULL;
+            }
+        }
+        for _ in 0..200 {
+            sim.tick(&world);
+        }
+        let rock = sim.take_solidified();
+        assert!(!rock.is_empty(), "nothing set");
+        assert!(rock.iter().all(|(_, m)| matches!(m, asc_world::Material::Obsidian | asc_world::Material::Basalt)));
+    }
+
+    #[test]
+    fn deep_caves_hold_a_lava_sea() {
+        let wg = asc_world::WorldGen::new(1337);
+        // Somewhere far below, an open cell: lava.
+        let found = (0..2000).find_map(|i| {
+            let c = IVec3::new(i * 3 % 400 - 200, -170 - (i % 30), i * 7 % 400 - 200);
+            match fluid::pristine(&wg, c) {
+                (FluidKind::Lava, a) if a == FULL => Some(c),
+                _ => None,
+            }
+        });
+        assert!(found.is_some(), "no open cell found below the lava level");
+        assert_ne!(fluid::pristine(&wg, IVec3::new(0, -100, 0)).0, FluidKind::Lava);
     }
 }
