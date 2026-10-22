@@ -87,15 +87,20 @@ fn place_at(in: VsIn, strength: f32, t: f32) -> vec3<f32> {
         let gust = sin(t * 1.1 + phase) + 0.45 * sin(t * 2.7 + phase * 1.7);
         let bend = 1.0 - smoothstep(20.0, 60.0, dist);
         rel += vec3(1.0, 0.0, 0.55) * gust * h * h * 0.0011 * sway * bend;
-        // ...and leaf cards flutter, more towards their free ends.
+        // ...and leaf cards flutter, more towards their free ends. The phase changes slowly across
+        // the model, so each card moves nearly as one piece: a fast phase change between a card's own
+        // corners made it ripple, and its edges swam across pixels as sparkle.
         let flutter = 1.0 - smoothstep(12.0, 30.0, dist);
         if material.extra.w > 0.5 && flutter > 0.0 {
-            let f = sin(t * 5.3 + phase * 3.0 + dot(local, vec3(2.1, 1.7, 2.9)));
-            rel += vec3(0.5, 0.35, -0.4) * f * 0.035 * in.uv.y * sway * flutter;
+            let f = sin(t * 4.0 + phase * 3.0 + dot(local, vec3(0.7, 0.55, 0.95)));
+            rel += vec3(0.5, 0.35, -0.4) * f * 0.025 * in.uv.y * sway * flutter;
         }
     }
     return rel;
 }
+
+// How far towards the sun foliage looks its shadow up from (metres).
+const FOLIAGE_SHADOW_LIFT: f32 = 0.8;
 
 fn hash11(x: f32) -> f32 {
     return fract(sin(x * 12.9898) * 43758.547);
@@ -127,7 +132,10 @@ fn vs_main(in: VsIn) -> VsOut {
         out.ambient = mix(ground_amb, sky_amb, n.y * 0.5 + 0.5) + moon;
         // Shadow from where the leaf rests, not where the wind has pushed it: a swaying leaf near a
         // shadow edge would otherwise flash between lit and shadowed (sparkle).
-        out.sun = sun_light() * shadow_factor_fast(place(in, false), n);
+        // Looked up from a point towards the sun: a grass blade's base sits at the ground's own
+        // depth in the shadow map, and the soft lookup reaches the ground around it, so the ground
+        // itself shadowed it (dark bases on sunlit tufts).
+        out.sun = sun_light() * shadow_factor_foliage(place(in, false) + sun_dir() * FOLIAGE_SHADOW_LIFT, n);
         let edge = smoothstep(globals.far.x * 0.75, globals.far.x * 0.97, length(out.rel.xz));
         out.fog = vec4(sky_base(normalize(out.rel)), max(fog_amount(out.rel), edge));
     }

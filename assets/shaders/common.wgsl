@@ -320,6 +320,7 @@ fn fresnel_schlick(f0: vec3<f32>, v: vec3<f32>, h: vec3<f32>) -> vec3<f32> {
 const SHADOW_DEPTH: f32 = 500.0;
 // Shadow edges are this soft in the world (metres), whichever cascade draws them.
 const PENUMBRA: f32 = 0.07;
+const FOLIAGE_PENUMBRA: f32 = 0.6;
 
 // The matrix of the layer a shadow pass is rendering.
 fn shadow_caster_matrix() -> mat4x4<f32> {
@@ -336,7 +337,7 @@ fn cascade_coords(layer: u32, c: u32, rel: vec3<f32>, n: vec3<f32>) -> vec4<f32>
 }
 
 // Percentage-closer filtering over a Poisson disc sized to PENUMBRA, each tap itself bilinear.
-fn cascade_pcf(layer: u32, c: u32, s: vec4<f32>, taps: u32) -> f32 {
+fn cascade_pcf(layer: u32, c: u32, s: vec4<f32>, taps: u32, penumbra: f32) -> f32 {
     if s.z > 1.0 {
         return 1.0;
     }
@@ -348,7 +349,7 @@ fn cascade_pcf(layer: u32, c: u32, s: vec4<f32>, taps: u32) -> f32 {
     let size = f32(textureDimensions(shadow_map).x);
     let texel = 2.0 * globals.shadow_radii[c] / size;
     let bias = texel * 1.5 / SHADOW_DEPTH;
-    let radius = max(1.0, PENUMBRA / texel) / size;
+    let radius = max(1.0, penumbra / texel) / size;
     var lit = 0.0;
     for (var i = 0u; i < taps; i++) {
         lit += textureSampleCompareLevel(shadow_map, shadow_sampler, s.xy + disc[i] * radius, i32(layer), s.z - bias);
@@ -358,17 +359,17 @@ fn cascade_pcf(layer: u32, c: u32, s: vec4<f32>, taps: u32) -> f32 {
 
 // Sun visibility from one set of cascades: the nearest cascade that covers the point, blended into
 // the next one over its outer edge (and into no shadow past the last), so there are no seams.
-fn shadow_lookup_set(group: u32, rel: vec3<f32>, n: vec3<f32>, taps: u32) -> f32 {
+fn shadow_lookup_set(group: u32, rel: vec3<f32>, n: vec3<f32>, taps: u32, penumbra: f32) -> f32 {
     for (var c = 0u; c < 3u; c++) {
         let layer = group * 3u + c;
         let s = cascade_coords(layer, c, rel, n);
         if s.w < 1.0 {
-            var lit = cascade_pcf(layer, c, s, taps);
+            var lit = cascade_pcf(layer, c, s, taps, penumbra);
             // A wide blend into the next cascade, so the change in detail has no visible edge.
             let blend = smoothstep(0.6, 1.0, s.w);
             if blend > 0.0 {
                 if c < 2u {
-                    lit = mix(lit, cascade_pcf(layer + 1u, c + 1u, cascade_coords(layer + 1u, c + 1u, rel, n), taps), blend);
+                    lit = mix(lit, cascade_pcf(layer + 1u, c + 1u, cascade_coords(layer + 1u, c + 1u, rel, n), taps, penumbra), blend);
                 } else {
                     lit = mix(lit, 1.0, blend);
                 }
@@ -381,26 +382,29 @@ fn shadow_lookup_set(group: u32, rel: vec3<f32>, n: vec3<f32>, taps: u32) -> f32
 
 // Sun visibility at a point: the current cascade set, dissolving in over the previous one after
 // each step of the sun.
-fn shadow_lookup(rel: vec3<f32>, n: vec3<f32>, taps: u32) -> f32 {
+fn shadow_lookup(rel: vec3<f32>, n: vec3<f32>, taps: u32, penumbra: f32) -> f32 {
     if globals.shadow.y < 0.5 {
         return 1.0;
     }
     let current = u32(globals.shadow_radii.w);
-    var lit = shadow_lookup_set(current, rel, n, taps);
+    var lit = shadow_lookup_set(current, rel, n, taps, penumbra);
     let fade = globals.shadow.w;
     if fade < 1.0 {
-        lit = mix(shadow_lookup_set(1u - current, rel, n, taps), lit, fade);
+        lit = mix(shadow_lookup_set(1u - current, rel, n, taps, penumbra), lit, fade);
     }
     return lit;
 }
 
 fn shadow_factor(rel: vec3<f32>, n: vec3<f32>) -> f32 {
-    return shadow_lookup(rel, n, 8u);
+    return shadow_lookup(rel, n, 8u, PENUMBRA);
 }
 
-// Fewer taps, for surfaces drawn many layers deep (foliage).
-fn shadow_factor_fast(rel: vec3<f32>, n: vec3<f32>) -> f32 {
-    return shadow_lookup(rel, n, 4u);
+// Foliage (looked up per vertex): a wide, soft penumbra. Leaves shadow each other in leaf-sized
+// patches, so a crisp lookup lit or darkened single leaves at random; as they fluttered, that
+// speckle of bright and dark leaves shuffled and glinted. Soft, a bush shades smoothly from its
+// sunlit side into its middle.
+fn shadow_factor_foliage(rel: vec3<f32>, n: vec3<f32>) -> f32 {
+    return shadow_lookup(rel, n, 8u, FOLIAGE_PENUMBRA);
 }
 
 // Sun, sky ambient and moonlight on any opaque surface (metallic-roughness PBR, stylised ambient).
