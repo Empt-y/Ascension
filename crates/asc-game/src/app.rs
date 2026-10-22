@@ -47,6 +47,8 @@ const EDIT_REPEAT: Duration = Duration::from_millis(110);
 
 #[derive(Clone, Debug, Default)]
 pub struct Options {
+    /// Fall from 30 m (dying), respawn, then walk back to the stash. For unattended checks.
+    pub fall_test: bool,
     /// Render the scene at this fraction of the window's resolution and upscale it (`--render-scale`).
     pub render_scale: Option<f32>,
     /// Run a stand-in factory on the server every tick (light: mostly waiting machines; heavy:
@@ -169,6 +171,7 @@ impl Options {
                 "--hide-hud" => opts.hide_hud = true,
                 "--time" => opts.time_of_day = Some(value("--time")?.parse()?),
                 "--exit-after" => opts.exit_after = Some(value("--exit-after")?.parse()?),
+                "--fall-test" => opts.fall_test = true,
                 "--tick-stress" => {
                     opts.tick_stress = Some(match value("--tick-stress")?.as_str() {
                         "light" => asc_sim::stress::StressConfig::LIGHT,
@@ -244,6 +247,13 @@ struct State {
     /// Inventory ops sent but not yet in a server snapshot, re-applied on top of each snapshot.
     pending_ops: Vec<(u32, InventoryOp)>,
     inventory_seq: u32,
+    /// The player's health, air and temperature, as the server has them.
+    vitals: asc_sim::vitals::Vitals,
+    /// The red edge after being hurt, fading from 1.
+    hurt_flash: f32,
+    fall_test_stage: u8,
+    /// Where things left at death lie.
+    stashes: std::collections::BTreeMap<u32, Vec3>,
     inventory_open: bool,
     notice: Option<(String, Instant)>,
     /// Derived from the player every frame.
@@ -295,7 +305,7 @@ impl State {
         let parts = PartModels::load(&mut renderer)?;
         let save_dir = options.saves_dir.clone().unwrap_or_else(save::default_saves_dir).join(&options.world);
         // Scripted tests and tools build and dig from wherever they stand.
-        let validate = !(options.build_test || options.build_stress || options.autopilot);
+        let validate = !(options.build_test || options.build_stress || options.autopilot || options.fall_test);
         let config = srv::Config {
             save_dir,
             seed: options.seed,
@@ -349,6 +359,8 @@ impl State {
         (player.yaw, player.pitch) = (welcome.yaw, welcome.pitch);
         let mut inventory = Inventory::default();
         let held = inventory.restore(&welcome.inventory);
+        let vitals = welcome.vitals;
+        let stashes: std::collections::BTreeMap<u32, Vec3> = welcome.stashes.iter().copied().collect();
         if options.autopilot {
             player.mode = Mode::Fly;
             player.teleport(spawn + Vec3::Y * 25.0);
@@ -398,6 +410,10 @@ impl State {
             inventory,
             mining: Mining::default(),
             held,
+            vitals,
+            hurt_flash: 0.0,
+            fall_test_stage: 0,
+            stashes,
             pending_ops: Vec::new(),
             inventory_seq: welcome.inventory.seq,
             inventory_open: options.show_inventory,
@@ -498,6 +514,9 @@ impl State {
         if self.options.build_test {
             self.build_test_step();
         }
+        if self.options.fall_test {
+            self.fall_test_step();
+        }
         if self.build_tool.is_some() {
             self.mining.reset();
             self.use_build_tool();
@@ -568,6 +587,8 @@ impl State {
         let status = self.build_status();
         let mut picked = None;
         let (content, inventory, held) = (&self.content, &self.inventory, self.held);
+        self.hurt_flash = (self.hurt_flash - dt.as_secs_f32() * 1.5).max(0.0);
+        let (vitals, hurt) = (self.vitals, self.hurt_flash);
         let mut clicked = None;
         let (open, captured, notice) = (self.inventory_open, self.captured, &self.notice);
         let output = self.egui_ctx.run_ui(raw_input, |ui| {
@@ -576,7 +597,9 @@ impl State {
             if captured {
                 inventory_ui::crosshair(ctx, progress);
             }
+            inventory_ui::hurt_overlay(ctx, hurt);
             if walking {
+                inventory_ui::vitals(ctx, &vitals);
                 inventory_ui::hotbar(ctx, content, inventory);
             }
             if let Some((text, _)) = notice {
@@ -974,12 +997,64 @@ impl State {
             ServerMsg::Notice(text) => self.show_notice(text),
             ServerMsg::Saved { .. } | ServerMsg::Pong(_) => {}
             ServerMsg::Stats { tps, mspt } => self.server_stats = (tps, mspt),
+            ServerMsg::Vitals(v) => self.vitals = v,
+            ServerMsg::Hurt { amount, .. } => {
+                self.hurt_flash = (self.hurt_flash + amount as f32 / 200.0).min(1.0);
+            }
+            ServerMsg::Died { cause } => {
+                self.hurt_flash = 1.0;
+                self.show_notice(format!("You {}. Your things are where you fell.", cause.describe()));
+                self.player.velocity = Vec3::ZERO;
+            }
+            ServerMsg::StashPlaced { id, at } => {
+                self.stashes.insert(id, at);
+                self.sync_stashes();
+            }
+            ServerMsg::StashTaken { id } => {
+                self.stashes.remove(&id);
+                self.sync_stashes();
+            }
             ServerMsg::Correct { feet, mode } => {
                 log::warn!("server put the player back at {feet}");
                 self.player.teleport(feet);
                 self.player.mode = mode;
             }
         }
+    }
+
+    /// Fall test: at 3 s jump 30 m up (and die on landing); at 9 s go back to where the stash was
+    /// left, which should pick it up; log each stage.
+    fn fall_test_step(&mut self) {
+        let t = self.started.elapsed().as_secs_f32();
+        if t > 3.0 && self.fall_test_stage == 0 {
+            self.fall_test_stage = 1;
+            self.player.mode = Mode::Walk;
+            let up = self.player.feet + Vec3::Y * 30.0;
+            self.player.teleport(up);
+            log::info!("fall test: dropped from {up:.1} with {} health", self.vitals.health);
+        }
+        if t > 9.0 && self.fall_test_stage == 1 {
+            self.fall_test_stage = 2;
+            log::info!("fall test: at {:.1}, {} health, stashes {:?}", self.player.feet, self.vitals.health, self.stashes);
+            if let Some(at) = self.stashes.values().next() {
+                self.player.teleport(*at + Vec3::Y * 0.2);
+            }
+        }
+        if t > 12.0 && self.fall_test_stage == 2 {
+            self.fall_test_stage = 3;
+            log::info!("fall test: stashes left {:?} | inventory {}", self.stashes, self.inventory_summary());
+        }
+    }
+
+    /// Draw a small crate where each stash lies.
+    fn sync_stashes(&mut self) {
+        let model = self.parts.model(0, asc_build::PartKind::Foundation);
+        let extras = self
+            .stashes
+            .values()
+            .map(|at| asc_render::PartInstance { model, position: *at, yaw: 0.4, scale: 0.3, sway: 0.0 })
+            .collect();
+        self.building.set_extras(extras);
     }
 
     /// Do an inventory op now (so the screen responds at once) and ask the server to do it too.
@@ -1518,6 +1593,7 @@ impl ApplicationHandler for App {
                 if state.options.build_stress {
                     state.build_stress();
                 }
+                state.sync_stashes();
                 self.state = Some(state);
             }
             Err(err) => {

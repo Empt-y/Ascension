@@ -59,6 +59,9 @@ pub struct Welcome {
     pub pitch: f32,
     pub mode: Mode,
     pub inventory: InventorySnapshot,
+    pub vitals: crate::vitals::Vitals,
+    /// Where things left at death lie.
+    pub stashes: Vec<(u32, Vec3)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -78,4 +81,12 @@ pub enum ServerMsg {
     Correct { feet: Vec3, mode: Mode },
     /// Once a second: ticks per second, and the slowest tick (ms).
     Stats { tps: f32, mspt: f32 },
+    /// The player's health, air and temperature changed.
+    Vitals(crate::vitals::Vitals),
+    /// Something hurt the player.
+    Hurt { amount: i32, cause: crate::vitals::Cause },
+    /// The player died (a `Correct` to the spawn point follows).
+    Died { cause: crate::vitals::Cause },
+    StashPlaced { id: u32, at: Vec3 },
+    StashTaken { id: u32 },
 }

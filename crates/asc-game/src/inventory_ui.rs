@@ -63,6 +63,42 @@ pub fn hotbar(ctx: &egui::Context, content: &Content, inventory: &Inventory) {
     }
 }
 
+/// Health (and air, when it's running out) above the hotbar.
+pub fn vitals(ctx: &egui::Context, v: &asc_sim::vitals::Vitals) {
+    use asc_sim::vitals::{MAX_AIR, MAX_HEALTH};
+    let screen = ctx.content_rect();
+    let width = HOTBAR as f32 * (SLOT + GAP) - GAP;
+    let left = screen.center().x - width / 2.0;
+    let bottom = screen.bottom() - SLOT - 14.0 - 30.0;
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("vitals")));
+    let bar = |y: f32, fraction: f32, color: Color32| {
+        let rect = Rect::from_min_size(Pos2::new(left, y), Vec2::new(width * 0.5 - GAP, 9.0));
+        painter.rect_filled(rect, 4.0, Color32::from_black_alpha(150));
+        let fill = Rect::from_min_size(rect.min, Vec2::new(rect.width() * fraction.clamp(0.0, 1.0), rect.height()));
+        painter.rect_filled(fill, 4.0, color);
+    };
+    bar(bottom, v.health as f32 / MAX_HEALTH as f32, Color32::from_rgb(210, 50, 45));
+    if v.air < MAX_AIR {
+        bar(bottom - 13.0, v.air as f32 / MAX_AIR as f32, Color32::from_rgb(80, 160, 230));
+    }
+}
+
+/// A red edge on the screen after being hurt, fading out (`strength` 0..1).
+pub fn hurt_overlay(ctx: &egui::Context, strength: f32) {
+    if strength <= 0.0 {
+        return;
+    }
+    let screen = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("hurt")));
+    let alpha = (strength.min(1.0) * 140.0) as u8;
+    let edge = 90.0;
+    for (i, a) in [(0, 1.0f32), (1, 0.6), (2, 0.3)] {
+        let w = edge * (i as f32 + 1.0) / 3.0;
+        let c = Color32::from_rgba_unmultiplied(200, 0, 0, (alpha as f32 * a) as u8);
+        painter.rect_stroke(screen.shrink(w * 0.5), 0.0, Stroke::new(w, c), StrokeKind::Inside);
+    }
+}
+
 /// Crosshair with an arc showing how far through the current bite you are.
 pub fn crosshair(ctx: &egui::Context, progress: f32) {
     let center = ctx.content_rect().center();

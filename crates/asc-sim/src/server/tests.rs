@@ -178,6 +178,11 @@ fn every_message_survives_postcard() {
         ServerMsg::Pong(3),
         ServerMsg::Stats { tps: 19.8, mspt: 0.4 },
         ServerMsg::Correct { feet: Vec3::new(1.0, 2.0, 3.0), mode: Mode::Walk },
+        ServerMsg::Vitals(crate::vitals::Vitals::default()),
+        ServerMsg::Hurt { amount: 120, cause: crate::vitals::Cause::Fall },
+        ServerMsg::Died { cause: crate::vitals::Cause::Lava },
+        ServerMsg::StashPlaced { id: 2, at: Vec3::ONE },
+        ServerMsg::StashTaken { id: 2 },
     ];
     for m in server_msgs {
         let bytes = postcard::to_stdvec(&m).unwrap();
@@ -233,4 +238,54 @@ fn teleporting_and_walking_into_the_ground_are_refused() {
     let step = Vec3::new(step.x, s.world.worldgen.height(step.x, step.z) + 0.05, step.z);
     s.handle(ClientMsg::Move { feet: step, yaw: 0.0, pitch: 0.0, mode: Mode::Walk });
     assert_eq!(s.player.feet, step);
+}
+
+/// Walk the player down a column of air from `from` to the ground, a step at a time (as the client
+/// would report a fall).
+fn fall(s: &mut Server, from: Vec3) {
+    let ground = rules::find_ground(&s.world, from.x, from.z).y;
+    s.player.feet = from;
+    let mut y = from.y;
+    while y > ground {
+        y = (y - 1.0).max(ground);
+        s.player.budget = Budget::new();
+        s.handle(ClientMsg::Move { feet: Vec3::new(from.x, y, from.z), yaw: 0.0, pitch: 0.0, mode: Mode::Walk });
+    }
+}
+
+#[test]
+fn falls_hurt_by_their_height_and_kill_when_long() {
+    let mut s = server("fall");
+    let ground = rules::find_ground(&s.world, 30.0, 30.0);
+    s.player.feet = ground;
+    fall(&mut s, ground + Vec3::Y * 3.0);
+    assert_eq!(s.player.vitals.health, crate::vitals::MAX_HEALTH, "a short drop is free");
+    fall(&mut s, ground + Vec3::Y * 12.0);
+    // (Measured from the first airborne position reported, a metre below the start here.)
+    assert_eq!(s.player.vitals.health, crate::vitals::MAX_HEALTH - Vitals::fall_damage(11.0));
+    assert!(s.drain().any(|m| matches!(m, ServerMsg::Hurt { cause: Cause::Fall, .. })));
+}
+
+#[test]
+fn dying_leaves_a_stash_to_come_back_for() {
+    let mut s = server("death");
+    let rock = s.content.item_id("rock").unwrap();
+    s.player.inventory.add(&s.content, rock, 20);
+    let ground = rules::find_ground(&s.world, 30.0, 30.0);
+    s.player.feet = ground;
+    fall(&mut s, ground + Vec3::Y * 40.0);
+    let out: Vec<ServerMsg> = s.drain().collect();
+    assert!(out.iter().any(|m| matches!(m, ServerMsg::Died { cause: Cause::Fall })));
+    assert!(out.iter().any(|m| matches!(m, ServerMsg::Correct { .. })));
+    assert_eq!(s.player.feet, s.spawn);
+    assert_eq!(s.player.inventory.count(rock), 0);
+    assert_eq!(s.player.vitals.health, crate::vitals::MAX_HEALTH);
+    assert_eq!(s.stashes.len(), 1);
+    // Back at the stash: the things come back.
+    s.player.feet = ground + Vec3::X * 0.5;
+    s.player.budget = Budget::new();
+    s.handle(ClientMsg::Move { feet: ground, yaw: 0.0, pitch: 0.0, mode: Mode::Walk });
+    assert_eq!(s.player.inventory.count(rock), 20);
+    assert!(s.stashes.is_empty());
+    assert!(s.drain().any(|m| matches!(m, ServerMsg::StashTaken { .. })));
 }

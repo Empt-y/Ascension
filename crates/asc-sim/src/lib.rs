@@ -14,6 +14,7 @@ pub mod schedule;
 pub mod server;
 pub mod sim;
 pub mod stress;
+pub mod vitals;
 
 use serde::{Deserialize, Serialize};
 

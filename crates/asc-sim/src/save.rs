@@ -17,8 +17,8 @@ use crate::Mode;
 
 /// Bumped when the save layout changes. 2 added `structures.bin`, 3 `nodes.bin` (older saves load
 /// without them); 4 moved `player.toml` to `players/<name>.toml` (older saves load theirs as the
-/// local player).
-pub const FORMAT_VERSION: u32 = 4;
+/// local player); 5 added players' vitals and `stashes.bin` (older saves: full health, none).
+pub const FORMAT_VERSION: u32 = 5;
 
 /// The single-player player's name.
 pub const LOCAL_PLAYER: &str = "local";
@@ -58,6 +58,24 @@ pub struct PlayerSave {
     pub slots: Vec<SlotSave>,
     #[serde(default)]
     pub remainders: std::collections::BTreeMap<String, f32>,
+    /// Missing in saves before format 5: full health.
+    #[serde(default)]
+    pub vitals: Option<crate::vitals::Vitals>,
+}
+
+/// What a player left where they died, to come back for.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StashSave {
+    pub id: u32,
+    pub at: [f32; 3],
+    pub slots: Vec<SlotSave>,
+    pub remainders: std::collections::BTreeMap<String, f32>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StashesFile {
+    format_version: u32,
+    stashes: Vec<StashSave>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -75,6 +93,7 @@ pub struct SaveGame {
     pub structures: Vec<asc_build::Piece>,
     /// Ore nodes mined away, by `scatter::node_id`.
     pub nodes: Vec<[i32; 3]>,
+    pub stashes: Vec<StashSave>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -146,6 +165,8 @@ pub fn save(dir: &Path, game: &SaveGame) -> Result<()> {
     write_atomic(&dir.join("structures.bin"), &postcard::to_stdvec(&structures)?)?;
     let nodes = NodesFile { format_version: FORMAT_VERSION, mined: game.nodes.clone() };
     write_atomic(&dir.join("nodes.bin"), &postcard::to_stdvec(&nodes)?)?;
+    let stashes = StashesFile { format_version: FORMAT_VERSION, stashes: game.stashes.clone() };
+    write_atomic(&dir.join("stashes.bin"), &postcard::to_stdvec(&stashes)?)?;
     Ok(())
 }
 
@@ -205,7 +226,14 @@ pub fn load(dir: &Path) -> Result<Option<SaveGame>> {
         let file: NodesFile = read_with_backup(&nodes_path, |b| Ok(postcard::from_bytes(b)?))?;
         file.mined
     };
-    Ok(Some(SaveGame { meta, players, ops: edits.ops, structures, nodes }))
+    let stashes_path = dir.join("stashes.bin");
+    let stashes = if meta.format_version < 5 && !stashes_path.exists() {
+        Vec::new()
+    } else {
+        let file: StashesFile = read_with_backup(&stashes_path, |b| Ok(postcard::from_bytes(b)?))?;
+        file.stashes
+    };
+    Ok(Some(SaveGame { meta, players, ops: edits.ops, structures, nodes, stashes }))
 }
 
 #[cfg(test)]
@@ -240,6 +268,7 @@ mod tests {
                     SlotSave { index: 12, item: "soil".into(), count: 5 },
                 ],
                 remainders: [("rock".to_owned(), 0.375)].into(),
+                vitals: Some(crate::vitals::Vitals { health: 640, ..Default::default() }),
             })]
             .into(),
             ops: (0..50)
@@ -263,6 +292,12 @@ mod tests {
                 },
             ],
             nodes: vec![[12, -40, 7], [-3, 5, 900]],
+            stashes: vec![StashSave {
+                id: 3,
+                at: [1.0, 2.0, 3.0],
+                slots: vec![SlotSave { index: 0, item: "soil".into(), count: 9 }],
+                remainders: Default::default(),
+            }],
         }
     }
 
@@ -274,6 +309,7 @@ mod tests {
         save(&dir, &game).unwrap();
         std::fs::remove_file(dir.join("structures.bin")).unwrap();
         std::fs::remove_file(dir.join("nodes.bin")).unwrap();
+        std::fs::remove_file(dir.join("stashes.bin")).unwrap();
         let loaded = load(&dir).unwrap().unwrap();
         assert!(loaded.structures.is_empty());
         assert!(loaded.nodes.is_empty());

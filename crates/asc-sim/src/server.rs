@@ -21,6 +21,7 @@ use crate::protocol::{ClientMsg, ServerMsg, Welcome};
 use crate::rules::{self, FillOutcome};
 use crate::save::{self, PlayerSave, SaveGame, SlotSave, WorldMeta};
 use crate::sim::Sim;
+use crate::vitals::{Cause, Outcome, Vitals};
 use crate::{EYE_HEIGHT, Mode};
 
 /// Ticks per second.
@@ -45,6 +46,8 @@ const MAX_UP: (f32, f32) = (12.0, 3.0);
 const MAX_DOWN: (f32, f32) = (70.0, 10.0);
 /// A body centre this deep in terrain or a building is inside it, not brushing it.
 const INSIDE: f32 = -0.25;
+/// Walking this close to a stash picks it up.
+const STASH_REACH: f32 = 2.0;
 
 /// Distance a player may still cover, refilled over time.
 #[derive(Clone, Copy, Debug)]
@@ -112,6 +115,10 @@ pub struct PlayerState {
     last_dig: Option<Instant>,
     last_fill: Option<Instant>,
     budget: Budget,
+    pub vitals: Vitals,
+    /// The highest point since last standing on something (for fall damage); None when grounded or
+    /// flying.
+    fall_from: Option<f32>,
 }
 
 impl PlayerState {
@@ -139,6 +146,9 @@ pub struct Server {
     pub content: Content,
     pub player: PlayerState,
     pub spawn: Vec3,
+    /// What players left where they died.
+    pub stashes: Vec<save::StashSave>,
+    next_stash: u32,
     seed: i32,
     save_dir: PathBuf,
     validate: bool,
@@ -167,6 +177,8 @@ impl Server {
         let mut sim = Sim::default();
         let mut structures = Structures::new(lattice.clone());
         let mut mined = BTreeSet::new();
+        let stashes = loaded.as_ref().map_or_else(Vec::new, |g| g.stashes.clone());
+        let next_stash = stashes.iter().map(|s| s.id + 1).max().unwrap_or(0);
         match &loaded {
             Some(game) => {
                 world.edits = asc_world::EditLog::from_ops(game.ops.iter().copied());
@@ -197,6 +209,8 @@ impl Server {
             last_dig: None,
             last_fill: None,
             budget: Budget::new(),
+            vitals: Vitals::default(),
+            fall_from: None,
         };
         if let Some(saved) = loaded.as_ref().and_then(|g| g.players.get(save::LOCAL_PLAYER)) {
             restore_player(saved, &content, &mut player);
@@ -211,6 +225,8 @@ impl Server {
             content,
             player,
             spawn,
+            stashes,
+            next_stash,
             seed,
             save_dir,
             validate: config.validate,
@@ -241,6 +257,8 @@ impl Server {
             pitch: p.pitch,
             mode: p.mode,
             inventory: p.inventory.snapshot(p.held, p.seq),
+            vitals: p.vitals,
+            stashes: self.stashes.iter().map(|s| (s.id, Vec3::from(s.at))).collect(),
         }
     }
 
@@ -265,6 +283,13 @@ impl Server {
     /// One fixed step of the simulation.
     pub fn tick(&mut self) {
         self.sim.tick();
+        let before = self.player.vitals;
+        // (Underwater once there is water to be under.)
+        let outcome = self.player.vitals.tick(false);
+        self.apply(outcome);
+        if self.player.vitals != before {
+            self.outbox.push(ServerMsg::Vitals(self.player.vitals));
+        }
         if let Some(stress) = &mut self.stress {
             stress.tick();
         }
@@ -392,6 +417,8 @@ impl Server {
         (p.yaw, p.pitch) = (yaw, pitch);
         if !self.validate {
             (p.feet, p.mode) = (feet, mode);
+            self.track_fall();
+            self.pick_up_stashes();
             return;
         }
         let mode = if mode == Mode::Fly && !p.cheats { Mode::Walk } else { mode };
@@ -415,6 +442,114 @@ impl Server {
             self.outbox.push(ServerMsg::Correct { feet, mode });
         }
         (p.feet, p.mode) = (feet, mode);
+        self.track_fall();
+        self.pick_up_stashes();
+    }
+
+    /// Fall damage: remember the highest point while airborne, and charge for the drop on landing.
+    /// Grounded is checked here, against the world and buildings, not taken from the client.
+    fn track_fall(&mut self) {
+        let p = &mut self.player;
+        if p.mode == Mode::Fly || !p.vitals.alive() {
+            p.fall_from = None;
+            return;
+        }
+        let below = p.feet - Vec3::Y * 0.15;
+        let grounded = self.world.density_at(below) < 0.0 || self.structures.sdf(below) < 0.05;
+        match (grounded, p.fall_from) {
+            (false, from) => p.fall_from = Some(from.map_or(p.feet.y, |f| f.max(p.feet.y))),
+            (true, Some(from)) => {
+                p.fall_from = None;
+                let height = from - p.feet.y;
+                let outcome = p.vitals.hurt(Vitals::fall_damage(height), Cause::Fall);
+                self.apply(outcome);
+            }
+            (true, None) => {}
+        }
+    }
+
+    /// Damage and death: tell the client; on death leave the inventory where the player fell and
+    /// start them again at spawn.
+    fn apply(&mut self, outcome: Outcome) {
+        match outcome {
+            Outcome::Fine => {}
+            Outcome::Hurt(amount, cause) => {
+                self.outbox.push(ServerMsg::Hurt { amount, cause });
+                self.outbox.push(ServerMsg::Vitals(self.player.vitals));
+            }
+            Outcome::Died(cause) => self.die(cause),
+        }
+    }
+
+    fn die(&mut self, cause: Cause) {
+        let at = self.player.feet;
+        log::info!("player {} at {at}", cause.describe());
+        let p = &mut self.player;
+        if let Some(h) = p.held.take() {
+            p.inventory.add(&self.content, h.item, h.count);
+        }
+        let item_id = |id: ItemId| self.content.item(id).id.clone();
+        let slots: Vec<SlotSave> = p
+            .inventory
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, s)| s.map(|s| SlotSave { index, item: item_id(s.item), count: s.count }))
+            .collect();
+        let remainders = p.inventory.remainders.iter().map(|(id, v)| (item_id(*id), *v)).collect();
+        let selected = p.inventory.selected;
+        p.inventory = Inventory { selected, ..Inventory::default() };
+        if !slots.is_empty() {
+            let id = self.next_stash;
+            self.next_stash += 1;
+            self.stashes.push(save::StashSave { id, at: at.into(), slots, remainders });
+            self.outbox.push(ServerMsg::StashPlaced { id, at });
+        }
+        p.vitals = Vitals::default();
+        p.fall_from = None;
+        p.feet = self.spawn;
+        p.budget = Budget::new();
+        p.mode = Mode::Walk;
+        self.outbox.push(ServerMsg::Died { cause });
+        self.outbox.push(ServerMsg::Correct { feet: self.spawn, mode: Mode::Walk });
+        self.outbox.push(ServerMsg::Vitals(self.player.vitals));
+        self.send_inventory();
+    }
+
+    /// Walking over a stash gives back whatever of it fits.
+    fn pick_up_stashes(&mut self) {
+        let feet = self.player.feet;
+        let Some(i) = self.stashes.iter().position(|s| Vec3::from(s.at).distance(feet) < STASH_REACH) else {
+            return;
+        };
+        let mut stash = self.stashes.remove(i);
+        let inv = &mut self.player.inventory;
+        let mut kept = Vec::new();
+        for slot in stash.slots.drain(..) {
+            match self.content.item_id(&slot.item) {
+                Some(item) => {
+                    let left = inv.add(&self.content, item, slot.count);
+                    if left > 0 {
+                        kept.push(SlotSave { count: left, ..slot });
+                    }
+                }
+                None => log::warn!("stash item {} no longer exists", slot.item),
+            }
+        }
+        for (name, v) in std::mem::take(&mut stash.remainders) {
+            if let Some(item) = self.content.item_id(&name) {
+                *inv.remainders.entry(item).or_insert(0.0) += v;
+            }
+        }
+        self.send_inventory();
+        if kept.is_empty() {
+            self.outbox.push(ServerMsg::StashTaken { id: stash.id });
+            self.notice("Picked up your things".into());
+        } else {
+            stash.slots = kept;
+            self.notice("Inventory full: some of your things are still there".into());
+            self.stashes.push(stash);
+        }
     }
 
     fn mine_node(&mut self, id: NodeId) {
@@ -482,11 +617,13 @@ impl Server {
                     .filter_map(|(index, s)| s.map(|s| SlotSave { index, item: item_id(s.item), count: s.count }))
                     .collect(),
                 remainders: inventory.remainders.iter().map(|(id, v)| (item_id(*id), *v)).collect(),
+                vitals: Some(p.vitals),
             })]
             .into(),
             ops: self.world.edits.ops().to_vec(),
             structures: self.structures.iter().copied().collect(),
             nodes: self.mined.iter().copied().collect(),
+            stashes: self.stashes.clone(),
         }
     }
 
@@ -519,6 +656,7 @@ impl Server {
 fn restore_player(saved: &PlayerSave, content: &Content, player: &mut PlayerState) {
     player.feet = Vec3::from(saved.feet);
     player.mode = saved.mode;
+    player.vitals = saved.vitals.unwrap_or_default();
     (player.yaw, player.pitch) = (saved.yaw, saved.pitch);
     let inventory = &mut player.inventory;
     inventory.selected = saved.selected.min(HOTBAR - 1);

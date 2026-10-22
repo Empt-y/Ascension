@@ -24,12 +24,14 @@ pub struct Building {
     pub menu_open: bool,
     /// The current snap and whether it can be placed.
     pub preview: Option<(Snap, Result<(), Invalid>)>,
+    /// Other rigid things drawn with the pieces (stashes left at death).
+    extras: Vec<PartInstance>,
     dirty: bool,
 }
 
 impl Building {
     pub fn new(structures: Structures) -> Self {
-        Self { structures, selection: None, menu_open: false, preview: None, dirty: true }
+        Self { structures, selection: None, menu_open: false, preview: None, extras: Vec::new(), dirty: true }
     }
 
     /// Signed distance to the nearest piece, for collision and raycasts.
@@ -71,6 +73,12 @@ impl Building {
         self.structures.piece_at(hit.point, 0.05).ok_or(Invalid::Missing)
     }
 
+    /// Replace the extra instances drawn alongside the pieces.
+    pub fn set_extras(&mut self, extras: Vec<PartInstance>) {
+        self.extras = extras;
+        self.dirty = true;
+    }
+
     /// The server placed a piece.
     pub fn placed(&mut self, piece: Piece) {
         self.structures.insert(piece);
@@ -95,6 +103,8 @@ impl Building {
                     PartInstance::rigid(models.model(p.tier as usize, p.key.kind), position, rotation)
                 })
                 .collect();
+            let mut instances = instances;
+            instances.extend(self.extras.iter().copied());
             renderer.set_parts(&instances);
             self.dirty = false;
         }
