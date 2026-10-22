@@ -36,6 +36,8 @@ struct Globals {
     // x = render scale (render size / output size), y = RCAS sharpness (0 = none, 1 = most),
     // z = 1 to count and tint TAA fireflies (ASC_DEBUG_TAA), w = sun disc brightness (0 hides it).
     upscale: vec4<f32>,
+    // x = 1 when the camera is underwater.
+    env: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -157,7 +159,23 @@ fn fog_amount(rel: vec3<f32>) -> f32 {
 
 // Blend a surface colour toward the sky along the view ray, and fully into it at the far range so
 // the edge of the world never shows.
+// Underwater the view is a dense blue-green haze instead of the sky's fog.
+fn underwater() -> bool {
+    return globals.env.x > 0.5;
+}
+
+fn water_fog_color() -> vec3<f32> {
+    return vec3(0.02, 0.10, 0.11) * (0.2 + 0.8 * daylight());
+}
+
+fn water_fog_amount(rel: vec3<f32>) -> f32 {
+    return 1.0 - exp(-length(rel) * 0.13);
+}
+
 fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
+    if underwater() {
+        return mix(color * vec3(0.55, 0.85, 0.9), water_fog_color(), water_fog_amount(rel));
+    }
     let dir = normalize(rel);
     let fog_col = sky_base(dir);
     let f = fog_amount(rel);

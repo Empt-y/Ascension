@@ -80,6 +80,8 @@ struct Globals {
     output: [f32; 4],
     /// x = render scale, y = RCAS sharpness.
     upscale: [f32; 4],
+    /// x = 1 when the camera is underwater.
+    env: [f32; 4],
 }
 
 /// Render scales of the upscaling presets: native, quality, balanced, performance.
@@ -154,6 +156,8 @@ pub struct FrameParams {
     pub view_distance: f32,
     /// World-space centre and radius of the dig brush preview.
     pub brush: Option<(Vec3, f32)>,
+    /// The camera is underwater.
+    pub underwater: bool,
 }
 
 /// egui output for this frame.
@@ -961,6 +965,7 @@ impl Renderer {
                 f32::from(u8::from(self.taa_debug.is_some())),
                 self.sun_disc,
             ],
+            env: [f32::from(u8::from(frame.underwater)), 0.0, 0.0, 0.0],
         };
         let queue = &self.gpu.queue;
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));

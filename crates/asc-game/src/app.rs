@@ -650,6 +650,7 @@ impl State {
             camera: self.camera,
             sun_dir: self.sim.sun_dir(),
             view_distance: self.streamer.view_radius as f32 * 32.0,
+            underwater: self.fluids.fraction_at(&self.world, self.camera.position) > 0.5,
             brush: self
                 .hit
                 .filter(|_| self.captured || self.options.autopilot || self.options.mine_test)

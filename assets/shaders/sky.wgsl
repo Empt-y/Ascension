@@ -52,6 +52,9 @@ fn stars(dir: vec3<f32>, pixel: f32) -> vec3<f32> {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let far = globals.inv_view_proj * vec4(in.ndc, 1e-6, 1.0);
     let dir = normalize(far.xyz / far.w);
+    if underwater() {
+        return vec4(water_fog_color(), 1.0);
+    }
     var col = sky_base(dir);
     let mu = dot(dir, sun_dir());
     let disk = smoothstep(0.99955, 0.9998, mu);
