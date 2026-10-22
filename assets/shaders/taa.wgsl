@@ -115,10 +115,13 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let motion = textureLoad(motion_tex, nearest, 0).xy;
     let mean = m1 / 9.0;
     let sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3(0.0)));
-    // Wide enough that a thin feature visible at only some jitter offsets (a far trunk) settles into
-    // its average instead of being reset each frame.
-    let lo = mean - sigma * 1.6;
-    let hi = mean + sigma * 1.6;
+    // Wide enough that a thin feature visible at only some jitter offsets (a far trunk, a gap of sky
+    // in a crown) settles into its average instead of being reset each frame. Upscaling widens it:
+    // with a longer jitter cycle and bigger render pixels, more frames miss such a feature, and a
+    // tight clamp threw its history away on each of them, so it flashed back in.
+    let width = mix(3.0, 1.6, clamp((globals.upscale.x - 0.5) / 0.5, 0.0, 1.0));
+    let lo = mean - sigma * width;
+    let hi = mean + sigma * width;
 
     // Where this pixel was last frame. A sample landing on the pixel counts fully; one half a
     // render pixel away much less, so upscaled pixels gather detail over the jitter sequence.
