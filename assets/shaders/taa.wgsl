@@ -9,6 +9,13 @@
 // last frame can't leave ghosts. Blending and clamping happen on squashed colour (c / (1 + luma)),
 // so a single bright pixel can't keep flickering through the average.
 //
+// Upscaling: the scene renders below the window's resolution (`globals.screen`, against
+// `globals.output`) and this pass writes window-sized history. Each window pixel takes the jittered
+// render samples around it, weighted by how close each landed to its centre, and blends them in by
+// how close the nearest one came: over the jitter sequence every window pixel gets samples right on
+// it, so the history builds up the full resolution (the idea behind FSR 2 and other temporal
+// upscalers). At native scale this is the usual TAA, with a 3x3 reconstruction of the current frame.
+//
 // `DEPTH_TEXTURE` is replaced with texture_depth_multisampled_2d or texture_depth_2d to match MSAA.
 
 @group(1) @binding(0) var current: texture_2d<f32>;
@@ -66,31 +73,44 @@ fn sample_history(uv: vec2<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
-    let px = vec2<i32>(frag.xy);
-    let size = vec2<i32>(textureDimensions(current));
-    let uv = frag.xy * globals.screen.zw;
-    let now = squash(textureLoad(current, px, 0).rgb);
+    let uv = frag.xy * globals.output.zw;
+    let rsize = globals.screen.xy;
+    let size = vec2<i32>(rsize);
+    // Where this window pixel's centre falls among the render pixels, unjittered; render pixel i
+    // sampled the scene at i + 0.5 - shift.
+    let p = uv * rsize;
+    let shift = vec2(globals.taa.z, -globals.taa.w) * rsize * 0.5;
+    let centre = vec2<i32>(floor(p + shift));
 
-    // This frame's neighbourhood: its mean and spread bound what the history may be.
+    // Reconstruct this frame here from the 3x3 render samples around it (Gaussian weights by
+    // distance in render pixels), and gather their spread for the history clamp and the nearest
+    // depth (reversed-Z: largest), so edges reproject with the object in front.
+    var sum = vec3(0.0);
+    var weights = 0.0;
+    var closest = 0.0;
     var m1 = vec3(0.0);
     var m2 = vec3(0.0);
-    // The nearest depth around the pixel (reversed-Z: largest), so edges reproject with the object
-    // in front rather than whatever is behind it.
     var depth = 0.0;
-    var nearest = px;
+    var nearest = centre;
     for (var y = -1; y <= 1; y++) {
         for (var x = -1; x <= 1; x++) {
-            let q = clamp(px + vec2(x, y), vec2(0), size - 1);
+            let q = clamp(centre + vec2(x, y), vec2(0), size - 1);
             let c = squash(textureLoad(current, q, 0).rgb);
+            let d = vec2<f32>(q) + 0.5 - shift - p;
+            let w = exp(-2.29 * dot(d, d));
+            sum += c * w;
+            weights += w;
+            closest = max(closest, w);
             m1 += c;
             m2 += c * c;
-            let d = textureLoad(depth_tex, q, 0);
-            if d > depth {
-                depth = d;
+            let z = textureLoad(depth_tex, q, 0);
+            if z > depth {
+                depth = z;
                 nearest = q;
             }
         }
     }
+    let now = sum / max(weights, 1e-4);
     // The motion of whatever is nearest, like the depth.
     let motion = textureLoad(motion_tex, nearest, 0).xy;
     let mean = m1 / 9.0;
@@ -100,14 +120,15 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let lo = mean - sigma * 1.6;
     let hi = mean + sigma * 1.6;
 
-    // Where this pixel was last frame (without this frame's jitter).
-    let ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0) - globals.taa.zw;
+    // Where this pixel was last frame. A sample landing on the pixel counts fully; one half a
+    // render pixel away much less, so upscaled pixels gather detail over the jitter sequence.
+    let ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
     let prev = globals.taa_reproject * vec4(ndc, depth, 1.0);
-    var feedback = globals.taa.y;
+    var feedback = globals.taa.y * mix(0.2, 1.0, closest);
     var past = now;
     if globals.taa.x > 0.5 && prev.w > 1e-6 {
-        let p = prev.xy / prev.w - motion;
-        let puv = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+        let pp = prev.xy / prev.w - motion;
+        let puv = vec2(pp.x * 0.5 + 0.5, 0.5 - pp.y * 0.5);
         if all(puv >= vec2(0.0)) && all(puv <= vec2(1.0)) {
             past = clamp(squash(sample_history(puv)), lo, hi);
         } else {

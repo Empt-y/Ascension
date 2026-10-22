@@ -47,6 +47,8 @@ const EDIT_REPEAT: Duration = Duration::from_millis(110);
 
 #[derive(Clone, Debug, Default)]
 pub struct Options {
+    /// Render the scene at this fraction of the window's resolution and upscale it (`--render-scale`).
+    pub render_scale: Option<f32>,
     /// Run a stand-in factory on the server every tick (light: mostly waiting machines; heavy:
     /// enough work to overrun the tick).
     pub tick_stress: Option<asc_sim::stress::StressConfig>,
@@ -134,6 +136,16 @@ impl Options {
                     }
                 }
                 "--orbit" => opts.orbit = Some(value("--orbit")?.parse()?),
+                "--render-scale" => {
+                    let v = value("--render-scale")?;
+                    let preset = asc_render::RENDER_SCALES.iter().find(|(_, name)| *name == v.as_str());
+                    opts.render_scale = Some(match preset {
+                        Some((scale, _)) => *scale,
+                        None => v.parse().map_err(|_| {
+                            anyhow::anyhow!("--render-scale wants native, quality, balanced, performance or 0.25-1")
+                        })?,
+                    });
+                }
                 "--shadows" => {
                     opts.shadows = match value("--shadows")?.as_str() {
                         "on" => true,
@@ -322,6 +334,9 @@ impl State {
         }
         renderer.set_shadows(options.shadows);
         renderer.set_taa(options.taa);
+        if let Some(scale) = options.render_scale {
+            renderer.set_render_scale(scale);
+        }
         renderer.set_wind(if options.reduce_motion { 0.0 } else { 1.0 });
         if let Some(d) = options.fog_density {
             renderer.fog_density = d;
@@ -752,6 +767,15 @@ impl State {
                 Ok(()) => log::info!("shaders reloaded"),
                 Err(err) => log::error!("shader reload failed, keeping the old ones: {err:#}"),
             }
+        }
+        if self.input.pressed(KeyCode::F7) {
+            // Cycle the upscaling presets.
+            let now = self.renderer.render_scale();
+            let presets = asc_render::RENDER_SCALES;
+            let i = presets.iter().position(|(s, _)| (*s - now).abs() < 1e-3).map_or(0, |i| (i + 1) % presets.len());
+            self.renderer.set_render_scale(presets[i].0);
+            let (w, h) = self.renderer.render_size();
+            self.show_notice(format!("Render scale: {} ({}%, {w}x{h})", presets[i].1, (presets[i].0 * 100.0).round()));
         }
         if self.input.pressed(KeyCode::F6) {
             self.vsync = !self.vsync;

@@ -1,4 +1,6 @@
-//! Size-dependent render targets: HDR colour, depth and the bloom chain. Rebuilt on resize.
+//! Size-dependent render targets, rebuilt on resize. The scene (colour, motion, depth) renders at
+//! the render size, which is below the window's when upscaling; the TAA history it is upscaled
+//! into and everything after it (bloom, post) are window-sized.
 
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// Per-pixel motion of what's drawn there, beyond what the camera's own movement explains (wind
@@ -55,8 +57,9 @@ fn target_ms(
 }
 
 impl Targets {
-    pub fn new(device: &wgpu::Device, (width, height): (u32, u32), samples: u32) -> Self {
+    pub fn new(device: &wgpu::Device, output: (u32, u32), render: (u32, u32), samples: u32) -> Self {
         use wgpu::TextureUsages as U;
+        let (width, height) = render;
         let hdr =
             target(device, "hdr", (width, height), HDR_FORMAT, U::RENDER_ATTACHMENT | U::TEXTURE_BINDING);
         let hdr_msaa = (samples > 1).then(|| {
@@ -81,6 +84,7 @@ impl Targets {
             U::RENDER_ATTACHMENT | U::TEXTURE_BINDING,
             samples,
         );
+        let (width, height) = output;
         let taa = [0, 1].map(|_| {
             target(
                 device,

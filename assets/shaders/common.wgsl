@@ -13,7 +13,7 @@ struct Globals {
     sun: vec4<f32>,
     // x = fog density, y = fog height falloff, z = view distance (fade to sky), w = exposure.
     fog: vec4<f32>,
-    // xy = viewport size in pixels, zw = 1 / size.
+    // xy = the scene's render size in pixels, zw = 1 / size. Below the window size when upscaling.
     screen: vec4<f32>,
     // xyz = brush centre (camera-relative), w = brush radius (0 = hidden).
     brush: vec4<f32>,
@@ -31,6 +31,10 @@ struct Globals {
     taa: vec4<f32>,
     // Last frame's x = time (camera.w) and y = wind strength, for plants' motion vectors.
     motion: vec4<f32>,
+    // xy = the window (output) size in pixels, zw = 1 / size.
+    output: vec4<f32>,
+    // x = render scale (render size / output size), y = RCAS sharpness (0 = none, 1 = most).
+    upscale: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;

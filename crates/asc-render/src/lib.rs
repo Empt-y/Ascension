@@ -76,7 +76,17 @@ struct Globals {
     taa: [f32; 4],
     /// Last frame's x = time, y = wind strength (for motion vectors of swaying plants).
     motion: [f32; 4],
+    /// The window size: xy pixels, zw 1 / pixels (`screen` is the render size).
+    output: [f32; 4],
+    /// x = render scale, y = RCAS sharpness.
+    upscale: [f32; 4],
 }
+
+/// Render scales of the upscaling presets: native, quality, balanced, performance.
+pub const RENDER_SCALES: [(f32, &str); 4] =
+    [(1.0, "native"), (0.67, "quality"), (0.59, "balanced"), (0.5, "performance")];
+/// RCAS sharpness at native resolution and at the lowest render scale (upscaled images are softer).
+const SHARPNESS: (f32, f32) = (0.35, 0.6);
 
 /// Weight of each new frame in the TAA history (the rest is the history).
 const TAA_FEEDBACK: f32 = 0.08;
@@ -171,6 +181,8 @@ pub struct Renderer {
     /// Temporal anti-aliasing on, which history target this frame writes, and whether the
     /// history holds a usable image.
     taa_on: bool,
+    /// Scene resolution as a fraction of the window's (upscaled by TAA; 1 without TAA).
+    render_scale: f32,
     taa_index: usize,
     taa_valid: bool,
     /// Last frame's unjittered view-projection and camera position, for reprojection.
@@ -237,7 +249,7 @@ impl Renderer {
         let layouts = Layouts::new(device);
         let msaa = DEFAULT_MSAA;
         let pipelines = Pipelines::build(device, &shaders, &layouts, gpu.config.format, msaa)?;
-        let targets = Targets::new(device, gpu.size(), msaa);
+        let targets = Targets::new(device, gpu.size(), gpu.size(), msaa);
 
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("globals"),
@@ -313,6 +325,7 @@ impl Renderer {
             bloom_bgs,
             taa_bgs,
             taa_on: true,
+            render_scale: 1.0,
             taa_index: 0,
             taa_valid: false,
             prev_view_proj: Mat4::IDENTITY,
@@ -468,7 +481,7 @@ impl Renderer {
             return;
         }
         self.gpu.resize(width, height);
-        self.targets = Targets::new(&self.gpu.device, self.gpu.size(), self.msaa);
+        self.targets = Targets::new(&self.gpu.device, self.gpu.size(), self.render_size(), self.msaa);
         (self.post_bg, self.bloom_bgs, self.taa_bgs) = Self::texture_bind_groups(
             &self.gpu.device,
             &self.layouts,
@@ -480,10 +493,31 @@ impl Renderer {
         self.taa_valid = false;
     }
 
-    /// Temporal anti-aliasing on or off.
+    /// Temporal anti-aliasing on or off. (Off also turns upscaling off.)
     pub fn set_taa(&mut self, on: bool) {
         self.taa_on = on;
         self.taa_valid = false;
+        let (w, h) = self.gpu.size();
+        self.resize(w, h);
+    }
+
+    /// Render the scene at `scale` of the window's resolution and upscale it (through TAA).
+    pub fn set_render_scale(&mut self, scale: f32) {
+        self.render_scale = scale.clamp(0.25, 1.0);
+        let (w, h) = self.gpu.size();
+        self.resize(w, h);
+    }
+
+    /// The scale in effect: upscaling needs TAA.
+    pub fn render_scale(&self) -> f32 {
+        if self.taa_on { self.render_scale } else { 1.0 }
+    }
+
+    /// The scene's resolution.
+    pub fn render_size(&self) -> (u32, u32) {
+        let (w, h) = self.gpu.size();
+        let s = self.render_scale();
+        (((w as f32 * s).round() as u32).max(1), ((h as f32 * s).round() as u32).max(1))
     }
 
     /// Recompile every shader from disk. On failure the old pipelines stay in use.
@@ -690,8 +724,11 @@ impl Renderer {
             }
             _ => return FrameStats::default(),
         };
-        let (width, height) = self.gpu.size();
-        let aspect = width as f32 / height as f32;
+        let (out_width, out_height) = self.gpu.size();
+        let aspect = out_width as f32 / out_height as f32;
+        // The scene's own resolution (below the window's when upscaling).
+        let (width, height) = self.render_size();
+        let scale = self.render_scale();
         // The camera snapped to the same 1/1024 m grid as terrain vertices, so chunk offsets and
         // vertex positions add exactly and neighbouring chunks meet without cracks. (A millimetre
         // step is far too small to see.)
@@ -699,15 +736,18 @@ impl Renderer {
         snapped.position = (snapped.position * asc_world::POSITION_GRID).round() / asc_world::POSITION_GRID;
         let cam = &snapped;
         let view_proj = cam.view_proj(aspect);
-        // TAA: shift the whole projection by a different sub-pixel offset each frame (Halton 2, 3
-        // over 8 frames), so over a few frames every pixel is sampled across its whole area.
+        // TAA: shift the whole projection by a different sub-pixel offset each frame (Halton 2, 3),
+        // so over a few frames every pixel is sampled across its whole area. Upscaling needs more
+        // phases (each window pixel needs a sample near it) and the full render pixel's span.
         let jumped = cam.position.distance(self.prev_camera) > TAA_RESET_DISTANCE;
         let taa = self.taa_on;
         let jitter = if taa {
-            let i = (self.frame % 8) as u32 + 1;
+            let phases = (8.0 / (scale * scale)).ceil() as u64;
+            let span = if scale < 1.0 { 1.0 } else { TAA_JITTER };
+            let i = (self.frame % phases) as u32 + 1;
             glam::Vec2::new(
-                (halton(i, 2) - 0.5) * 2.0 * TAA_JITTER / width as f32,
-                (halton(i, 3) - 0.5) * 2.0 * TAA_JITTER / height as f32,
+                (halton(i, 2) - 0.5) * 2.0 * span / width as f32,
+                (halton(i, 3) - 0.5) * 2.0 * span / height as f32,
             )
         } else {
             glam::Vec2::ZERO
@@ -798,6 +838,13 @@ impl Renderer {
                 0.0,
                 0.0,
             ],
+            output: [out_width as f32, out_height as f32, 1.0 / out_width as f32, 1.0 / out_height as f32],
+            upscale: [
+                scale,
+                SHARPNESS.0 + (SHARPNESS.1 - SHARPNESS.0) * ((1.0 - scale) / 0.5).clamp(0.0, 1.0),
+                0.0,
+                0.0,
+            ],
         };
         let queue = &self.gpu.queue;
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
@@ -859,7 +906,7 @@ impl Renderer {
         let mut extra = Vec::new();
         if let Some(ui) = &ui {
             let screen = egui_wgpu::ScreenDescriptor {
-                size_in_pixels: [width, height],
+                size_in_pixels: [out_width, out_height],
                 pixels_per_point: ui.pixels_per_point,
             };
             for (id, deltas) in &ui.textures.set {
