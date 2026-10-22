@@ -23,6 +23,8 @@ pub struct FarTerrain {
     texture: wgpu::Texture,
     /// Surface material id per sample (R8Uint), alongside the heights.
     materials: wgpu::Texture,
+    /// Natural water surface per sample (R32Float, `clipmap::NO_WATER` where none).
+    water: wgpu::Texture,
     levels: wgpu::Buffer,
     /// x = count, then (min x, min z, max x, max z) chunk columns with simulated water.
     fluid_columns: wgpu::Buffer,
@@ -51,6 +53,24 @@ impl FarTerrain {
             format: wgpu::TextureFormat::R32Float,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
+        });
+        let water = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("far water"),
+            size: wgpu::Extent3d {
+                width: TEX as u32,
+                height: TEX as u32,
+                depth_or_array_layers: LEVELS as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let water_view = water.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
@@ -103,11 +123,13 @@ impl FarTerrain {
                     resource: wgpu::BindingResource::TextureView(&material_view),
                 },
                 wgpu::BindGroupEntry { binding: 3, resource: fluid_columns.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&water_view) },
             ],
         });
         Self {
             texture,
             materials,
+            water,
             levels,
             fluid_columns,
             indices,
@@ -125,6 +147,7 @@ impl FarTerrain {
             for (tex, size, grid) in clipmap::wrapped_pieces(*rect) {
                 let heights = clipmap::piece_data(*rect, &data.heights, grid, size);
                 let materials = clipmap::piece_data(*rect, &data.materials, grid, size);
+                let water = clipmap::piece_data(*rect, &data.water, grid, size);
                 let at = |texture| wgpu::TexelCopyTextureInfo {
                     texture,
                     mip_level: 0,
@@ -139,6 +162,7 @@ impl FarTerrain {
                 };
                 queue.write_texture(at(&self.texture), bytemuck::cast_slice(&heights), layout(4), extent);
                 queue.write_texture(at(&self.materials), &materials, layout(1), extent);
+                queue.write_texture(at(&self.water), bytemuck::cast_slice(&water), layout(4), extent);
             }
         }
         self.centers[level] = Some(to);
@@ -202,13 +226,20 @@ impl FarTerrain {
         }
     }
 
-    /// Water samples terrain depth from the height textures, so it shares this bind group.
+    /// Natural water on the far grid: every level's whole grid (water near the camera too; levels
+    /// discard where a finer one is drawn), each vertex at its sample's water surface.
     pub fn draw_water(&self, pass: &mut wgpu::RenderPass<'_>) {
         if !self.enabled || self.ready_levels() == 0 {
             return;
         }
         pass.set_bind_group(1, &self.bind_group, &[]);
-        pass.draw(0..4, 0..1);
+        pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+        let end = *self.ring_starts.last().unwrap();
+        for level in 0..LEVELS {
+            if self.centers[level].is_some() {
+                pass.draw_indexed(0..end, 0, level as u32..level as u32 + 1);
+            }
+        }
     }
 
     pub fn triangles(&self) -> usize {

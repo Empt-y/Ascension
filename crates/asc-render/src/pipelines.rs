@@ -185,6 +185,17 @@ impl Layouts {
                         },
                         count: None,
                     },
+                    // Natural water surface per sample (asc_render::clipmap::NO_WATER where none).
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                     // Chunk columns with simulated water, which the sea plane leaves to the
                     // fluid meshes.
                     wgpu::BindGroupLayoutEntry {
@@ -499,7 +510,8 @@ impl Pipelines {
             &water_src,
             ("vs_main", Some("fs_main")),
             &[],
-            wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
+            // The far grid (both faces: seen from underwater too).
+            wgpu::PrimitiveState::default(),
             Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(false),

@@ -331,9 +331,19 @@ fn chunk_seams_are_bit_exact_on_the_gpu() {
     // open along the seam and the sky sparkles through.
     let worldgen = WorldGen::new(SEED);
     let a = surface_chunk(&worldgen, 10.0, 10.0);
+    // For the vertical seam, a spot where the ground crosses a horizontal chunk boundary.
+    let (vx, vz) = (0..10000)
+        .map(|i| ((i % 100) as f32 * 7.0 + 3.0, (i / 100) as f32 * 7.0 + 3.0))
+        .find(|&(x, z)| {
+            let h = worldgen.height(x, z);
+            let off = h - (h / 32.0).round() * 32.0;
+            (0.5..2.0).contains(&off.abs()) && worldgen.ground(x, z).slope < 0.3
+        })
+        .expect("ground crossing a chunk boundary");
+    let low = asc_world::chunk_of(Vec3::new(vx, worldgen.height(vx, vz) - 2.5, vz));
     let snap = |v: f32| (v * POSITION_GRID).round() / POSITION_GRID;
     let camera = Vec3::new(snap(1234.567), snap(-31.25), snap(-987.654));
-    for b in [a + IVec3::X, a + IVec3::Z, a + IVec3::Y] {
+    for (a, b) in [(a, a + IVec3::X), (a, a + IVec3::Z), (low, low + IVec3::Y)] {
         let gpu = |coord: ChunkCoord| -> Vec<Vec3> {
             let offset = chunk_origin(coord) - camera;
             mesh_chunk(&worldgen.generate(coord))

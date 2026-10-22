@@ -155,7 +155,12 @@ pub fn wrapped_pieces(rect: GridRect) -> Vec<(glam::UVec2, glam::UVec2, IVec2)> 
 pub struct Samples {
     pub heights: Vec<f32>,
     pub materials: Vec<u8>,
+    /// Natural water surface per sample, or `NO_WATER`.
+    pub water: Vec<f32>,
 }
+
+/// A far sample with no water over it.
+pub const NO_WATER: f32 = -10000.0;
 
 pub fn piece_data<T: Copy>(rect: GridRect, data: &[T], grid: IVec2, size: glam::UVec2) -> Vec<T> {
     let width = rect.size().x as usize;

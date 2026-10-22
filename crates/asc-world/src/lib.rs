@@ -25,7 +25,7 @@ pub use worldgen::{Biome, Ground, SEA_LEVEL, WorldGen};
 use std::sync::Arc;
 
 /// Bumped whenever worldgen changes what a seed produces, so saves can warn about mismatched terrain.
-pub const WORLDGEN_VERSION: u32 = 4;
+pub const WORLDGEN_VERSION: u32 = 5;
 
 use glam::Vec3;
 

@@ -266,13 +266,18 @@ impl Server {
             inventory: p.inventory.snapshot(p.held, p.seq),
             vitals: p.vitals,
             stashes: self.stashes.iter().map(|s| (s.id, Vec3::from(s.at))).collect(),
-            fluids: self
-                .fluid_sim
-                .fluids
-                .chunks
-                .iter()
-                .map(|(c, ch)| (*c, asc_world::fluid::PackedFluid::pack(ch)))
-                .collect(),
+            fluids: {
+                // In coordinate order: the same state always makes the same message.
+                let mut f: Vec<_> = self
+                    .fluid_sim
+                    .fluids
+                    .chunks
+                    .iter()
+                    .map(|(c, ch)| (*c, asc_world::fluid::PackedFluid::pack(ch)))
+                    .collect();
+                f.sort_by_key(|(c, _)| c.to_array());
+                f
+            },
         }
     }
 
@@ -655,13 +660,17 @@ impl Server {
             structures: self.structures.iter().copied().collect(),
             nodes: self.mined.iter().copied().collect(),
             stashes: self.stashes.clone(),
-            fluids: self
-                .fluid_sim
-                .fluids
-                .chunks
-                .iter()
-                .map(|(c, ch)| (*c, ch.kind.clone(), ch.amount.clone()))
-                .collect(),
+            fluids: {
+                let mut f: Vec<_> = self
+                    .fluid_sim
+                    .fluids
+                    .chunks
+                    .iter()
+                    .map(|(c, ch)| (*c, ch.kind.clone(), ch.amount.clone()))
+                    .collect();
+                f.sort_by_key(|(c, _, _)| c.to_array());
+                f
+            },
         }
     }
 

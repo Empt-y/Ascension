@@ -57,13 +57,19 @@ pub fn compute(worldgen: &WorldGen, level: usize, rect: GridRect) -> Samples {
     let size = rect.size();
     let (w, h) = (size.x as usize + 2, size.y as usize + 2);
     let mut border = Vec::with_capacity(w * h);
+    let mut water = Vec::with_capacity(w * h);
     for z in rect.min.y - 1..=rect.max.y + 1 {
         for x in rect.min.x - 1..=rect.max.x + 1 {
-            border.push(worldgen.height(x as f32 * s, z as f32 * s));
+            let (height, level) = worldgen.height_and_water(x as f32 * s, z as f32 * s);
+            border.push(height);
+            water.push(level);
         }
     }
-    let mut out =
-        Samples { heights: Vec::with_capacity(rect.len()), materials: Vec::with_capacity(rect.len()) };
+    let mut out = Samples {
+        heights: Vec::with_capacity(rect.len()),
+        materials: Vec::with_capacity(rect.len()),
+        water: Vec::with_capacity(rect.len()),
+    };
     for (j, z) in (rect.min.y..=rect.max.y).enumerate() {
         for (i, x) in (rect.min.x..=rect.max.x).enumerate() {
             let at = |di: usize, dj: usize| border[(j + dj) * w + i + di];
@@ -71,8 +77,11 @@ pub fn compute(worldgen: &WorldGen, level: usize, rect: GridRect) -> Samples {
             let gx = (at(2, 1) - at(0, 1)) / (2.0 * s);
             let gz = (at(1, 2) - at(1, 0)) / (2.0 * s);
             let slope = (gx * gx + gz * gz).sqrt();
+            let level = water[(j + 1) * w + i + 1];
             out.heights.push(height);
-            out.materials.push(worldgen.surface_material_at(x as f32 * s, z as f32 * s, height, slope) as u8);
+            out.water.push(level.unwrap_or(asc_render::clipmap::NO_WATER));
+            out.materials
+                .push(worldgen.surface_material_at(x as f32 * s, z as f32 * s, height, slope, level) as u8);
         }
     }
     out

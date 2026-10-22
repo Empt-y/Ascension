@@ -16,7 +16,9 @@ use glam::{IVec3, Vec3};
 use serde::{Deserialize, Serialize};
 
 use crate::chunk::{CHUNK, ChunkCoord, ChunkData};
-use crate::worldgen::{SEA_LEVEL, WorldGen};
+use crate::worldgen::WorldGen;
+#[cfg(test)]
+use crate::worldgen::SEA_LEVEL;
 
 /// A full cell.
 pub const FULL: u16 = 1000;
@@ -92,10 +94,9 @@ fn fill(y: i32, level: f32) -> u16 {
     (frac * FULL as f32).round() as u16
 }
 
-/// Where water naturally lies: the surface level over column (x, z), if any. The sea fills every
-/// column whose ground lies below sea level. (Lakes and rivers join this later.)
+/// Where water naturally lies: the surface level over column (x, z), if any (sea, lake or river).
 pub fn water_level(worldgen: &WorldGen, x: f32, z: f32) -> Option<f32> {
-    (worldgen.height(x, z) < SEA_LEVEL).then_some(SEA_LEVEL)
+    worldgen.water_level(x, z)
 }
 
 /// Natural water in cell `c` (ignoring edits): open cells under a water surface, down to the

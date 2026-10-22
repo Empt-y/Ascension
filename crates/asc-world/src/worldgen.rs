@@ -25,6 +25,26 @@ const SHORE_ABOVE: f32 = 1.0;
 /// tundra, then arctic snow) whatever the climate below them.
 const LAPSE: f32 = 0.0034;
 
+/// Rivers: their surfaces step down in terraces this tall (each step a waterfall).
+const RIVER_STEP: f32 = 3.0;
+/// A river runs only where it would cut no deeper than this into the land (beyond, it fades: high
+/// mountains have springs, not rivers through their peaks).
+const RIVER_MAX_CUT: f32 = 45.0;
+/// Lakes: one chance per cell this wide, kept well inside it so a lake only touches its own cell.
+const LAKE_CELL: f32 = 640.0;
+const LAKE_CHANCE: f32 = 0.32;
+const LAKE_RADIUS: [f32; 2] = [30.0, 120.0];
+
+/// A lake basin: a bowl carved below `level`, which sits just under the lowest point of its rim so
+/// the water can't spill.
+#[derive(Clone, Copy, Debug)]
+struct Lake {
+    center: Vec2,
+    radius: f32,
+    depth: f32,
+    level: f32,
+}
+
 /// What grows where, from climate (temperature and moisture), height and slope. Surface
 /// materials follow the biome, so sand, snow, moss and dry grass line up with what grows on them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -124,6 +144,10 @@ pub struct WorldGen {
     ores: &'static OreTable,
     /// Veins per vein cell, worked out once: every chunk and point sample near a cell reads them.
     veins: RwLock<AHashMap<IVec2, Arc<[Vein]>>>,
+    /// The river network: rivers run along this noise's zero lines.
+    river: FastNoiseLite,
+    /// The lake in each lake cell, if any (worked out once).
+    lakes: RwLock<AHashMap<IVec2, Option<Lake>>>,
 }
 
 /// Per-(x, z) values shared by every sample in a column.
@@ -141,6 +165,8 @@ struct Column {
     biome: Biome,
     /// 0..1 mid-frequency patch value, for snow, moss, mud and ice patches.
     patch: f32,
+    /// Natural water surface over the column, if any (sea, lake or river).
+    water: Option<f32>,
 }
 
 fn noise(seed: i32, kind: NoiseType, freq: f32, fractal: Option<(FractalType, i32)>) -> FastNoiseLite {
@@ -190,6 +216,8 @@ impl WorldGen {
             dunes: noise(seed.wrapping_add(14), OpenSimplex2, 0.011, Some((Ridged, 2))),
             ores: crate::ores::builtin(),
             veins: RwLock::new(AHashMap::new()),
+            river: noise(seed.wrapping_add(15), OpenSimplex2, 0.00065, Some((FBm, 2))),
+            lakes: RwLock::new(AHashMap::new()),
         }
     }
 
@@ -249,8 +277,159 @@ impl WorldGen {
         smoothstep(0.6, 0.7, t) * (1.0 - smoothstep(0.24, 0.32, m))
     }
 
-    /// Terrain height at (x, z), before any 3D features.
+    /// Terrain height at (x, z), before any 3D features (rivers and lakes carved in).
     pub fn height(&self, x: f32, z: f32) -> f32 {
+        self.shape(x, z).0
+    }
+
+    /// The natural water surface over column (x, z), if any: the sea where the ground is below sea
+    /// level, otherwise a lake or river.
+    pub fn water_level(&self, x: f32, z: f32) -> Option<f32> {
+        self.shape(x, z).1
+    }
+
+    /// Height and natural water surface together (one evaluation instead of two).
+    pub fn height_and_water(&self, x: f32, z: f32) -> (f32, Option<f32>) {
+        self.shape(x, z)
+    }
+
+    /// Height with rivers and lakes carved in, and the water surface over it.
+    fn shape(&self, x: f32, z: f32) -> (f32, Option<f32>) {
+        let raw = self.raw_height(x, z);
+        let (h, river) = self.carve_river(x, z, raw);
+        let (h, lake) = self.carve_lake(x, z, h);
+        let water = if h < SEA_LEVEL {
+            Some(SEA_LEVEL)
+        } else {
+            [river, lake].into_iter().flatten().filter(|l| *l > h).reduce(f32::max)
+        };
+        (h, water)
+    }
+
+    /// Rivers run along the zero lines of a low-frequency noise, wider and deeper on low ground.
+    /// The surface steps down a smoothed copy of the land in terraces (each step a waterfall), the
+    /// channel is carved below it, the banks are cut back to just above it (steeply in dry country:
+    /// canyons) and raised to it where the land is lower (levees), so water never stands above the
+    /// ground beside it.
+    fn carve_river(&self, x: f32, z: f32, h: f32) -> (f32, Option<f32>) {
+        if h < SEA_LEVEL - 1.0 {
+            return (h, None);
+        }
+        let continent = self.continent.get_noise_2d(x, z);
+        let smooth = continent * 40.0 + 10.0;
+        let lowness = smoothstep(110.0, 10.0, smooth);
+        let width = 0.011 + 0.012 * lowness;
+        let (t, m) = self.climate(x, z);
+        let arid = Self::desert_mask(t, m).max(smoothstep(0.5, 0.25, m) * smoothstep(0.55, 0.7, t));
+        let banks = width * (4.0 - 2.4 * arid);
+        let a = self.river.get_noise_2d(x, z).abs();
+        if a >= banks {
+            return (h, None);
+        }
+        let level = (((smooth - 2.0) / RIVER_STEP).floor() * RIVER_STEP).max(SEA_LEVEL);
+        let cut = h - level;
+        // Fade out where the river would have to cut too deep (it starts as a spring).
+        let strength = 1.0 - smoothstep(RIVER_MAX_CUT * 0.75, RIVER_MAX_CUT, cut);
+        if strength <= 0.0 {
+            return (h, None);
+        }
+        let depth = 1.2 + 1.8 * lowness;
+        let carved = if a < width {
+            // The channel: deepest in the middle, up to the waterline at the edges.
+            let edge = smoothstep(width * 0.55, width, a);
+            (level - depth) + (depth - 0.2) * edge
+        } else {
+            // The banks: cut back to just above the water near it, back to the land further out.
+            let t = smoothstep(width, banks, a);
+            let mut bank = (level + 0.5) + (h - level - 0.5) * t;
+            bank = bank.min(h);
+            // Levees: never lower than the water right beside the channel, including the next
+            // terrace up where the river steps down (or the upper pool spills round its waterfall).
+            let levee = 1.0 - smoothstep(width * 1.3, width * 1.9, a);
+            let mut wall = level;
+            if levee > 0.0 {
+                for (dx, dz) in [(2.0, 0.0), (-2.0, 0.0), (0.0, 2.0), (0.0, -2.0)] {
+                    let near = self.continent.get_noise_2d(x + dx, z + dz) * 40.0 + 10.0;
+                    wall = wall.max((((near - 2.0) / RIVER_STEP).floor() * RIVER_STEP).max(SEA_LEVEL));
+                }
+            }
+            bank.max(h.min(wall + 0.5) + (wall + 0.5 - h.min(wall + 0.5)) * levee)
+        };
+        let out = h + (carved - h) * strength;
+        let water = (a < width && strength > 0.5).then_some(level);
+        (out, water)
+    }
+
+    /// The lake of the lake cell holding (x, z), if any (cached).
+    fn lake_in(&self, cell: IVec2) -> Option<Lake> {
+        if let Some(l) = self.lakes.read().unwrap().get(&cell) {
+            return *l;
+        }
+        let lake = self.place_lake(cell);
+        self.lakes.write().unwrap().insert(cell, lake);
+        lake
+    }
+
+    fn place_lake(&self, cell: IVec2) -> Option<Lake> {
+        let mut h = (self.seed as u32 as u64) ^ 0x6c61_6b65;
+        let mut next = || {
+            h ^= (cell.x as u32 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ ((cell.y as u32 as u64) << 32);
+            h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9).rotate_left(29) ^ 0x94D0_49BB_1331_11EB;
+            (h >> 40) as f32 / (1u64 << 24) as f32
+        };
+        if next() >= LAKE_CHANCE {
+            return None;
+        }
+        let margin = LAKE_RADIUS[1] * 1.25;
+        let span = LAKE_CELL - 2.0 * margin;
+        let center = cell.as_vec2() * LAKE_CELL + Vec2::splat(margin) + Vec2::new(next(), next()) * span;
+        let radius = LAKE_RADIUS[0] + (LAKE_RADIUS[1] - LAKE_RADIUS[0]) * next();
+        let depth = 3.0 + 9.0 * next();
+        let ground = |p: Vec2| {
+            let raw = self.raw_height(p.x, p.y);
+            self.carve_river(p.x, p.y, raw).0
+        };
+        let mid = ground(center);
+        let mountain = Self::mountain_mask(self.continent.get_noise_2d(center.x, center.y));
+        if !(SEA_LEVEL + 3.0..150.0).contains(&mid) || mountain > 0.6 {
+            return None;
+        }
+        // The rim: the lowest of 24 points just outside the bowl sets the water level.
+        let rim = (0..24)
+            .map(|i| {
+                let a = i as f32 / 24.0 * std::f32::consts::TAU;
+                ground(center + Vec2::new(a.cos(), a.sin()) * radius * 1.15)
+            })
+            .fold(f32::MAX, f32::min);
+        let level = rim - 0.6;
+        // A basin worth the name: the middle well below the rim, and not a cliff-side perch.
+        if level < SEA_LEVEL + 1.5 || mid > level + 8.0 {
+            return None;
+        }
+        Some(Lake { center, radius, depth, level })
+    }
+
+    fn carve_lake(&self, x: f32, z: f32, h: f32) -> (f32, Option<f32>) {
+        let p = Vec2::new(x, z);
+        let cell = (p / LAKE_CELL).floor().as_ivec2();
+        let Some(lake) = self.lake_in(cell) else { return (h, None) };
+        let d = p.distance(lake.center) / lake.radius;
+        if d >= 1.15 {
+            return (h, None);
+        }
+        if d < 1.0 {
+            let bowl = lake.level - lake.depth * (1.0 - d * d);
+            let carved = h.min(bowl);
+            return (carved, (carved < lake.level).then_some(lake.level));
+        }
+        // A lip round the bowl: never below the water at its inner edge (the rim samples can miss a
+        // dip between them), easing back to the land at 1.15 radii.
+        let lip = (lake.level + 0.3) + (h - lake.level - 0.3) * smoothstep(1.0, 1.15, d);
+        (lip, None)
+    }
+
+    /// The land before rivers and lakes.
+    fn raw_height(&self, x: f32, z: f32) -> f32 {
         let continent = self.continent.get_noise_2d(x, z);
         let base = continent * 40.0 + 10.0;
         let hills = self.hills.get_noise_2d(x, z) * 14.0;
@@ -307,7 +486,7 @@ impl WorldGen {
     }
 
     /// `around` holds the heights at x-1, x+1, z-1 and z+1.
-    fn column_from(&self, x: f32, z: f32, h: f32, around: [f32; 4]) -> Column {
+    fn column_from(&self, x: f32, z: f32, h: f32, around: [f32; 4], water: Option<f32>) -> Column {
         let [hx0, hx1, hz0, hz1] = around;
         let g = Vec2::new(hx1 - hx0, hz1 - hz0) * 0.5;
         let slope = g.length();
@@ -324,14 +503,15 @@ impl WorldGen {
             // Cave mouths belong on hillsides; on flat ground a near-horizontal tunnel only skims the
             // surface and leaves a long slit.
             entrance: smoothstep(0.55, 0.75, self.entrance.get_noise_2d(x, z)) * smoothstep(0.3, 0.7, slope),
+            water,
         }
     }
 
     fn column(&self, x: f32, z: f32) -> Column {
-        let h = self.height(x, z);
+        let (h, water) = self.shape(x, z);
         let (hx0, hx1) = (self.height(x - 1.0, z), self.height(x + 1.0, z));
         let (hz0, hz1) = (self.height(x, z - 1.0), self.height(x, z + 1.0));
-        self.column_from(x, z, h, [hx0, hx1, hz0, hz1])
+        self.column_from(x, z, h, [hx0, hx1, hz0, hz1], water)
     }
 
     /// The surface at (x, z): height, slope, biome, climate and how wooded it is.
@@ -340,7 +520,7 @@ impl WorldGen {
         let (biome, forest, temperature, moisture) = self.biome(x, z, col.height, col.mountain);
         // Woods thin out on steep ground.
         let forest = forest * (1.0 - smoothstep(0.75, 1.1, col.slope));
-        let underwater = col.height < SEA_LEVEL - 0.3;
+        let underwater = col.water.is_some_and(|l| l > col.height + 0.3);
         Ground { height: col.height, slope: col.slope, biome, forest, temperature, moisture, underwater }
     }
 
@@ -352,7 +532,7 @@ impl WorldGen {
 
     /// The surface material at (x, z) given its height and slope, which the far terrain already
     /// has from its own grid (so this skips the five height evaluations of a full column).
-    pub fn surface_material_at(&self, x: f32, z: f32, height: f32, slope: f32) -> Material {
+    pub fn surface_material_at(&self, x: f32, z: f32, height: f32, slope: f32, water: Option<f32>) -> Material {
         let mountain = Self::mountain_mask(self.continent.get_noise_2d(x, z));
         let (biome, _, _, _) = self.biome(x, z, height, mountain);
         let col = Column {
@@ -363,6 +543,7 @@ impl WorldGen {
             entrance: 0.0,
             biome,
             patch: self.patches.get_noise_2d(x, z) * 0.5 + 0.5,
+            water,
         };
         Material::from_u8(self.material(Vec3::new(x, height - 0.5, z), &col, &[]))
     }
@@ -416,6 +597,14 @@ impl WorldGen {
 
     fn base_material(&self, p: Vec3, col: &Column) -> Material {
         let depth = col.height - p.y;
+        // River and lake beds (and the sea floor near the shore) are sand.
+        if let Some(level) = col.water
+            && level > col.height
+            && depth < 2.5
+            && level - col.height < 6.0
+        {
+            return Material::Sand;
+        }
         let sandy = matches!(col.biome, Biome::Desert);
         if depth > 5.0 && !(sandy && depth < 12.0) {
             return Material::Rock;
@@ -478,11 +667,12 @@ impl WorldGen {
         const H: usize = SAMPLES + 2;
         let base = ChunkData::sample_pos(coord, 0, 0, 0);
         let mut heights = vec![0.0f32; H * H];
+        let mut water = vec![None; H * H];
         for hz in 0..H {
             for hx in 0..H {
                 let x = base.x + hx as f32 - 1.0;
                 let z = base.z + hz as f32 - 1.0;
-                heights[hx + H * hz] = self.height(x, z);
+                (heights[hx + H * hz], water[hx + H * hz]) = self.shape(x, z);
             }
         }
         let mut columns = Vec::with_capacity(SAMPLES * SAMPLES);
@@ -496,6 +686,7 @@ impl WorldGen {
                     base.z + z as f32,
                     h(1, 1),
                     [h(0, 1), h(2, 1), h(1, 0), h(1, 2)],
+                    water[hx + H * hz],
                 );
                 max_height = max_height.max(col.height);
                 columns.push(col);
