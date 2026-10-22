@@ -79,7 +79,9 @@ pub fn compute(worldgen: &WorldGen, level: usize, rect: GridRect) -> Samples {
             let slope = (gx * gx + gz * gz).sqrt();
             let level = water[(j + 1) * w + i + 1];
             out.heights.push(height);
-            out.water.push(level.unwrap_or(asc_render::clipmap::NO_WATER));
+            let (fx, fz) = (x as f32 * s, z as f32 * s);
+            let flow = if level.is_some() { worldgen.river_flow(fx, fz) } else { glam::Vec2::ZERO };
+            out.water.push([level.unwrap_or(asc_render::clipmap::NO_WATER), flow.x, flow.y, 0.0]);
             out.materials
                 .push(worldgen.surface_material_at(x as f32 * s, z as f32 * s, height, slope, level) as u8);
         }

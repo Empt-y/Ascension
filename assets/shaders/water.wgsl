@@ -1,11 +1,12 @@
 // Natural water (sea, lakes, rivers): the far-terrain grid at each sample's water surface, drawn
 // after the sky with alpha blending.
 //
-// Every level draws its whole grid (near the camera too: chunk terrain hides whatever is under
-// it) and leaves the area of a finer drawn level to it. A sample without water drops its vertex
-// far down, so the surface ends inside the banks; where a river steps down, the grid between two
-// samples makes a falling sheet. Depth (from the far heights) shades it: clear at the shore,
-// darker deep. Chunk columns whose water is simulated are left to fluid.wgsl.
+// Every level draws its whole grid (near the camera too) and leaves the area of a finer drawn level
+// to it. A dry sample next to water carries the water's level on, so the surface runs on under the
+// bank and the terrain itself (by depth) cuts the shoreline, following the ground rather than the
+// grid; samples with no water round them are dropped out of sight. Where a river steps down, the
+// grid between two levels makes a falling sheet, which foams. Rivers' flow (per sample) drifts and
+// stretches their ripples downstream. Chunk columns whose water is simulated are left to fluid.wgsl.
 
 struct LevelInfo {
     center: vec2<i32>,
@@ -38,15 +39,22 @@ fn load(t: texture_2d_array<f32>, level: u32, g: vec2<i32>) -> f32 {
     return textureLoad(t, vec2(wrap(g.x), wrap(g.y)), i32(level), 0).r;
 }
 
+fn water_at(level: u32, g: vec2<i32>) -> vec4<f32> {
+    return textureLoad(water_levels, vec2(wrap(g.x), wrap(g.y)), i32(level), 0);
+}
+
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) rel: vec3<f32>,
     @location(1) world_xz: vec2<f32>,
-    // 1 where the vertex has water, 0 where it was dropped.
+    // 1 where the vertex has (or carries on) water, 0 where it was dropped.
     @location(2) wet: f32,
     // Water depth over the natural ground.
     @location(3) depth: f32,
     @location(4) @interpolate(flat) level: u32,
+    // The river's flow (x, z) and how steeply the surface falls here (waterfalls).
+    @location(5) flow: vec2<f32>,
+    @location(6) fall: f32,
 }
 
 @vertex
@@ -56,10 +64,33 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) level: u32) 
     let g = info.center + offset;
     let xz = vec2<f32>(g) * info.spacing;
     let ground = load(heights, level, g);
-    var surface = load(water_levels, level, g);
-    let wet = surface > NONE;
-    if !wet {
-        // Dropped well under the ground, so the water's edge ends inside the bank.
+    let here = water_at(level, g);
+    var surface = here.x;
+    var flow = here.yz;
+    var wet = surface > NONE;
+    // The surface's steepest fall to a neighbour, for foam on the steps.
+    var fall = 0.0;
+    // The lowest neighbouring water (carrying on a higher terrace would flood the land below it).
+    var lowest = 1e9;
+    for (var dz = -1; dz <= 1; dz++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            let n = water_at(level, g + vec2(dx, dz));
+            if n.x > NONE {
+                lowest = min(lowest, n.x);
+                if wet {
+                    fall = max(fall, abs(n.x - surface) / info.spacing);
+                }
+                if !wet {
+                    flow = n.yz;
+                }
+            }
+        }
+    }
+    if !wet && lowest < 1e8 {
+        // Carry the neighbouring water on under the bank: the terrain cuts the shore.
+        surface = lowest;
+        wet = true;
+    } else if !wet {
         surface = ground - 30.0;
     }
     let cam = globals.camera.xyz;
@@ -70,10 +101,21 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) level: u32) 
     out.wet = select(0.0, 1.0, wet);
     out.depth = max(surface - ground, 0.0);
     out.level = level;
+    out.flow = flow;
+    out.fall = fall;
     return out;
 }
 
-fn ripple_normal(xz: vec2<f32>, t: f32, fade: f32) -> vec3<f32> {
+// Ripples; on a river they drift downstream and stretch along the flow.
+fn ripple_normal(xz_in: vec2<f32>, t: f32, fade: f32, flow: vec2<f32>) -> vec3<f32> {
+    let speed = length(flow);
+    var xz = xz_in;
+    if speed > 0.01 {
+        let along = flow / speed;
+        let across = vec2(-along.y, along.x);
+        // Into flow-aligned coordinates, squashed along the flow (streaks), drifting with it.
+        xz = vec2(dot(xz_in, along) * 0.45 - t * speed * 1.6, dot(xz_in, across));
+    }
     let p1 = vec3(xz * 0.35 + vec2(t * 0.4, t * 0.25), t * 0.3);
     let p2 = vec3(xz * 1.1 - vec2(t * 0.6, -t * 0.2), t * 0.5);
     let e = 0.15;
@@ -87,7 +129,7 @@ fn ripple_normal(xz: vec2<f32>, t: f32, fade: f32) -> vec3<f32> {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Ripple normals take derivatives of nothing here, so the discards can come first.
-    if in.wet < 0.5 {
+    if in.wet < 0.01 {
         discard;
     }
     let finer = levels[in.level].finer;
@@ -110,7 +152,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let dist = length(in.rel);
     let v = -in.rel / dist;
     // Ripples fade with distance so the far water doesn't shimmer.
-    let n = ripple_normal(in.world_xz, globals.camera.w, 1.0 - smoothstep(60.0, 900.0, dist));
+    let n = ripple_normal(in.world_xz, globals.camera.w, 1.0 - smoothstep(60.0, 900.0, dist), in.flow);
     let up = select(n, -n, v.y < 0.0);
 
     let ndv = clamp(dot(up, v), 0.0, 1.0);
@@ -123,12 +165,25 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Sun glint.
     let h = normalize(v + sun_dir());
     color += sun_light() * pow(max(dot(up, h), 0.0), 300.0) * 4.0;
+    // White water where the river falls (the steps) and a little on fast stretches, in streaks
+    // sliding downstream.
+    let speed = length(in.flow);
+    let steep = smoothstep(0.1, 0.45, in.fall);
+    var foam = steep;
+    if speed > 0.01 {
+        let along = in.flow / speed;
+        let s = dot(in.world_xz, along) - globals.camera.w * (2.0 + 4.0 * steep);
+        let streaks = value_noise(vec3(s * 0.8, dot(in.world_xz, vec2(-along.y, along.x)) * 2.5, globals.camera.w * 0.2));
+        foam = max(steep * (0.55 + 0.45 * streaks), smoothstep(0.75, 0.95, streaks) * smoothstep(0.8, 1.6, speed) * 0.35);
+    }
+    let white = vec3(0.8, 0.85, 0.88) * (0.25 + 0.75 * daylight()) * (0.6 + 0.4 * dot(sun_dir(), vec3(0.0, 1.0, 0.0)));
+    color = mix(color, white, foam);
 
     // Clear at the very edge so shores blend into the sand, more opaque with depth and at grazing angles.
     // (Depth comes from the coarse far heights, so it's only rough near shores: keep a floor of
     // opacity, or shallow patches turned see-through and the sand glared through in blotches.)
     let alpha = clamp(
-        0.72 * smoothstep(0.0, 0.3, in.depth) + 0.2 * smoothstep(0.5, 4.0, in.depth) + 0.25 * fresnel,
+        0.72 * smoothstep(0.0, 0.3, in.depth) + 0.2 * smoothstep(0.5, 4.0, in.depth) + 0.25 * fresnel + foam * 0.5,
         0.0,
         0.97,
     );

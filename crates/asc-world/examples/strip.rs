@@ -10,7 +10,7 @@ fn main() {
         while x <= a[2] {
             let (h, w) = wg.height_and_water(x, z);
             line += &match w {
-                Some(l) => format!("{:+4.1}", h - l),
+                Some(l) => if std::env::var("ABS").is_ok() { format!("{:5.1}", l) } else { format!("{:+4.1}", h - l) },
                 None => "  . ".to_string(),
             };
             x += a[4];

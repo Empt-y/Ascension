@@ -23,7 +23,8 @@ pub struct FarTerrain {
     texture: wgpu::Texture,
     /// Surface material id per sample (R8Uint), alongside the heights.
     materials: wgpu::Texture,
-    /// Natural water surface per sample (R32Float, `clipmap::NO_WATER` where none).
+    /// Natural water per sample (Rgba32Float): surface (`clipmap::NO_WATER` where none) and the
+    /// river's flow.
     water: wgpu::Texture,
     levels: wgpu::Buffer,
     /// x = count, then (min x, min z, max x, max z) chunk columns with simulated water.
@@ -64,7 +65,7 @@ impl FarTerrain {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Float,
+            format: wgpu::TextureFormat::Rgba32Float,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -162,7 +163,7 @@ impl FarTerrain {
                 };
                 queue.write_texture(at(&self.texture), bytemuck::cast_slice(&heights), layout(4), extent);
                 queue.write_texture(at(&self.materials), &materials, layout(1), extent);
-                queue.write_texture(at(&self.water), bytemuck::cast_slice(&water), layout(4), extent);
+                queue.write_texture(at(&self.water), bytemuck::cast_slice(&water), layout(16), extent);
             }
         }
         self.centers[level] = Some(to);

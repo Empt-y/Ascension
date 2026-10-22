@@ -155,8 +155,8 @@ pub fn wrapped_pieces(rect: GridRect) -> Vec<(glam::UVec2, glam::UVec2, IVec2)> 
 pub struct Samples {
     pub heights: Vec<f32>,
     pub materials: Vec<u8>,
-    /// Natural water surface per sample, or `NO_WATER`.
-    pub water: Vec<f32>,
+    /// Natural water per sample: surface height (or `NO_WATER`), and the river's flow (x, z).
+    pub water: Vec<[f32; 4]>,
 }
 
 /// A far sample with no water over it.

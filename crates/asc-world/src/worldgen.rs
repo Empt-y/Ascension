@@ -306,6 +306,34 @@ impl WorldGen {
         (h, water)
     }
 
+    /// A river's surface at (x, z): sloping smoothly with a smoothed copy of the land, stepping
+    /// down in `RIVER_STEP` terraces (waterfalls) only where that land is steep.
+    fn river_level(&self, x: f32, z: f32) -> f32 {
+        let smooth = |x: f32, z: f32| self.continent.get_noise_2d(x, z) * 40.0 + 10.0;
+        let here = smooth(x, z);
+        let e = 3.0;
+        let slope = Vec2::new(smooth(x + e, z) - smooth(x - e, z), smooth(x, z + e) - smooth(x, z - e)).length()
+            / (2.0 * e);
+        let gentle = here - 2.0;
+        let stepped = ((here - 2.0) / RIVER_STEP).floor() * RIVER_STEP;
+        let steep = smoothstep(0.24, 0.38, slope);
+        (gentle + (stepped - gentle) * steep).max(SEA_LEVEL)
+    }
+
+    /// Which way a river at (x, z) flows, as a unit vector scaled by how steeply its land falls
+    /// (zero off rivers): along the channel, towards the lower ground.
+    pub fn river_flow(&self, x: f32, z: f32) -> Vec2 {
+        let e = 2.0;
+        let n = |x: f32, z: f32| self.river.get_noise_2d(x, z);
+        let s = |x: f32, z: f32| self.continent.get_noise_2d(x, z) * 40.0;
+        let gn = Vec2::new(n(x + e, z) - n(x - e, z), n(x, z + e) - n(x, z - e));
+        let gs = Vec2::new(s(x + e, z) - s(x - e, z), s(x, z + e) - s(x, z - e)) / (2.0 * e);
+        // The channel runs across the noise's gradient; pick the way that goes downhill.
+        let along = Vec2::new(-gn.y, gn.x).normalize_or_zero();
+        let along = if along.dot(gs) > 0.0 { -along } else { along };
+        along * (0.3 + gs.length() * 40.0).min(2.0)
+    }
+
     /// Rivers run along the zero lines of a low-frequency noise, wider and deeper on low ground.
     /// The surface steps down a smoothed copy of the land in terraces (each step a waterfall), the
     /// channel is carved below it, the banks are cut back to just above it (steeply in dry country:
@@ -326,7 +354,7 @@ impl WorldGen {
         if a >= banks {
             return (h, None);
         }
-        let level = (((smooth - 2.0) / RIVER_STEP).floor() * RIVER_STEP).max(SEA_LEVEL);
+        let level = self.river_level(x, z);
         let cut = h - level;
         // Fade out where the river would have to cut too deep (it starts as a spring).
         let strength = 1.0 - smoothstep(RIVER_MAX_CUT * 0.75, RIVER_MAX_CUT, cut);
@@ -349,8 +377,7 @@ impl WorldGen {
             let mut wall = level;
             if levee > 0.0 {
                 for (dx, dz) in [(2.0, 0.0), (-2.0, 0.0), (0.0, 2.0), (0.0, -2.0)] {
-                    let near = self.continent.get_noise_2d(x + dx, z + dz) * 40.0 + 10.0;
-                    wall = wall.max((((near - 2.0) / RIVER_STEP).floor() * RIVER_STEP).max(SEA_LEVEL));
+                    wall = wall.max(self.river_level(x + dx, z + dz));
                 }
             }
             bank.max(h.min(wall + 0.5) + (wall + 0.5 - h.min(wall + 0.5)) * levee)
