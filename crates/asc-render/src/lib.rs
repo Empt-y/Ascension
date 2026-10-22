@@ -95,6 +95,39 @@ const TAA_JITTER: f32 = 0.8;
 /// The history is thrown away when the camera jumps further than this between frames.
 const TAA_RESET_DISTANCE: f32 = 8.0;
 
+/// TAA debug counters' readback (ASC_DEBUG_TAA).
+struct TaaDebug {
+    readback: wgpu::Buffer,
+    state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    since: Instant,
+    frames: u32,
+    frames_in_copy: u32,
+    /// Fireflies, hot inputs, NaN/infinite pixels, and the frames they were counted over.
+    last: Option<[u32; 4]>,
+    /// Hot pixels by source: terrain 1, foliage 2, other models 3, far terrain 4, sky 5, water 6.
+    sources: [u32; 8],
+}
+
+impl TaaDebug {
+    fn new(device: &wgpu::Device) -> Self {
+        log::info!("TAA debug: counting and tinting fireflies (magenta), sun-bright inputs (cyan), NaN (yellow)");
+        Self {
+            readback: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("taa debug readback"),
+                size: 48,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            since: Instant::now(),
+            frames: 0,
+            frames_in_copy: 0,
+            last: None,
+            sources: [0; 8],
+        }
+    }
+}
+
 /// Element `i` of the Halton sequence in base `b`, in [0, 1).
 fn halton(mut i: u32, b: u32) -> f32 {
     let (mut f, mut r) = (1.0, 0.0);
@@ -181,6 +214,12 @@ pub struct Renderer {
     /// Temporal anti-aliasing on, which history target this frame writes, and whether the
     /// history holds a usable image.
     taa_on: bool,
+    /// TAA debug counters (ASC_DEBUG_TAA): the GPU buffer, a readback copy, whether that copy is
+    /// mapped and ready (0 idle, 1 pending, 2 ready), and the last counts read.
+    taa_debug: Option<TaaDebug>,
+    taa_counts: wgpu::Buffer,
+    /// Sun disc brightness (ASC_SUN_DISC=0 hides it, for isolating tests).
+    sun_disc: f32,
     /// Scene resolution as a fraction of the window's (upscaled by TAA; 1 without TAA).
     render_scale: f32,
     taa_index: usize,
@@ -300,8 +339,22 @@ impl Renderer {
             &shadow_map,
             &shadow_sampler,
         );
-        let (post_bg, bloom_bgs, taa_bgs) =
-            Self::texture_bind_groups(device, &layouts, &targets, &placeholder, &linear_sampler, msaa);
+        let taa_counts = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("taa debug counts"),
+            size: 48,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let taa_debug = std::env::var("ASC_DEBUG_TAA").is_ok_and(|v| v == "1").then(|| TaaDebug::new(device));
+        let (post_bg, bloom_bgs, taa_bgs) = Self::texture_bind_groups(
+            device,
+            &layouts,
+            &targets,
+            &placeholder,
+            &linear_sampler,
+            msaa,
+            &taa_counts,
+        );
         let timer = std::cell::RefCell::new(timing::GpuTimer::new(&gpu.device, &gpu.queue));
         Ok(Self {
             timer,
@@ -325,6 +378,9 @@ impl Renderer {
             bloom_bgs,
             taa_bgs,
             taa_on: true,
+            taa_counts,
+            taa_debug,
+            sun_disc: std::env::var("ASC_SUN_DISC").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0),
             render_scale: 1.0,
             taa_index: 0,
             taa_valid: false,
@@ -410,6 +466,7 @@ impl Renderer {
         placeholder: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
         msaa: u32,
+        debug_buffer: &wgpu::Buffer,
     ) -> (wgpu::BindGroup, BloomBindGroups, TaaBindGroups) {
         let pair = |a: &wgpu::TextureView, b: &wgpu::TextureView| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -455,6 +512,7 @@ impl Renderer {
                             binding: 4,
                             resource: wgpu::BindingResource::TextureView(&targets.motion),
                         },
+                        wgpu::BindGroupEntry { binding: 5, resource: debug_buffer.as_entire_binding() },
                     ],
                 })
             }),
@@ -489,6 +547,7 @@ impl Renderer {
             &self.placeholder,
             &self.linear_sampler,
             self.msaa,
+            &self.taa_counts,
         );
         self.taa_valid = false;
     }
@@ -691,6 +750,17 @@ impl Renderer {
         proj * Mat4::from_translation(shift) * light_view
     }
 
+    /// The last TAA debug counts (ASC_DEBUG_TAA): fireflies, sun-bright inputs, NaN/infinite
+    /// pixels, and over how many frames.
+    pub fn taa_debug_counts(&self) -> Option<[u32; 4]> {
+        self.taa_debug.as_ref().and_then(|d| d.last)
+    }
+
+    /// Hot pixels by the shader that made them (see `TaaDebug::sources`).
+    pub fn taa_debug_sources(&self) -> Option<[u32; 8]> {
+        self.taa_debug.as_ref().map(|d| d.sources)
+    }
+
     /// Smoothed GPU milliseconds per stage of the frame, e.g. "shadows 1.20 | terrain 2.10", or
     /// `None` without timestamp support.
     pub fn gpu_stages(&self) -> Option<String> {
@@ -842,8 +912,8 @@ impl Renderer {
             upscale: [
                 scale,
                 SHARPNESS.0 + (SHARPNESS.1 - SHARPNESS.0) * ((1.0 - scale) / 0.5).clamp(0.0, 1.0),
-                0.0,
-                0.0,
+                f32::from(u8::from(self.taa_debug.is_some())),
+                self.sun_disc,
             ],
         };
         let queue = &self.gpu.queue;
@@ -926,10 +996,40 @@ impl Renderer {
         if let Some(t) = self.timer.get_mut().as_mut() {
             t.finish(&mut encoder);
         }
+        let debug_copied = match &mut self.taa_debug {
+            Some(d) if d.state.load(std::sync::atomic::Ordering::Acquire) == 0 && d.since.elapsed().as_secs_f32() >= 1.0 => {
+                encoder.copy_buffer_to_buffer(&self.taa_counts, 0, &d.readback, 0, 48);
+                d.state.store(1, std::sync::atomic::Ordering::Release);
+                true
+            }
+            _ => false,
+        };
         let t_submit = Instant::now();
         queue.submit(extra.into_iter().chain([encoder.finish()]));
         if let Some(t) = self.timer.get_mut().as_mut() {
             t.after_submit();
+        }
+        if let Some(d) = &mut self.taa_debug {
+            if debug_copied {
+                // Start the next window from zero (runs before the next frame's commands).
+                queue.write_buffer(&self.taa_counts, 0, &[0u8; 48]);
+                d.frames_in_copy = std::mem::take(&mut d.frames);
+                let state = d.state.clone();
+                d.readback.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                    state.store(if r.is_ok() { 2 } else { 0 }, std::sync::atomic::Ordering::Release);
+                });
+                d.since = Instant::now();
+            }
+            d.frames += 1;
+            if d.state.load(std::sync::atomic::Ordering::Acquire) == 2 {
+                if let Ok(data) = d.readback.slice(..).get_mapped_range() {
+                    let v: &[u32] = bytemuck::cast_slice(&data);
+                    d.last = Some([v[0], v[1], v[2], d.frames_in_copy]);
+                    d.sources = [v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11]];
+                }
+                d.readback.unmap();
+                d.state.store(0, std::sync::atomic::Ordering::Release);
+            }
         }
         stats.submit_ms = t_submit.elapsed().as_secs_f32() * 1e3;
         if let Some(ui) = &ui {

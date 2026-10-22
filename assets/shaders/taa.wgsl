@@ -24,6 +24,25 @@
 @group(1) @binding(3) var depth_tex: DEPTH_TEXTURE;
 @group(1) @binding(4) var motion_tex: texture_2d<f32>;
 
+// Debug (globals.upscale.z): pixels where TAA made something brighter than any of this frame's
+// samples around it (impossible legitimately), pixels with a sun-bright sample, and pixels where a
+// NaN or infinity reached TAA. Read back and logged by the renderer.
+struct TaaDebug {
+    fireflies: atomic<u32>,
+    hot: atomic<u32>,
+    bad: atomic<u32>,
+    spare: atomic<u32>,
+    // Hot pixels by the shader that tagged them (debug_hot ids 0..7).
+    by_source: array<atomic<u32>, 8>,
+}
+@group(1) @binding(5) var<storage, read_write> debug_counts: TaaDebug;
+
+// NaN or infinity in any channel (an exponent of all ones).
+fn not_finite(c: vec3<f32>) -> bool {
+    let e = bitcast<vec3<u32>>(c) & vec3(0x7f800000u);
+    return any(e == vec3(0x7f800000u));
+}
+
 @vertex
 fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
     return fullscreen_pos(index);
@@ -39,8 +58,12 @@ fn squash(c: vec3<f32>) -> vec3<f32> {
     return c / (1.0 + luma(c));
 }
 
+// Safe for any input: a squashed colour can only reach luma 1 through clamping or blending error,
+// and dividing by (nearly) nothing there turned one pixel into a flash.
 fn unsquash(c: vec3<f32>) -> vec3<f32> {
-    return c / max(1.0 - luma(c), 1e-4);
+    let l = luma(c);
+    let safe = c * min(1.0, 0.95 / max(l, 1e-6));
+    return safe / (1.0 - luma(safe));
 }
 
 // History, sharpened by a 9-tap Catmull-Rom filter so repeated resampling doesn't blur it.
@@ -90,12 +113,23 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     var closest = 0.0;
     var m1 = vec3(0.0);
     var m2 = vec3(0.0);
+    var mn = vec3(1e9);
+    var mx = vec3(0.0);
     var depth = 0.0;
     var nearest = centre;
+    var brightest = 0.0;
+    var bad_input = false;
     for (var y = -1; y <= 1; y++) {
         for (var x = -1; x <= 1; x++) {
             let q = clamp(centre + vec2(x, y), vec2(0), size - 1);
-            let c = squash(textureLoad(current, q, 0).rgb);
+            let raw = textureLoad(current, q, 0).rgb;
+            if globals.upscale.z > 0.5 && x == 0 && y == 0 && raw.r >= 100.0 {
+                // A tag, perhaps averaged with ordinary samples under MSAA: green / red is id / 8.
+                atomicAdd(&debug_counts.by_source[u32(clamp(round(raw.g / raw.r * 8.0), 0.0, 7.0))], 1u);
+            }
+            brightest = max(brightest, luma(raw));
+            bad_input = bad_input || not_finite(raw);
+            let c = squash(raw);
             let d = vec2<f32>(q) + 0.5 - shift - p;
             let w = exp(-2.29 * dot(d, d));
             sum += c * w;
@@ -103,6 +137,8 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
             closest = max(closest, w);
             m1 += c;
             m2 += c * c;
+            mn = min(mn, c);
+            mx = max(mx, c);
             let z = textureLoad(depth_tex, q, 0);
             if z > depth {
                 depth = z;
@@ -120,8 +156,10 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     // with a longer jitter cycle and bigger render pixels, more frames miss such a feature, and a
     // tight clamp threw its history away on each of them, so it flashed back in.
     let width = mix(3.0, 1.6, clamp((globals.upscale.x - 0.5) / 0.5, 0.0, 1.0));
-    let lo = mean - sigma * width;
-    let hi = mean + sigma * width;
+    // ...but never outside the samples' own range, so history can't come out brighter (or darker)
+    // than anything this frame actually has here.
+    let lo = max(mean - sigma * width, mn);
+    let hi = min(mean + sigma * width, mx);
 
     // Where this pixel was last frame. A sample landing on the pixel counts fully; one half a
     // render pixel away much less, so upscaled pixels gather detail over the jitter sequence.
@@ -140,5 +178,23 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     } else {
         feedback = 1.0;
     }
-    return vec4(unsquash(mix(past, now, feedback)), 1.0);
+    let result = unsquash(mix(past, now, feedback));
+    if globals.upscale.z > 0.5 {
+        let bad = bad_input || not_finite(result);
+        let firefly = !bad && luma(result) > brightest * 1.5 + 0.05;
+        let hot = brightest > 20.0;
+        if bad {
+            atomicAdd(&debug_counts.bad, 1u);
+            return vec4(4.0, 4.0, 0.0, 1.0);
+        }
+        if firefly {
+            atomicAdd(&debug_counts.fireflies, 1u);
+            return vec4(4.0, 0.0, 4.0, 1.0);
+        }
+        if hot {
+            atomicAdd(&debug_counts.hot, 1u);
+            return vec4(0.0, 4.0, 4.0, 1.0);
+        }
+    }
+    return vec4(result, 1.0);
 }

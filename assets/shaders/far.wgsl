@@ -141,5 +141,5 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var s = terrain_surface(w[0], w[1], w[2], vec4(0.0), world, geometric, detail.tone);
     s.roughness = aa_roughness(s.roughness, detail.widen);
     let color = shade_terrain(s, detail.normal, in.rel, 1.0, 1.0);
-    return vec4(apply_fog(color, in.rel), 1.0);
+    return vec4(debug_hot(apply_fog(color, in.rel), 4.0), 1.0);
 }

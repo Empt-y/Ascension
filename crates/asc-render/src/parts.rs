@@ -349,6 +349,10 @@ impl Parts {
     /// Draw `near` as `far` beyond `distance` (scatter only).
     /// Draw scatter instances of `near` as each of `levels` (model, from distance) further out.
     pub fn set_lods(&mut self, near: ModelId, mut levels: Vec<(ModelId, f32)>) {
+        // Isolating tests: ASC_NO_LOD=1 draws every model at full detail at every distance.
+        if std::env::var("ASC_NO_LOD").is_ok_and(|v| v == "1") {
+            return;
+        }
         levels.sort_by(|a, b| a.1.total_cmp(&b.1));
         let i = near.0 as usize;
         if self.lods.len() <= i {

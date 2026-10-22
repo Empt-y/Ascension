@@ -61,7 +61,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         color += vec3(0.25, 0.8, 1.0) * (1.0 - smoothstep(0.0, 0.18, d)) * 1.5;
     }
 
-    return vec4(apply_fog(color, in.rel), 1.0);
+    return vec4(debug_hot(apply_fog(color, in.rel), 1.0), 1.0);
 }
 
 // Depth-only pass from the sun.

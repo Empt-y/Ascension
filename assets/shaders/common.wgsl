@@ -33,11 +33,22 @@ struct Globals {
     motion: vec4<f32>,
     // xy = the window (output) size in pixels, zw = 1 / size.
     output: vec4<f32>,
-    // x = render scale (render size / output size), y = RCAS sharpness (0 = none, 1 = most).
+    // x = render scale (render size / output size), y = RCAS sharpness (0 = none, 1 = most),
+    // z = 1 to count and tint TAA fireflies (ASC_DEBUG_TAA), w = sun disc brightness (0 hides it).
     upscale: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;
+
+// Debug (ASC_DEBUG_TAA): a colour over 20x white is replaced by a tag naming the shader that made
+// it (red 1000, green 1000 * id / 8: the ratio survives MSAA averaging with ordinary samples),
+// which the TAA pass counts by source.
+fn debug_hot(c: vec3<f32>, id: f32) -> vec3<f32> {
+    if globals.upscale.z > 0.5 && dot(c, vec3(0.2126, 0.7152, 0.0722)) > 20.0 {
+        return vec3(1000.0, 1000.0 * id / 8.0, 0.0);
+    }
+    return c;
+}
 // Sun shadow map, used by anything drawn in the scene pass with the scene layout.
 @group(0) @binding(2) var shadow_map: texture_depth_2d_array;
 @group(0) @binding(3) var shadow_sampler: sampler_comparison;

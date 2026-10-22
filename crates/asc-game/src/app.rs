@@ -702,6 +702,12 @@ impl State {
                 pre,
             );
             log::info!("server: {:.1} tps, slowest tick {:.2} ms", self.server_stats.0, self.server_stats.1);
+            if let Some([fireflies, hot, bad, frames]) = self.renderer.taa_debug_counts() {
+                log::info!("taa debug: fireflies {fireflies}, sun-bright inputs {hot}, nan/inf {bad} (pixels over {frames} frames)");
+                if let Some(s) = self.renderer.taa_debug_sources() {
+                    log::info!("taa debug sources: terrain {} foliage {} models {} far {} sky {} water {} other {}", s[1], s[2], s[3], s[4], s[5], s[6], s[0] + s[7]);
+                }
+            }
             if let Some(stages) = self.renderer.gpu_stages() {
                 log::info!("gpu ms: {stages} | parts drawn {}", self.last_stats.parts_drawn);
             }

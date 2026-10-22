@@ -55,11 +55,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var col = sky_base(dir);
     let mu = dot(dir, sun_dir());
     let disk = smoothstep(0.99955, 0.9998, mu);
-    col += sun_light() * disk * 25.0;
+    col += sun_light() * disk * 25.0 * globals.upscale.w;
     // A pale moon opposite the sun.
     let moon = smoothstep(0.9993, 0.9996, dot(dir, -sun_dir()));
     col += vec3(0.6, 0.65, 0.8) * moon * (1.0 - daylight()) * 2.0;
     // Pixel size in radians, from how fast the view direction changes across the screen.
     col += stars(dir, length(fwidth(dir)));
-    return vec4(col, 1.0);
+    return vec4(debug_hot(col, 5.0), 1.0);
 }

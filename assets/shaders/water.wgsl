@@ -104,5 +104,5 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Clear at the very edge so shores blend into the sand, more opaque with depth and at grazing angles.
     let alpha = clamp(smoothstep(0.0, 1.2, depth) * (0.65 + 0.35 * fresnel) + smoothstep(2.0, 10.0, depth) * 0.3, 0.0, 1.0);
-    return vec4(apply_fog(color, in.rel), alpha);
+    return vec4(debug_hot(apply_fog(color, in.rel), 6.0), alpha);
 }

@@ -34,9 +34,13 @@ struct VsIn {
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) rel: vec3<f32>,
-    @location(1) normal: vec3<f32>,
+    // Centroid: under MSAA a pixel only partly covered by a triangle would otherwise take these at
+    // its centre, outside the triangle, extrapolated. On thin leaf cards seen edge-on the light
+    // and fog extrapolated to many times their real values: single white pixels at leaf edges,
+    // which bloom spread into flashes. (UVs stay at the centre: texture derivatives need them.)
+    @location(1) @interpolate(perspective, centroid) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
-    @location(3) color: vec4<f32>,
+    @location(3) @interpolate(perspective, centroid) color: vec4<f32>,
     @location(4) @interpolate(flat) ghost: u32,
     // 0..1 per instance, for colour variation.
     @location(5) @interpolate(flat) variety: f32,
@@ -44,13 +48,13 @@ struct VsOut {
     // Foliage only, lit per vertex (it's drawn many layers deep, so per-pixel work is precious):
     // sky and ground ambient plus moonlight, sun colour (already shadowed), and fog colour (rgb)
     // and amount (a).
-    @location(7) ambient: vec3<f32>,
-    @location(8) sun: vec3<f32>,
-    @location(9) fog: vec4<f32>,
+    @location(7) @interpolate(perspective, centroid) ambient: vec3<f32>,
+    @location(8) @interpolate(perspective, centroid) sun: vec3<f32>,
+    @location(9) @interpolate(perspective, centroid) fog: vec4<f32>,
     // Where the vertex is now and was last frame, both through this frame's camera: their
     // difference is the wind's motion, which TAA can't infer from depth.
-    @location(10) now_clip: vec4<f32>,
-    @location(11) prev_clip: vec4<f32>,
+    @location(10) @interpolate(perspective, centroid) now_clip: vec4<f32>,
+    @location(11) @interpolate(perspective, centroid) prev_clip: vec4<f32>,
 }
 
 struct SceneOut {
@@ -239,7 +243,7 @@ fn fs_main(in: VsOut) -> SceneOut {
         }
     }
     var out: SceneOut;
-    out.color = vec4(color, alpha);
+    out.color = vec4(debug_hot(color, select(3.0, 2.0, foliage)), alpha);
     out.motion = in.now_clip.xy / in.now_clip.w - in.prev_clip.xy / in.prev_clip.w;
     return out;
 }

@@ -30,6 +30,17 @@ fn taa_layout(device: &wgpu::Device, multisampled: bool) -> wgpu::BindGroupLayou
             texture_entry(1, float),
             sampler_entry(2, wgpu::SamplerBindingType::Filtering),
             texture_entry(4, float),
+            // Debug counters (ASC_DEBUG_TAA).
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
             wgpu::BindGroupLayoutEntry {
                 binding: 3,
                 visibility: wgpu::ShaderStages::FRAGMENT,
