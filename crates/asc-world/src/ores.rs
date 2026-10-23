@@ -108,6 +108,9 @@ pub struct VeinType {
     pub weight: f32,
     /// Multiplier per biome, in `Biome::ALL` order.
     pub affinity: [f32; Biome::ALL.len()],
+    /// Affinity on volcanic ground (the `volcanic` key; 1 if not given), blended in by how
+    /// volcanic the ground over the vein is.
+    pub volcanic: f32,
 }
 
 /// Ores and vein types with names resolved to indices.
@@ -126,7 +129,12 @@ impl OreTable {
             let ores =
                 [index(&def.primary)?, index(&def.between)?, index(&def.secondary)?, index(&def.sporadic)?];
             let mut affinity = [1.0; Biome::ALL.len()];
+            let mut volcanic = 1.0;
             for (name, value) in &def.affinity {
+                if name == "volcanic" {
+                    volcanic = *value;
+                    continue;
+                }
                 let b =
                     Biome::from_name(name).ok_or_else(|| format!("vein {}: unknown biome {name}", def.id))?;
                 affinity[biome_index(b)] = *value;
@@ -142,6 +150,7 @@ impl OreTable {
                 ores,
                 weight: def.abundance_ppm.max(0.0).powf(ABUNDANCE_POWER),
                 affinity,
+                volcanic,
             });
         }
         Ok(Self { ores: file.ore, veins })
@@ -194,14 +203,15 @@ impl OreTable {
             let z = (cell.y as f32 + r.next()) * VEIN_CELL;
             let ground = worldgen.ground(x, z);
             let b = biome_index(ground.biome);
-            let total: f32 = self.veins.iter().map(|v| v.weight * v.affinity[b]).sum();
+            let weight = |v: &VeinType| v.weight * v.affinity[b] * (1.0 + (v.volcanic - 1.0) * ground.volcanic);
+            let total: f32 = self.veins.iter().map(weight).sum();
             if total <= 0.0 {
                 continue;
             }
             let mut pick = r.next() * total;
             let mut kind = self.veins.len() - 1;
             for (i, v) in self.veins.iter().enumerate() {
-                let w = v.weight * v.affinity[b];
+                let w = weight(v);
                 if pick < w {
                     kind = i;
                     break;

@@ -122,6 +122,8 @@ pub struct Ground {
     pub underwater: bool,
     /// 0..1 how bare volcanic ground is (ash, fresh rock): plants thin out on it.
     pub barren: f32,
+    /// 0..1 how volcanic the ground is (1 on a volcano proper): veins favour it differently.
+    pub volcanic: f32,
 }
 
 pub struct WorldGen {
@@ -673,7 +675,8 @@ impl WorldGen {
         let forest = forest * (1.0 - smoothstep(0.75, 1.1, col.slope));
         let underwater = col.water.is_some_and(|l| l > col.height + 0.3) || col.lava.is_some();
         let barren = col.volcanic.barren;
-        Ground { height: col.height, slope: col.slope, biome, forest, temperature, moisture, underwater, barren }
+        let volcanic = col.volcanic.strength;
+        Ground { height: col.height, slope: col.slope, biome, forest, temperature, moisture, underwater, barren, volcanic }
     }
 
     /// The material showing at the surface at (x, z).

@@ -530,6 +530,9 @@ byproducts = ["sulfur"]
 
 # --- Veins -----------------------------------------------------------------------------------------
 #
+# `affinity` also takes `volcanic`: the weight on volcanic ground (cones and calderas), blended in
+# by how volcanic the ground over the vein is.
+#
 # Ores are found in veins, as in GregTech: a vein is a flattened, tilted lens of rock underground
 # with its ores layered through it. `primary` fills the top third, `secondary` the bottom third,
 # `between` the middle, and `sporadic` turns up anywhere in small amounts.
@@ -555,7 +558,7 @@ depth = [6.0, 70.0]
 radius = [14.0, 24.0]
 thickness = [4.0, 7.0]
 # Coal is buried peat: old swamps and forests.
-affinity = { swamp = 2.0, forest = 1.5, taiga = 1.4, jungle = 1.3, desert = 0.5, arctic = 0.6 }
+affinity = { swamp = 2.0, forest = 1.5, taiga = 1.4, jungle = 1.3, desert = 0.5, arctic = 0.6, volcanic = 0.2 }
 
 [[vein]]
 id = "lignite"
@@ -568,7 +571,7 @@ depth = [3.0, 35.0]
 radius = [12.0, 20.0]
 thickness = [3.0, 6.0]
 # Young coal, close to the surface.
-affinity = { swamp = 2.5, forest = 1.3, taiga = 1.2 }
+affinity = { swamp = 2.5, forest = 1.3, taiga = 1.2, volcanic = 0.2 }
 
 [[vein]]
 id = "limonite"
@@ -606,7 +609,7 @@ depth = [10.0, 110.0]
 radius = [12.0, 20.0]
 thickness = [4.0, 6.0]
 # Porphyry copper: dry, uplifted country.
-affinity = { desert = 1.4, savanna = 1.2 }
+affinity = { desert = 1.4, savanna = 1.2, volcanic = 2.5 }
 
 [[vein]]
 id = "tin"
@@ -653,7 +656,8 @@ sporadic = "sulfur"
 depth = [5.0, 60.0]
 radius = [10.0, 16.0]
 thickness = [3.0, 5.0]
-affinity = { desert = 1.4, tundra = 1.2 }
+# Sulfur crusts and seams round volcanic vents: far commoner on volcanoes.
+affinity = { desert = 1.4, tundra = 1.2, volcanic = 14.0 }
 
 [[vein]]
 id = "salt"
@@ -666,7 +670,7 @@ depth = [5.0, 50.0]
 radius = [16.0, 26.0]
 thickness = [4.0, 8.0]
 # Evaporites: dried-up seas and lakes.
-affinity = { desert = 3.0, shore = 1.8, savanna = 1.3, jungle = 0.3, swamp = 0.4, forest = 0.5, taiga = 0.5 }
+affinity = { desert = 3.0, shore = 1.8, savanna = 1.3, jungle = 0.3, swamp = 0.4, forest = 0.5, taiga = 0.5, volcanic = 0.3 }
 
 [[vein]]
 id = "bauxite"
@@ -679,7 +683,7 @@ depth = [3.0, 40.0]
 radius = [14.0, 24.0]
 thickness = [3.0, 6.0]
 # Bauxite is laterite: deep tropical weathering, so nearly only in hot, wet places.
-affinity = { jungle = 3.0, savanna = 2.0, swamp = 0.8, desert = 0.3, forest = 0.4, meadow = 0.4, taiga = 0.1, tundra = 0.05, arctic = 0.05 }
+affinity = { jungle = 3.0, savanna = 2.0, swamp = 0.8, desert = 0.3, forest = 0.4, meadow = 0.4, taiga = 0.1, tundra = 0.05, arctic = 0.05, volcanic = 0.4 }
 
 [[vein]]
 id = "redstone"
@@ -794,6 +798,7 @@ sporadic = "cooperite"
 depth = [120.0, 270.0]
 radius = [8.0, 12.0]
 thickness = [3.0, 5.0]
+affinity = { volcanic = 1.6 }
 
 [[vein]]
 id = "sapphire"
@@ -827,3 +832,5 @@ sporadic = "olivine"
 depth = [40.0, 170.0]
 radius = [8.0, 14.0]
 thickness = [3.0, 5.0]
+affinity = { volcanic = 4.0 }
+

@@ -390,6 +390,30 @@ mod tests {
     }
 
     #[test]
+    fn sulfur_veins_favour_volcanic_ground() {
+        let (wg, list) = volcanoes(1256132528);
+        let caldera = list.iter().find(|v| v.kind == VolcanoKind::Super).expect("a caldera");
+        let sulfur = wg.ores().veins.iter().position(|v| v.def.id == "sulfur").expect("a sulfur vein type");
+        let share = |center: Vec2, reach: f32| {
+            let cell = crate::ores::VEIN_CELL;
+            let (lo, hi) = (((center - reach) / cell).floor().as_ivec2(), ((center + reach) / cell).floor().as_ivec2());
+            let (mut all, mut hits) = (0, 0);
+            for z in lo.y..=hi.y {
+                for x in lo.x..=hi.x {
+                    for v in wg.veins_in_cell(glam::IVec2::new(x, z)).iter() {
+                        all += 1;
+                        hits += usize::from(v.kind == sulfur);
+                    }
+                }
+            }
+            hits as f32 / all.max(1) as f32
+        };
+        let on = share(caldera.center, caldera.radius * 0.5);
+        let off = share(caldera.center + Vec2::new(0.0, 9000.0), caldera.radius * 0.5);
+        assert!(on > off * 3.0 && on > 0.1, "sulfur share {on} on the caldera, {off} off it");
+    }
+
+    #[test]
     fn calderas_have_springs_geysers_and_lava_pools() {
         let (wg, list) = volcanoes(1256132528);
         let caldera = list.iter().find(|v| v.kind == VolcanoKind::Super).expect("a caldera");
