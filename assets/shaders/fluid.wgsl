@@ -60,18 +60,6 @@ fn ripples(xz: vec2<f32>, t: f32, drift: vec2<f32>) -> vec2<f32> {
     return vec2(dx, dz) * 0.9;
 }
 
-// Molten rock: a glowing orange body under a dark crust that drifts and cracks slowly.
-fn lava_color(world: vec3<f32>, t: f32) -> vec3<f32> {
-    let flow = vec3(world.x * 0.6 + t * 0.05, world.y * 0.3, world.z * 0.6 - t * 0.03);
-    // Plates of cooling crust with glowing cracks between them, and a brighter churn under them.
-    let plates = value_noise(flow) * 0.6 + value_noise(flow * 3.1 + vec3(t * 0.08)) * 0.4;
-    let crust = smoothstep(0.38, 0.55, plates);
-    let glow = 0.75 + 0.5 * value_noise(world * 0.9 + vec3(0.0, t * 0.3, 0.0));
-    let hot = vec3(3.2, 0.85, 0.12) * glow;
-    let dark = mix(vec3(0.05, 0.018, 0.01), vec3(0.4, 0.08, 0.02), 1.0 - smoothstep(0.55, 0.8, plates));
-    return mix(hot, dark, crust);
-}
-
 @fragment
 fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let world = in.rel + globals.camera.xyz;

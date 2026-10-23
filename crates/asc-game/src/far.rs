@@ -60,9 +60,10 @@ pub fn compute(worldgen: &WorldGen, level: usize, rect: GridRect) -> Samples {
     let mut water = Vec::with_capacity(w * h);
     for z in rect.min.y - 1..=rect.max.y + 1 {
         for x in rect.min.x - 1..=rect.max.x + 1 {
-            let (height, level) = worldgen.height_and_water(x as f32 * s, z as f32 * s);
+            let (height, level, lava) = worldgen.height_water_lava(x as f32 * s, z as f32 * s);
             border.push(height);
-            water.push(level);
+            // Lava is drawn by the far water too (flagged), in its place.
+            water.push(lava.map(|l| (l, true)).or(level.map(|l| (l, false))));
         }
     }
     let mut out = Samples {
@@ -77,11 +78,14 @@ pub fn compute(worldgen: &WorldGen, level: usize, rect: GridRect) -> Samples {
             let gx = (at(2, 1) - at(0, 1)) / (2.0 * s);
             let gz = (at(1, 2) - at(1, 0)) / (2.0 * s);
             let slope = (gx * gx + gz * gz).sqrt();
-            let level = water[(j + 1) * w + i + 1];
+            let (level, lava) = match water[(j + 1) * w + i + 1] {
+                Some((l, lava)) => (Some(l), lava),
+                None => (None, false),
+            };
             out.heights.push(height);
             let (fx, fz) = (x as f32 * s, z as f32 * s);
-            let flow = if level.is_some() { worldgen.water_flow(fx, fz) } else { glam::Vec2::ZERO };
-            out.water.push([level.unwrap_or(asc_render::clipmap::NO_WATER), flow.x, flow.y, 0.0]);
+            let flow = if level.is_some() && !lava { worldgen.water_flow(fx, fz) } else { glam::Vec2::ZERO };
+            out.water.push([level.unwrap_or(asc_render::clipmap::NO_WATER), flow.x, flow.y, if lava { 1.0 } else { 0.0 }]);
             out.materials
                 .push(worldgen.surface_material_at(x as f32 * s, z as f32 * s, height, slope, level) as u8);
         }

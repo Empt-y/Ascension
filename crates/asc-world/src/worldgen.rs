@@ -15,6 +15,7 @@ use crate::chunk::{CHUNK, ChunkCoord, ChunkData, SAMPLES};
 use crate::edit::DENSITY_CLAMP;
 use crate::material::{Material, ore_byte};
 use crate::ores::{OreTable, VEIN_CELL, Vein};
+use crate::volcano::{self, FeatureKind, Volcano, VolcanoKind};
 
 /// Surfaces within a few metres of this height are sandy shores. Deeper basins are lowland
 /// meadows rather than vast sand plains (there is no water yet to make them seas).
@@ -119,6 +120,8 @@ pub struct Ground {
     pub moisture: f32,
     /// Whether the surface is under the sea.
     pub underwater: bool,
+    /// 0..1 how bare volcanic ground is (ash, fresh rock): plants thin out on it.
+    pub barren: f32,
 }
 
 pub struct WorldGen {
@@ -148,6 +151,18 @@ pub struct WorldGen {
     river: FastNoiseLite,
     /// The lake in each lake cell, if any (worked out once).
     lakes: RwLock<AHashMap<IVec2, Option<Lake>>>,
+    /// The volcano cone in each cone cell and the caldera in each caldera cell, if any.
+    cones: RwLock<AHashMap<IVec2, Option<Arc<Volcano>>>>,
+    calderas: RwLock<AHashMap<IVec2, Option<Arc<Volcano>>>>,
+}
+
+/// A column's shape: its height, natural water and lava, and volcanic ground.
+#[derive(Clone, Copy, Debug)]
+struct Shape {
+    height: f32,
+    water: Option<f32>,
+    lava: Option<f32>,
+    volcanic: volcano::Surface,
 }
 
 /// Per-(x, z) values shared by every sample in a column.
@@ -167,6 +182,9 @@ struct Column {
     patch: f32,
     /// Natural water surface over the column, if any (sea, lake or river).
     water: Option<f32>,
+    /// Natural lava surface over the column (a crater or a caldera's pool), if any.
+    lava: Option<f32>,
+    volcanic: volcano::Surface,
 }
 
 fn noise(seed: i32, kind: NoiseType, freq: f32, fractal: Option<(FractalType, i32)>) -> FastNoiseLite {
@@ -218,6 +236,8 @@ impl WorldGen {
             veins: RwLock::new(AHashMap::new()),
             river: noise(seed.wrapping_add(15), OpenSimplex2, 0.00065, Some((FBm, 2))),
             lakes: RwLock::new(AHashMap::new()),
+            cones: RwLock::new(AHashMap::new()),
+            calderas: RwLock::new(AHashMap::new()),
         }
     }
 
@@ -288,6 +308,12 @@ impl WorldGen {
         self.shape(x, z).1
     }
 
+    /// Height, natural water and natural lava together (one evaluation).
+    pub fn height_water_lava(&self, x: f32, z: f32) -> (f32, Option<f32>, Option<f32>) {
+        let s = self.shape_full(x, z);
+        (s.height, s.water, s.lava)
+    }
+
     /// Height and natural water surface together (one evaluation instead of two).
     pub fn height_and_water(&self, x: f32, z: f32) -> (f32, Option<f32>) {
         self.shape(x, z)
@@ -295,15 +321,94 @@ impl WorldGen {
 
     /// Height with rivers and lakes carved in, and the water surface over it.
     fn shape(&self, x: f32, z: f32) -> (f32, Option<f32>) {
+        let s = self.shape_full(x, z);
+        (s.height, s.water)
+    }
+
+    /// The land, then any volcano built on it, then rivers and lakes carved in.
+    fn shape_full(&self, x: f32, z: f32) -> Shape {
         let raw = self.raw_height(x, z);
-        let (h, river) = self.carve_river(x, z, raw);
-        let (h, lake) = self.carve_lake(x, z, h);
-        let water = if h < SEA_LEVEL {
+        let shaped = self.volcano_at(Vec2::new(x, z)).and_then(|v| v.shape(Vec2::new(x, z), raw, |p| self.hills.get_noise_2d(p.x, p.y)));
+        let (raw, volcanic_water, lava, volcanic) = match shaped {
+            Some(s) => (s.height, s.water, s.lava, s.surface),
+            None => (raw, None, None, volcano::Surface::default()),
+        };
+        // Rivers and lakes keep off the volcano itself (they'd cut its crater or flood its floor).
+        let (h, river) = if volcanic.strength > 0.3 { (raw, None) } else { self.carve_river(x, z, raw) };
+        let (h, lake) = if volcanic.strength > 0.0 { (h, None) } else { self.carve_lake(x, z, h) };
+        let water = if h < SEA_LEVEL && volcanic_water.is_none() {
             Some(SEA_LEVEL)
         } else {
-            [river, lake].into_iter().flatten().filter(|l| *l > h).reduce(f32::max)
+            [river, lake, volcanic_water].into_iter().flatten().filter(|l| *l > h).reduce(f32::max)
         };
-        (h, water)
+        Shape { height: h, water, lava: lava.filter(|l| *l > h), volcanic }
+    }
+
+    /// The volcano (cone or caldera) whose ground holds (x, z), if any.
+    fn volcano_at(&self, p: Vec2) -> Option<Arc<Volcano>> {
+        let caldera = self.caldera_in((p / volcano::CALDERA_CELL).floor().as_ivec2());
+        if let Some(c) = caldera.as_ref().filter(|c| c.center.distance(p) < c.radius * 1.3) {
+            return Some(c.clone());
+        }
+        self.cone_in((p / volcano::CONE_CELL).floor().as_ivec2()).filter(|c| c.center.distance(p) < c.radius * 1.3)
+    }
+
+    fn caldera_in(&self, cell: IVec2) -> Option<Arc<Volcano>> {
+        if let Some(v) = self.calderas.read().unwrap().get(&cell) {
+            return v.clone();
+        }
+        let v = volcano::place_caldera(
+            self.seed,
+            cell,
+            |p| self.raw_height(p.x, p.y),
+            |p| self.hills.get_noise_2d(p.x, p.y),
+        )
+        .map(Arc::new);
+        self.calderas.write().unwrap().insert(cell, v.clone());
+        v
+    }
+
+    fn cone_in(&self, cell: IVec2) -> Option<Arc<Volcano>> {
+        if let Some(v) = self.cones.read().unwrap().get(&cell) {
+            return v.clone();
+        }
+        let center = (cell.as_vec2() + Vec2::splat(0.5)) * volcano::CONE_CELL;
+        let caldera = self.caldera_in((center / volcano::CALDERA_CELL).floor().as_ivec2());
+        let v = volcano::place_cone(self.seed, cell, |p| self.raw_height(p.x, p.y), caldera.as_deref()).map(Arc::new);
+        self.cones.write().unwrap().insert(cell, v.clone());
+        v
+    }
+
+    /// Every volcano with its centre within `reach` of `p` (cones and calderas).
+    pub fn volcanoes_near(&self, p: Vec2, reach: f32) -> Vec<Arc<Volcano>> {
+        let mut out = Vec::new();
+        for (cell_size, caldera) in [(volcano::CALDERA_CELL, true), (volcano::CONE_CELL, false)] {
+            let lo = ((p - Vec2::splat(reach)) / cell_size).floor().as_ivec2();
+            let hi = ((p + Vec2::splat(reach)) / cell_size).floor().as_ivec2();
+            for cz in lo.y..=hi.y {
+                for cx in lo.x..=hi.x {
+                    let cell = IVec2::new(cx, cz);
+                    let v = if caldera { self.caldera_in(cell) } else { self.cone_in(cell) };
+                    if let Some(v) = v.filter(|v| v.center.distance(p) <= reach) {
+                        out.push(v);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The natural lava surface over (x, z), if any (a crater's lava lake or a caldera's pool).
+    pub fn lava_level(&self, x: f32, z: f32) -> Option<f32> {
+        self.shape_full(x, z).lava
+    }
+
+    /// Whether the natural water at (x, z) is a hot spring.
+    pub fn hot_spring(&self, x: f32, z: f32) -> bool {
+        let p = Vec2::new(x, z);
+        self.volcano_at(p).is_some_and(|v| {
+            v.features.iter().any(|f| f.kind == volcano::FeatureKind::HotSpring && f.at.distance(p) < f.radius)
+        })
     }
 
     /// A river's surface at (x, z): sloping smoothly with a smoothed copy of the land, stepping
@@ -431,6 +536,9 @@ impl WorldGen {
         };
         let mid = ground(center);
         let mountain = Self::mountain_mask(self.continent.get_noise_2d(center.x, center.y));
+        if self.volcano_at(center).is_some() {
+            return None;
+        }
         if !(SEA_LEVEL + 3.0..150.0).contains(&mid) || mountain > 0.6 {
             return None;
         }
@@ -526,7 +634,8 @@ impl WorldGen {
     }
 
     /// `around` holds the heights at x-1, x+1, z-1 and z+1.
-    fn column_from(&self, x: f32, z: f32, h: f32, around: [f32; 4], water: Option<f32>) -> Column {
+    fn column_from(&self, x: f32, z: f32, shape: Shape, around: [f32; 4]) -> Column {
+        let (h, water) = (shape.height, shape.water);
         let [hx0, hx1, hz0, hz1] = around;
         let g = Vec2::new(hx1 - hx0, hz1 - hz0) * 0.5;
         let slope = g.length();
@@ -544,14 +653,16 @@ impl WorldGen {
             // surface and leaves a long slit.
             entrance: smoothstep(0.55, 0.75, self.entrance.get_noise_2d(x, z)) * smoothstep(0.3, 0.7, slope),
             water,
+            lava: shape.lava,
+            volcanic: shape.volcanic,
         }
     }
 
     fn column(&self, x: f32, z: f32) -> Column {
-        let (h, water) = self.shape(x, z);
+        let shape = self.shape_full(x, z);
         let (hx0, hx1) = (self.height(x - 1.0, z), self.height(x + 1.0, z));
         let (hz0, hz1) = (self.height(x, z - 1.0), self.height(x, z + 1.0));
-        self.column_from(x, z, h, [hx0, hx1, hz0, hz1], water)
+        self.column_from(x, z, shape, [hx0, hx1, hz0, hz1])
     }
 
     /// The surface at (x, z): height, slope, biome, climate and how wooded it is.
@@ -560,8 +671,9 @@ impl WorldGen {
         let (biome, forest, temperature, moisture) = self.biome(x, z, col.height, col.mountain);
         // Woods thin out on steep ground.
         let forest = forest * (1.0 - smoothstep(0.75, 1.1, col.slope));
-        let underwater = col.water.is_some_and(|l| l > col.height + 0.3);
-        Ground { height: col.height, slope: col.slope, biome, forest, temperature, moisture, underwater }
+        let underwater = col.water.is_some_and(|l| l > col.height + 0.3) || col.lava.is_some();
+        let barren = col.volcanic.barren;
+        Ground { height: col.height, slope: col.slope, biome, forest, temperature, moisture, underwater, barren }
     }
 
     /// The material showing at the surface at (x, z).
@@ -584,8 +696,18 @@ impl WorldGen {
             biome,
             patch: self.patches.get_noise_2d(x, z) * 0.5 + 0.5,
             water,
+            lava: None,
+            volcanic: self.volcanic_surface(x, z, height),
         };
         Material::from_u8(self.material(Vec3::new(x, height - 0.5, z), &col, &[]))
+    }
+
+    /// The volcanic ground at (x, z) (for the far terrain's materials), its land at `h`.
+    fn volcanic_surface(&self, x: f32, z: f32, h: f32) -> volcano::Surface {
+        let p = Vec2::new(x, z);
+        self.volcano_at(p)
+            .and_then(|v| v.shape(p, h, |q| self.hills.get_noise_2d(q.x, q.y)))
+            .map_or_else(volcano::Surface::default, |s| s.surface)
     }
 
     /// Density and material at a point, given its column.
@@ -637,6 +759,11 @@ impl WorldGen {
 
     fn base_material(&self, p: Vec3, col: &Column) -> Material {
         let depth = col.height - p.y;
+        if col.volcanic.strength > 0.0
+            && let Some(m) = self.volcanic_material(p, col, depth)
+        {
+            return m;
+        }
         // River and lake beds (and the sea floor near the shore) are sand.
         if let Some(level) = col.water
             && level > col.height
@@ -678,6 +805,39 @@ impl WorldGen {
         }
     }
 
+    /// Volcanic ground: basalt under the cones and calderas, obsidian round lava, ash on active
+    /// cones and caldera floors, pumice high on dormant cones, sulfur and sinter round vents.
+    /// `None` leaves the ordinary material (a dormant cone's lower flanks are grown over).
+    fn volcanic_material(&self, p: Vec3, col: &Column, depth: f32) -> Option<Material> {
+        let v = &col.volcanic;
+        if let Some(lava) = v.lava_edge
+            && (p.y - lava).abs() < 3.5
+            && depth < 4.0
+        {
+            return Some(Material::Obsidian);
+        }
+        let proper = v.strength > 0.5;
+        if depth > 5.0 || col.slope > 1.1 {
+            return proper.then_some(Material::Basalt);
+        }
+        if depth >= 1.5 {
+            return match v.kind {
+                Some(VolcanoKind::Active | VolcanoKind::Super) if proper => Some(Material::Ash),
+                _ => proper.then_some(Material::Basalt),
+            };
+        }
+        let patch = col.patch;
+        match (v.kind?, v.near) {
+            (VolcanoKind::Super, Some(FeatureKind::HotSpring | FeatureKind::Fumarole)) => Some(Material::Sulfur),
+            (VolcanoKind::Super, Some(FeatureKind::Geyser)) => Some(Material::Pumice),
+            (VolcanoKind::Super, _) if v.d < 0.62 => Some(if patch > 0.7 { Material::Sulfur } else { Material::Ash }),
+            (VolcanoKind::Super, _) if v.d < 0.8 => Some(Material::Basalt),
+            (VolcanoKind::Active, _) if v.strength > 0.4 => Some(if patch > 0.6 { Material::Basalt } else { Material::Ash }),
+            (VolcanoKind::Dormant, _) if v.d < 0.45 => Some(if patch > 0.5 { Material::Pumice } else { Material::Basalt }),
+            _ => None,
+        }
+    }
+
     /// Density and material at any world point. Matches [`Self::generate`] exactly at sample positions.
     pub fn sample(&self, p: Vec3) -> (f32, u8) {
         let col = self.column(p.x, p.z);
@@ -706,15 +866,15 @@ impl WorldGen {
         // Heights for every sample column plus a one-sample border for the gradient.
         const H: usize = SAMPLES + 2;
         let base = ChunkData::sample_pos(coord, 0, 0, 0);
-        let mut heights = vec![0.0f32; H * H];
-        let mut water = vec![None; H * H];
+        let mut shapes = Vec::with_capacity(H * H);
         for hz in 0..H {
             for hx in 0..H {
                 let x = base.x + hx as f32 - 1.0;
                 let z = base.z + hz as f32 - 1.0;
-                (heights[hx + H * hz], water[hx + H * hz]) = self.shape(x, z);
+                shapes.push(self.shape_full(x, z));
             }
         }
+        let heights: Vec<f32> = shapes.iter().map(|s| s.height).collect();
         let mut columns = Vec::with_capacity(SAMPLES * SAMPLES);
         let mut max_height = f32::MIN;
         for z in 0..SAMPLES {
@@ -724,9 +884,8 @@ impl WorldGen {
                 let col = self.column_from(
                     base.x + x as f32,
                     base.z + z as f32,
-                    h(1, 1),
+                    shapes[hx + H * hz],
                     [h(0, 1), h(2, 1), h(1, 0), h(1, 2)],
-                    water[hx + H * hz],
                 );
                 max_height = max_height.max(col.height);
                 columns.push(col);
@@ -740,6 +899,7 @@ impl WorldGen {
             material: vec![Material::Air as u8; n],
             surface: columns.iter().map(|c| c.height).collect(),
             water: columns.iter().map(|c| c.water.unwrap_or(f32::NAN)).collect(),
+            lava: columns.iter().map(|c| c.lava.unwrap_or(f32::NAN)).collect(),
             uniform: None,
         };
         // Whole chunk far above the terrain: leave it as air.

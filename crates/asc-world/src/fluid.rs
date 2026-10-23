@@ -119,6 +119,12 @@ pub fn pristine(worldgen: &WorldGen, c: IVec3) -> (FluidKind, u16) {
         }
         return (FluidKind::None, 0);
     }
+    if let Some(lava) = worldgen.lava_level(x, z) {
+        let a = fill(c.y, lava);
+        if a > 0 && c.y as f32 + 0.5 >= worldgen.height(x, z) - NATURAL_DEPTH && worldgen.sample(Vec3::new(x, c.y as f32, z)).0 > 0.0 {
+            return (FluidKind::Lava, a);
+        }
+    }
     let Some(level) = water_level(worldgen, x, z) else { return (FluidKind::None, 0) };
     let amount = fill(c.y, level);
     if amount == 0 || c.y as f32 + 0.5 < worldgen.height(x, z) - NATURAL_DEPTH {
@@ -141,7 +147,9 @@ pub fn pristine_chunk(worldgen: &WorldGen, terrain: &ChunkData) -> FluidChunk {
             let (wx, wz) = ((base.x + x as i32) as f32, (base.z + z as i32) as f32);
             let level = water_level(worldgen, wx, wz);
             // The natural ground: the first sample column of the padded chunk is one cell further out.
-            let surface = terrain.surface[(x + 1) + crate::chunk::SAMPLES * (z + 1)];
+            let column = (x + 1) + crate::chunk::SAMPLES * (z + 1);
+            let surface = terrain.surface[column];
+            let lava = terrain.lava.get(column).copied().filter(|l| !l.is_nan());
             for y in 0..n {
                 let i = cell_index(x, y, z);
                 let s = ChunkData::index(x + 1, y + 1, z + 1);
@@ -160,6 +168,17 @@ pub fn pristine_chunk(worldgen: &WorldGen, terrain: &ChunkData) -> FluidChunk {
                         out.source[i] = a;
                     }
                     continue;
+                }
+                if let Some(lava) = lava {
+                    // A volcano's lava: as the water below, from its surface down into the ground.
+                    let a = fill(wy, lava);
+                    let natural_air = worldgen.sample(Vec3::new(wx, wy as f32, wz)).0 > 0.0;
+                    if a > 0 && wy as f32 + 0.5 >= surface - NATURAL_DEPTH && natural_air {
+                        out.kind[i] = FluidKind::Lava as u8;
+                        out.amount[i] = a;
+                        out.source[i] = a;
+                        continue;
+                    }
                 }
                 if let Some(level) = level {
                     let a = fill(wy, level);
@@ -334,6 +353,7 @@ pub fn mesh_fluid(input: &FluidInput) -> crate::ChunkMesh {
         // Open sky everywhere: water isn't darkened as if buried.
         surface: vec![1e9; SAMPLES * SAMPLES],
         water: Vec::new(),
+        lava: Vec::new(),
         uniform: None,
     };
     field.update_uniform();
@@ -379,6 +399,7 @@ pub fn natural_cells(natural: &ChunkData) -> (Vec<u8>, Vec<u16>) {
         for x in 0..SAMPLES {
             let column = x + SAMPLES * z;
             let (level, ground) = (natural.water[column], natural.surface[column]);
+            let lava = natural.lava.get(column).copied().unwrap_or(f32::NAN);
             for y in 0..SAMPLES {
                 let i = ChunkData::index(x, y, z);
                 if natural.density[i] < 0.0 {
@@ -387,6 +408,8 @@ pub fn natural_cells(natural: &ChunkData) -> (Vec<u8>, Vec<u16>) {
                 let wy = base.y as i32 + y as i32;
                 let (k, a) = if (wy as f32) < LAVA_LEVEL + 0.5 {
                     (FluidKind::Lava, fill(wy, LAVA_LEVEL))
+                } else if !lava.is_nan() && wy as f32 + 0.5 >= ground - NATURAL_DEPTH && fill(wy, lava) > 0 {
+                    (FluidKind::Lava, fill(wy, lava))
                 } else if !level.is_nan() && wy as f32 + 0.5 >= ground - NATURAL_DEPTH {
                     (FluidKind::Water, fill(wy, level))
                 } else {
@@ -407,7 +430,7 @@ pub fn natural_cells(natural: &ChunkData) -> (Vec<u8>, Vec<u16>) {
 pub fn natural_mesh(worldgen: &WorldGen, natural: &ChunkData, terrain: &ChunkData) -> crate::ChunkMesh {
     use crate::chunk::SAMPLES;
     let base = ChunkData::sample_pos(natural.coord, 0, 0, 0);
-    let lava_reach = base.y < LAVA_LEVEL + 1.0;
+    let lava_reach = base.y < LAVA_LEVEL + 1.0 || natural.lava.iter().any(|l| !l.is_nan() && *l >= base.y - 0.5);
     let water_reach = natural.water.iter().any(|l| !l.is_nan() && *l >= base.y - 0.5);
     if !lava_reach && !water_reach {
         return crate::ChunkMesh::default();

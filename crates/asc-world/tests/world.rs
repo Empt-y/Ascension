@@ -44,6 +44,7 @@ fn uniform_chunks_have_empty_meshes() {
             material: vec![Material::Rock as u8; n],
             surface: vec![0.0; SAMPLES * SAMPLES],
             water: vec![f32::NAN; SAMPLES * SAMPLES],
+            lava: vec![f32::NAN; SAMPLES * SAMPLES],
             uniform: None,
         };
         chunk.update_uniform();

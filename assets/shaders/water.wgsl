@@ -57,6 +57,8 @@ struct VsOut {
     // The river's flow (x, z) and how steeply the surface falls here (waterfalls).
     @location(5) flow: vec2<f32>,
     @location(6) fall: f32,
+    // 1 where the surface is lava (a volcano's crater or pool).
+    @location(7) lava: f32,
 }
 
 @vertex
@@ -69,6 +71,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) level: u32) 
     let here = water_at(level, g);
     var surface = here.x;
     var flow = here.yz;
+    var lava = here.w;
     var wet = surface > NONE;
     // The surface's steepest fall to a neighbour, for foam on the steps.
     var fall = 0.0;
@@ -84,6 +87,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) level: u32) 
                 }
                 if !wet {
                     flow = n.yz;
+                    lava = max(lava, n.w);
                 }
             }
         }
@@ -105,6 +109,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) level: u32) 
     out.level = level;
     out.flow = flow;
     out.fall = fall;
+    out.lava = lava;
     return out;
 }
 
@@ -167,6 +172,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         if all(column >= c.xy) && all(column <= c.zw) {
             discard;
         }
+    }
+    if in.lava > 0.5 {
+        // Lava: opaque and glowing (it blooms), as fluid.wgsl draws it near by.
+        let world = vec3(in.world_xz.x, in.rel.y + globals.camera.y, in.world_xz.y);
+        return vec4(debug_hot(apply_fog(lava_color(world, globals.camera.w), in.rel), 7.0), 1.0);
     }
     let dist = length(in.rel);
     let v = -in.rel / dist;

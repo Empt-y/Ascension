@@ -257,6 +257,8 @@ pub fn generate(config: &Config, worldgen: &WorldGen, column: IVec2, kind: usize
                 // Less grass in the shade of woods.
                 density *= 1.0 - 0.6 * g.forest;
             }
+            // Bare volcanic ground (ash, fresh rock) grows little.
+            density *= 1.0 - g.barren;
             if roll >= density * cell * cell {
                 continue;
             }

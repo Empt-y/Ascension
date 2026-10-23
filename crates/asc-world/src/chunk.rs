@@ -42,6 +42,8 @@ pub struct ChunkData {
     pub surface: Vec<f32>,
     /// Natural water surface over each sample column (`SAMPLES²`), NaN where there's none.
     pub water: Vec<f32>,
+    /// Natural lava surface over each sample column (volcanoes' craters and pools), NaN where none.
+    pub lava: Vec<f32>,
     pub uniform: Option<Uniform>,
 }
 

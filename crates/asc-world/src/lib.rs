@@ -12,6 +12,7 @@ mod material;
 mod mesh;
 pub mod ores;
 mod raycast;
+pub mod volcano;
 mod worldgen;
 
 pub use chunk::{CHUNK, ChunkCoord, ChunkData, SAMPLES, chunk_of, chunk_origin};
@@ -25,7 +26,7 @@ pub use worldgen::{Biome, Ground, SEA_LEVEL, WorldGen};
 use std::sync::Arc;
 
 /// Bumped whenever worldgen changes what a seed produces, so saves can warn about mismatched terrain.
-pub const WORLDGEN_VERSION: u32 = 5;
+pub const WORLDGEN_VERSION: u32 = 6;
 
 use glam::Vec3;
 
