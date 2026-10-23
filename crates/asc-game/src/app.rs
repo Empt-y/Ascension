@@ -497,7 +497,7 @@ impl State {
 
         self.receive();
 
-        self.handle_keys(event_loop);
+        self.handle_keys();
         if self.options.autopilot {
             self.autopilot(dt.as_secs_f32());
         } else {
@@ -768,7 +768,7 @@ impl State {
         self.input.end_frame();
     }
 
-    fn handle_keys(&mut self, event_loop: &ActiveEventLoop) {
+    fn handle_keys(&mut self) {
         let input = &self.input;
         if input.pressed(KeyCode::Escape) {
             if self.building.menu_open {
@@ -779,9 +779,9 @@ impl State {
                 self.toggle_inventory();
             } else if self.captured {
                 self.set_captured(false);
-            } else {
-                event_loop.exit();
             }
+            // (Esc never quits: a screenshot tool's Esc reached the game after it had released the
+            // mouse and closed it. Close the window to quit.)
         }
         if self.input.pressed(KeyCode::KeyE) && self.player.mode == Mode::Walk && !self.building.menu_open {
             self.toggle_inventory();

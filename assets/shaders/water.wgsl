@@ -106,19 +106,20 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) level: u32) 
     return out;
 }
 
-// Ripples; on a river they drift downstream and stretch along the flow.
+// Ripples; on a river they're carried downstream. (Round, not stretched: streaks lying along the
+// flow look still as they slide along themselves, and any sideways part of the motion is then all
+// the eye sees: the river seemed to run from bank to bank.)
 fn ripple_normal(xz_in: vec2<f32>, t: f32, fade: f32, flow: vec2<f32>) -> vec3<f32> {
     let speed = length(flow);
     var xz = xz_in;
     if speed > 0.01 {
         let along = flow / speed;
         let across = vec2(-along.y, along.x);
-        // Into flow-aligned coordinates, squashed along the flow (streaks), drifting with it.
-        // Only the downstream drift: the idle drift of still water has a sideways part, which on a
-        // slow river outran the flow and slid the ripples from bank to bank.
-        xz = vec2(dot(xz_in, along) * 0.45 - t * speed * 1.6, dot(xz_in, across));
+        // Into flow-aligned coordinates, carried downstream (only: the idle drift of still water has
+        // a sideways part).
+        xz = vec2(dot(xz_in, along) - t * speed * 0.9, dot(xz_in, across));
         let q1 = vec3(xz * 0.35, t * 0.3);
-        let q2 = vec3(xz * 1.1 - vec2(t * speed * 0.8, 0.0), t * 0.5);
+        let q2 = vec3(xz * 1.1 - vec2(t * speed * 0.6, 0.0), t * 0.5);
         // The slopes come out along and across the flow: back into x and z.
         let g = ripple_slope(q1, q2);
         let w = along * g.x + across * g.y;

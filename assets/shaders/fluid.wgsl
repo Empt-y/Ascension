@@ -29,9 +29,10 @@ fn vs_main(in: VsIn) -> VsOut {
     return out;
 }
 
-fn ripples(xz: vec2<f32>, t: f32) -> vec2<f32> {
-    let p1 = vec3(xz * 0.35 + vec2(t * 0.4, t * 0.25), t * 0.3);
-    let p2 = vec3(xz * 1.1 - vec2(t * 0.6, -t * 0.2), t * 0.5);
+// Ripples carried by `drift` (downhill along a sloping surface; still water just shimmers).
+fn ripples(xz: vec2<f32>, t: f32, drift: vec2<f32>) -> vec2<f32> {
+    let p1 = vec3(xz * 0.35 - drift * t * 0.35, t * 0.3);
+    let p2 = vec3(xz * 1.1 - drift * t * 1.1, t * 0.5);
     let e = 0.15;
     let n1 = value_noise(p1);
     let n2 = value_noise(p2);
@@ -65,7 +66,10 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     var n = normalize(in.normal);
     // Ripples on surfaces facing up (not on the sides of falling water).
     let flat = smoothstep(0.6, 0.9, abs(n.y));
-    let r = ripples(world.xz, globals.camera.w) * flat * (1.0 - smoothstep(30.0, 200.0, dist));
+    // Simulated water runs downhill: the way its surface tilts (the normal leans that way).
+    let tilt = vec2(n.x, n.z);
+    let drift = tilt / max(length(tilt), 1e-3) * min(length(tilt) * 12.0, 2.0);
+    let r = ripples(world.xz, globals.camera.w, drift) * flat * (1.0 - smoothstep(30.0, 200.0, dist));
     n = normalize(n + vec3(-r.x, 0.0, -r.y));
     if dot(n, v) < 0.0 {
         n = -n;

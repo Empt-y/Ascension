@@ -102,7 +102,7 @@ pub fn draw(ctx: &egui::Context, info: &HudInfo) {
                 info.view_radius, info.brush_radius, info.fly_speed
             ));
             ui.separator();
-            ui.label("click: capture mouse   Esc: release / quit   E: inventory   F: walk/fly");
+            ui.label("click: capture mouse   Esc: release mouse   E: inventory   F: walk/fly");
             ui.label("WASD: move   Space: jump (fly: up)   Shift: sprint   Ctrl: fly down");
             ui.label("hold LMB: mine   RMB: place   1-9 / wheel: hotbar   F9: save");
             ui.label("fly mode: LMB/RMB dig/fill brush, wheel brush size, Alt+wheel speed");
