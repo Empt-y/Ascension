@@ -186,6 +186,10 @@ impl Server {
         let stashes = loaded.as_ref().map_or_else(Vec::new, |g| g.stashes.clone());
         let mut fluid_sim = crate::fluids::FluidSim::new();
         let mut fire = crate::fire::Fire::new(seed);
+        let mut volcanism = crate::volcanism::Volcanism::new(seed);
+        if let Some(game) = &loaded {
+            volcanism.restore(&world, &game.scars);
+        }
         if let Some(game) = &loaded {
             fluid_sim.restore(&world, game.fluids.clone());
             fire.restore(game.burnt.iter().copied());
@@ -239,7 +243,7 @@ impl Server {
             spawn,
             stashes,
             fluid_sim,
-            volcanism: crate::volcanism::Volcanism::new(seed),
+            volcanism,
             fire,
             scars: loaded.as_ref().map_or_else(Vec::new, |g| g.scars.clone()),
             next_stash,

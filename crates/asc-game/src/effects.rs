@@ -32,6 +32,11 @@ struct Puff {
     opacity: f32,
     seed: f32,
     spin: f32,
+    /// The slowest it rises (m/s; a pyroclastic flow's cloud hugs the ground), how big it grows,
+    /// and how much it glows while young (lit from below by lava).
+    lift: f32,
+    max: f32,
+    hot: f32,
 }
 
 struct Spark {
@@ -150,6 +155,9 @@ impl Effects {
                     opacity: 0.2 + 0.1 * self.random(),
                     seed: self.random() * 100.0,
                     spin: self.random() * std::f32::consts::TAU,
+                    lift: 1.0,
+                    max: PUFF_MAX,
+                    hot: 0.3,
                 };
                 self.puffs.push(puff);
             }
@@ -170,7 +178,7 @@ impl Effects {
         while self.owed_flow >= 1.0 {
             self.owed_flow -= 1.0;
             let pick = ((self.random() * sources as f32) as usize).min(sources - 1);
-            let (at, vel, size) = if let Some(f) = report.flows.get(pick) {
+            let (at, vel, size, lift, hot) = if let Some(f) = report.flows.get(pick) {
                 if f.front >= f.length {
                     continue;
                 }
@@ -180,16 +188,19 @@ impl Effects {
                 let p = Vec2::new(f.origin.x, f.origin.z) + f.dir * along + f.dir.perp() * (self.random() - 0.5) * 2.0 * half;
                 let ground = worldgen.height(p.x, p.y);
                 let forward = f.dir * (20.0 + 15.0 * self.random());
-                let at = Vec3::new(p.x, ground + 5.0 + self.random() * 25.0, p.y);
-                (at, Vec3::new(forward.x, 3.0 + 5.0 * self.random(), forward.y), 25.0 + 25.0 * self.random())
+                let at = Vec3::new(p.x, ground + 5.0 + self.random() * 20.0, p.y);
+                (at, Vec3::new(forward.x, 1.0 + 2.0 * self.random(), forward.y), 25.0 + 25.0 * self.random(), 0.3, 0.35)
             } else {
                 let b = &report.blasts[pick - report.flows.len()];
-                let wide = if self.random() < 0.75 { 1.0 } else { std::f32::consts::PI };
+                // Mostly the side it was thrown towards (thick there), a thin ring elsewhere.
+                let front = self.random() < 0.85;
+                let wide = if front { 1.0 } else { std::f32::consts::PI };
                 let dir = Vec2::from_angle(b.dir.to_angle() + (self.random() - 0.5) * 2.0 * wide);
                 let p = Vec2::new(b.center.x, b.center.z) + dir * b.radius;
                 let ground = worldgen.height(p.x, p.y);
                 let out = dir * 30.0;
-                (Vec3::new(p.x, ground + 10.0, p.y), Vec3::new(out.x, 8.0 + 10.0 * self.random(), out.y), 30.0 + 30.0 * self.random())
+                let size = if front { 40.0 + 40.0 * self.random() } else { 20.0 + 15.0 * self.random() };
+                (Vec3::new(p.x, ground + size * 0.4, p.y), Vec3::new(out.x, 3.0 + 6.0 * self.random(), out.y), size, 1.0, 0.0)
             };
             let puff = Puff {
                 at,
@@ -197,10 +208,13 @@ impl Effects {
                 vel,
                 size,
                 age: 0.0,
-                dark: 0.75 + 0.25 * self.random(),
+                dark: if hot > 0.0 { 0.75 + 0.25 * self.random() } else { 0.4 + 0.2 * self.random() },
                 opacity: 0.35 + 0.2 * self.random(),
                 seed: self.random() * 100.0,
                 spin: self.random() * std::f32::consts::TAU,
+                lift,
+                max: size * 1.8,
+                hot,
             };
             self.puffs.push(puff);
         }
@@ -238,6 +252,9 @@ impl Effects {
                     opacity: 0.18 + 0.12 * dark + 0.1 * self.random(),
                     seed: self.random() * 100.0,
                     spin: self.random() * std::f32::consts::TAU,
+                    lift: 2.5,
+                    max: PUFF_MAX,
+                    hot: 1.0,
                 };
                 self.puffs.push(puff);
             }
@@ -259,12 +276,12 @@ impl Effects {
         for p in &mut self.puffs {
             p.age += dt;
             // Rising slows as the puff spreads; the wind carries it off.
-            p.vel.y = (p.vel.y - 0.35 * dt).max(2.5);
+            p.vel.y = (p.vel.y - 0.35 * dt).max(p.lift);
             let drift = DRIFT * ((p.at.y - p.from) / 100.0).clamp(0.0, 4.0);
             p.at += Vec3::new(p.vel.x + drift.x, p.vel.y, p.vel.z + drift.y) * dt;
             p.vel.x *= 1.0 - 0.4 * dt;
             p.vel.z *= 1.0 - 0.4 * dt;
-            p.size = (p.size + PUFF_GROWTH * dt * (1.0 + p.age / 20.0)).min(PUFF_MAX);
+            p.size = (p.size + PUFF_GROWTH * dt * (1.0 + p.age / 20.0)).min(p.max);
         }
         self.puffs.retain(|p| p.age < PUFF_LIFE);
         for s in &mut self.sparks {
@@ -283,7 +300,7 @@ impl Effects {
             let fade_out = 1.0 - ((p.age - PUFF_LIFE * 0.6) / (PUFF_LIFE * 0.4)).clamp(0.0, 1.0);
             let shade = 0.6 - 0.32 * p.dark;
             // Young puffs over an erupting crater are lit from below by the lava.
-            let glow = p.dark * (1.0 - (p.age / 8.0).min(1.0)) * 0.8;
+            let glow = p.hot * p.dark * (1.0 - (p.age / 8.0).min(1.0)) * 0.8;
             out.push(Particle {
                 position: p.at.into(),
                 size: p.size,

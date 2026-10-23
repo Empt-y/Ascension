@@ -349,7 +349,7 @@ impl State {
         let mut world = World::new(seed);
         world.edits = asc_world::EditLog::from_ops(welcome.edits.iter().copied());
         let streamer = Streamer::new(world.worldgen.clone(), options.view_radius.unwrap_or(10));
-        let far = FarStreamer::new(world.worldgen.clone());
+        let far = FarStreamer::new(world.worldgen.clone(), &welcome.edits);
         let nature = crate::assets::NatureModels::load(&mut renderer)?;
         let ores = crate::assets::OreModels::load(&mut renderer)?;
         let volcanic = crate::assets::VolcanicModels::load(&mut renderer)?;
@@ -1076,6 +1076,7 @@ impl State {
             ServerMsg::Edited(op) => {
                 let dirty = self.world.edits.push(op);
                 self.streamer.invalidate(&dirty);
+                self.far.edited(&op);
             }
             ServerMsg::PiecePlaced(piece) => self.building.placed(piece),
             ServerMsg::PieceRemoved(key) => self.building.removed(&key),

@@ -236,6 +236,32 @@ pub struct Volcanism {
     seed: i32,
     /// Whether the last report had anything in it (so an empty one is sent once, to clear).
     reported: bool,
+    /// Volcanoes that have blown their tops off (by key): how far down their crater now is.
+    blown: ahash::AHashMap<[i32; 2], f32>,
+}
+
+/// A lateral blast's cut: spheres dug out of the summit and the flank facing `dir`, a horseshoe
+/// crater about halfway down the cone that opens out down the side (as Mt St Helens' did).
+fn blast_digs(v: &Volcano, summit: Vec3, dir: Vec2) -> [asc_world::EditOp; 4] {
+    let c = Vec2::new(summit.x, summit.z);
+    std::array::from_fn(|k| {
+        let along = (0.05 + 0.16 * k as f32) * v.radius;
+        let at = c + dir * along;
+        let radius = v.radius * (0.4 - 0.06 * k as f32);
+        // Its bottom: half the cone's height down at the middle, deeper down the flank.
+        let bottom = summit.y - v.height * (0.45 + 0.1 * k as f32);
+        asc_world::EditOp {
+            center: Vec3::new(at.x, bottom + radius, at.y),
+            radius,
+            kind: asc_world::EditKind::Dig,
+            material: asc_world::Material::Air,
+        }
+    })
+}
+
+/// How far down a blown volcano's crater is from its old summit (where the smoke comes from).
+fn blown_drop(v: &Volcano) -> f32 {
+    v.height * 0.45
 }
 
 fn hash(seed: i32, key: [i32; 2], salt: u64) -> u64 {
@@ -281,6 +307,19 @@ impl Volcanism {
             rng: seed as u32 as u64 ^ 0x6572_7570,
             seed,
             reported: false,
+            blown: Default::default(),
+        }
+    }
+
+    /// Volcanoes blown open before (from the saved scars): their smoke comes out of the new
+    /// crater.
+    pub fn restore(&mut self, world: &World, scars: &[Scar]) {
+        for scar in scars {
+            if let Scar::Blast { center, .. } = *scar
+                && let Some(v) = world.worldgen.volcanoes_near(center, 100.0).into_iter().find(|v| v.center.distance(center) < 1.0)
+            {
+                self.blown.insert(t_key(&v), blown_drop(&v));
+            }
         }
     }
 
@@ -351,18 +390,10 @@ impl Volcanism {
             && into == RUMBLE_TICKS
         {
             // The flank collapses: a horseshoe cut out of the summit and the side facing `dir`.
-            for k in 0..4 {
-                let along = (0.05 + 0.16 * k as f32) * v.radius;
-                let at = c + dir * along;
-                let y = summit.y - v.height * (0.15 + 0.13 * k as f32);
-                let radius = v.radius * (0.4 - 0.06 * k as f32);
-                events.edits.push(asc_world::EditOp {
-                    center: Vec3::new(at.x, y, at.y),
-                    radius,
-                    kind: asc_world::EditKind::Dig,
-                    material: asc_world::Material::Air,
-                });
-            }
+            events.edits.extend(blast_digs(&v, summit, dir));
+            let drop = blown_drop(&v);
+            self.blown.insert(t_key(&v), drop);
+            self.tracked[i].summit.y -= drop;
             self.blasts.push((ticks, Blast { center: summit, dir, radius: 0.0 }));
             events.scars.push(Scar::Blast { center: c, dir });
             events.notices.push("The volcano explodes!".into());
@@ -399,7 +430,8 @@ impl Volcanism {
         let c = v.center;
         let key = [c.x.round() as i32, c.y.round() as i32];
         let rim_height = |a: f32, r: f32| wg.height(c.x + a.cos() * r, c.y + a.sin() * r);
-        let summit = Vec3::new(c.x, rim_height(0.0, v.crater_radius), c.y);
+        let mut summit = Vec3::new(c.x, rim_height(0.0, v.crater_radius), c.y);
+        summit.y -= self.blown.get(&key).copied().unwrap_or(0.0);
         let mut vents = Vec::new();
         if let Some(lava) = v.lava.filter(|_| v.kind == VolcanoKind::Active) {
             // Wells over the lava lake, just over its surface (it rises), and across the breach

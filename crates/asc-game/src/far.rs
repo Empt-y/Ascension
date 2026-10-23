@@ -4,8 +4,12 @@
 //! time) and the main thread uploads them and switches the level to its new window in the same
 //! frame, so a level never draws half-updated data. Coarse levels are refreshed first so the horizon
 //! appears before the detail.
+//!
+//! The far terrain is worldgen's, except where something huge has been dug out of it (a volcano
+//! blowing its flank away): digs at least `BIG_DIG` across are cut out of it too. Smaller edits
+//! only show in the chunks near by.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Instant;
 
@@ -14,6 +18,9 @@ use asc_render::clipmap::{self, GridRect, LEVELS, Samples};
 use asc_world::WorldGen;
 use crossbeam_channel::{Receiver, Sender};
 use glam::{IVec2, Vec2};
+
+/// Digs of at least this radius (m) are cut out of the far terrain.
+const BIG_DIG: f32 = 25.0;
 
 struct Job {
     level: usize,
@@ -33,6 +40,8 @@ pub struct Strips {
 struct Level {
     drawn: Option<IVec2>,
     in_flight: bool,
+    /// Which set of big digs it was drawn with (see `FarStreamer::digs_version`).
+    digs: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -44,15 +53,38 @@ pub struct FarStats {
 }
 
 pub struct FarStreamer {
-    jobs: Sender<Job>,
-    results: Receiver<Strips>,
+    jobs: Sender<(Job, u32)>,
+    results: Receiver<(Strips, u32)>,
     levels: [Level; LEVELS],
     stats: FarStats,
+    /// The big digs (shared with the worker), and a count of changes to them.
+    digs: Arc<RwLock<Vec<asc_world::EditOp>>>,
+    digs_version: u32,
+}
+
+/// Where a dug sphere has lowered the ground at `(x, z)` from `height`, the new height.
+fn dug(digs: &[asc_world::EditOp], x: f32, z: f32, height: f32) -> Option<f32> {
+    let mut lowest: Option<f32> = None;
+    for op in digs {
+        let d2 = (x - op.center.x).powi(2) + (z - op.center.z).powi(2);
+        let r2 = op.radius * op.radius;
+        if d2 >= r2 {
+            continue;
+        }
+        let half = (r2 - d2).sqrt();
+        // The surface was inside the sphere (or it reaches up into the open): down to its bottom.
+        let (bottom, top) = (op.center.y - half, op.center.y + half);
+        let h = lowest.unwrap_or(height);
+        if h > bottom && h <= top {
+            lowest = Some(bottom);
+        }
+    }
+    lowest
 }
 
 /// Heights and surface materials for every sample of `rect` on `level`, row-major. Heights are
 /// computed with a one-sample border so each sample's slope comes from its grid neighbours.
-pub fn compute(worldgen: &WorldGen, level: usize, rect: GridRect) -> Samples {
+pub fn compute(worldgen: &WorldGen, digs: &[asc_world::EditOp], level: usize, rect: GridRect) -> Samples {
     let s = clipmap::spacing(level);
     let size = rect.size();
     let (w, h) = (size.x as usize + 2, size.y as usize + 2);
@@ -62,6 +94,13 @@ pub fn compute(worldgen: &WorldGen, level: usize, rect: GridRect) -> Samples {
     for z in rect.min.y - 1..=rect.max.y + 1 {
         for x in rect.min.x - 1..=rect.max.x + 1 {
             let (height, level, lava, ice_top) = worldgen.height_water_lava(x as f32 * s, z as f32 * s);
+            // Blown away: bare ground, its lake (or lava) gone with it.
+            if let Some(lowered) = dug(digs, x as f32 * s, z as f32 * s, height) {
+                border.push(lowered);
+                ice.push(None);
+                water.push(None);
+                continue;
+            }
             border.push(height);
             ice.push(ice_top);
             // Lava is drawn by the far water too (flagged), in its place.
@@ -97,18 +136,21 @@ pub fn compute(worldgen: &WorldGen, level: usize, rect: GridRect) -> Samples {
 }
 
 impl FarStreamer {
-    pub fn new(worldgen: Arc<WorldGen>) -> Self {
-        let (job_tx, job_rx) = crossbeam_channel::unbounded::<Job>();
-        let (done_tx, done_rx) = crossbeam_channel::unbounded::<Strips>();
+    pub fn new(worldgen: Arc<WorldGen>, edits: &[asc_world::EditOp]) -> Self {
+        let (job_tx, job_rx) = crossbeam_channel::unbounded::<(Job, u32)>();
+        let (done_tx, done_rx) = crossbeam_channel::unbounded::<(Strips, u32)>();
+        let digs = Arc::new(RwLock::new(edits.iter().copied().filter(is_big_dig).collect::<Vec<_>>()));
+        let worker_digs = digs.clone();
         thread::Builder::new()
             .name("far-terrain".into())
             .spawn(move || {
                 let _ = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
-                for job in job_rx {
+                for (job, version) in job_rx {
                     let t = Instant::now();
+                    let digs = worker_digs.read().expect("far digs").clone();
                     let rects: Vec<(GridRect, Samples)> = clipmap::dirty(job.from, job.to)
                         .into_iter()
-                        .map(|r| (r, compute(&worldgen, job.level, r)))
+                        .map(|r| (r, compute(&worldgen, &digs, job.level, r)))
                         .collect();
                     let samples = rects.iter().map(|(r, _)| r.len()).sum();
                     let strips = Strips {
@@ -118,7 +160,7 @@ impl FarStreamer {
                         samples,
                         seconds: t.elapsed().as_secs_f32(),
                     };
-                    if done_tx.send(strips).is_err() {
+                    if done_tx.send((strips, version)).is_err() {
                         break;
                     }
                 }
@@ -129,6 +171,16 @@ impl FarStreamer {
             results: done_rx,
             levels: [Level::default(); LEVELS],
             stats: FarStats::default(),
+            digs,
+            digs_version: 0,
+        }
+    }
+
+    /// An edit has been made: a big dig is cut out of the far terrain (every level is redrawn).
+    pub fn edited(&mut self, op: &asc_world::EditOp) {
+        if is_big_dig(op) {
+            self.digs.write().expect("far digs").push(*op);
+            self.digs_version += 1;
         }
     }
 
@@ -137,11 +189,12 @@ impl FarStreamer {
     }
 
     pub fn update(&mut self, camera: Vec2, renderer: &mut Renderer) {
-        for strips in self.results.try_iter() {
+        for (strips, version) in self.results.try_iter() {
             renderer.far_upload(strips.level, strips.to, &strips.rects);
             let level = &mut self.levels[strips.level];
             level.drawn = Some(strips.to);
             level.in_flight = false;
+            level.digs = version;
             if strips.seconds > 0.0 {
                 let rate = strips.samples as f32 / strips.seconds;
                 self.stats.samples_per_sec += (rate - self.stats.samples_per_sec) * 0.2;
@@ -152,14 +205,21 @@ impl FarStreamer {
         for level in (0..LEVELS).rev() {
             let state = &mut self.levels[level];
             let target = clipmap::keep_or_recenter(level, camera, state.drawn);
-            if state.in_flight || state.drawn == Some(target) {
+            let stale = state.digs != self.digs_version;
+            if state.in_flight || (state.drawn == Some(target) && !stale) {
                 continue;
             }
             state.in_flight = true;
-            log::debug!("far level {level}: {:?} -> {target} (camera {camera})", state.drawn);
-            let _ = self.jobs.send(Job { level, from: state.drawn, to: target });
+            // New digs: the whole window again.
+            let from = if stale { None } else { state.drawn };
+            log::debug!("far level {level}: {from:?} -> {target} (camera {camera})");
+            let _ = self.jobs.send((Job { level, from, to: target }, self.digs_version));
         }
     }
+}
+
+fn is_big_dig(op: &asc_world::EditOp) -> bool {
+    op.kind == asc_world::EditKind::Dig && op.radius >= BIG_DIG
 }
 
 #[cfg(test)]
@@ -171,7 +231,7 @@ mod tests {
         let wg = WorldGen::new(1337);
         let level = 3;
         let rect = GridRect { min: IVec2::new(-5, 120), max: IVec2::new(4, 130) };
-        let data = compute(&wg, level, rect);
+        let data = compute(&wg, &[], level, rect);
         assert_eq!(data.heights.len(), rect.len());
         assert_eq!(data.materials.len(), rect.len());
         let s = clipmap::spacing(level);
@@ -180,5 +240,26 @@ mod tests {
             let (x, z) = (rect.min.x + i as i32 % width, rect.min.y + i as i32 / width);
             assert_eq!(*h, wg.height(x as f32 * s, z as f32 * s));
         }
+    }
+
+    #[test]
+    fn a_big_dig_lowers_the_far_terrain_and_a_small_one_doesnt() {
+        let wg = WorldGen::new(1337);
+        let level = 2;
+        let s = clipmap::spacing(level);
+        let rect = GridRect { min: IVec2::new(0, 0), max: IVec2::new(9, 9) };
+        let (x, z) = (5.0 * s, 5.0 * s);
+        let ground = wg.height(x, z);
+        let dig = |radius| asc_world::EditOp {
+            center: glam::Vec3::new(x, ground, z),
+            radius,
+            kind: asc_world::EditKind::Dig,
+            material: asc_world::Material::Air,
+        };
+        let big = dig(200.0);
+        assert!(is_big_dig(&big) && !is_big_dig(&dig(3.0)));
+        let data = compute(&wg, &[big], level, rect);
+        let i = (5 * rect.size().x + 5) as usize;
+        assert!((data.heights[i] - (ground - 200.0)).abs() < 0.01, "{} vs {}", data.heights[i], ground - 200.0);
     }
 }
