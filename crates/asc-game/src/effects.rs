@@ -277,7 +277,7 @@ impl Effects {
     pub fn particles(&self, report: &Report) -> Vec<Particle> {
         let mut out = Vec::with_capacity(self.puffs.len() + self.sparks.len() + report.bombs.len());
         for p in &self.puffs {
-            let fade_in = (p.age / 2.0).min(1.0);
+            let fade_in = (p.age / 0.8).min(1.0);
             let fade_out = 1.0 - ((p.age - PUFF_LIFE * 0.6) / (PUFF_LIFE * 0.4)).clamp(0.0, 1.0);
             let shade = 0.6 - 0.32 * p.dark;
             // Young puffs over an erupting crater are lit from below by the lava.

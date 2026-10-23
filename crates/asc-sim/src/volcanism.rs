@@ -259,9 +259,10 @@ fn blast_digs(v: &Volcano, summit: Vec3, dir: Vec2) -> [asc_world::EditOp; 4] {
     })
 }
 
-/// How far down a blown volcano's crater is from its old summit (where the smoke comes from).
+/// How far a blown volcano's summit (where its smoke and lava come from) drops: to just over the
+/// new crater's floor (the plume sets off 10 m under the summit, as it does inside an old rim).
 fn blown_drop(v: &Volcano) -> f32 {
-    v.height * 0.45
+    v.height * 0.45 - 12.0
 }
 
 fn hash(seed: i32, key: [i32; 2], salt: u64) -> u64 {
