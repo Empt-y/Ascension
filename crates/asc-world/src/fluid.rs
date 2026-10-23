@@ -169,6 +169,80 @@ pub fn pristine_chunk(worldgen: &WorldGen, terrain: &ChunkData) -> FluidChunk {
     out
 }
 
+/// Flow is stored in a fluid vertex's `ore` bytes: x and z around 128, `FLOW_SCALE` per m/s, and
+/// the third byte 255 to say it's there (simulated water leaves it zero).
+pub const FLOW_SCALE: f32 = 60.0;
+
+/// The mesh of a chunk's natural water and lava, from its own (unedited) samples, for drawing
+/// chunks whose fluid isn't materialised. Under a water surface the water also runs on into the
+/// ground (to a metre below the natural surface), so its edges are hidden in the bank and the
+/// terrain cuts the shoreline wherever it meets the surface. Each vertex carries the river's flow.
+pub fn natural_mesh(worldgen: &WorldGen, natural: &ChunkData) -> crate::ChunkMesh {
+    use crate::chunk::SAMPLES;
+    let n = SAMPLES * SAMPLES * SAMPLES;
+    let base = ChunkData::sample_pos(natural.coord, 0, 0, 0);
+    let lava_reach = base.y < LAVA_LEVEL + 1.0;
+    let water_reach = natural.water.iter().any(|l| !l.is_nan() && *l >= base.y - 0.5);
+    if !lava_reach && !water_reach {
+        return crate::ChunkMesh::default();
+    }
+    let mut density = vec![0.5f32; n];
+    let mut material = vec![1u8; n];
+    for z in 0..SAMPLES {
+        for x in 0..SAMPLES {
+            let column = x + SAMPLES * z;
+            let (level, ground) = (natural.water[column], natural.surface[column]);
+            for y in 0..SAMPLES {
+                let i = ChunkData::index(x, y, z);
+                let wy = base.y as i32 + y as i32;
+                let a = if (wy as f32) < LAVA_LEVEL + 0.5 {
+                    material[i] = 2;
+                    if natural.density[i] >= 0.0 { fill(wy, LAVA_LEVEL) } else { 0 }
+                } else if !level.is_nan() && wy as f32 + 0.5 >= ground - 1.0 {
+                    fill(wy, level)
+                } else {
+                    0
+                };
+                density[i] = 0.5 - a as f32 / FULL as f32;
+            }
+        }
+    }
+    let mut field = ChunkData {
+        coord: natural.coord,
+        density,
+        material,
+        // Open sky everywhere: water isn't darkened as if buried.
+        surface: vec![1e9; SAMPLES * SAMPLES],
+        water: Vec::new(),
+        uniform: None,
+    };
+    field.update_uniform();
+    let mut mesh = crate::mesh_chunk(&field);
+    if mesh.is_empty() {
+        return mesh;
+    }
+    // The flow per sample column (rivers only), blended to each vertex.
+    let flow: Vec<glam::Vec2> = (0..SAMPLES * SAMPLES)
+        .map(|c| {
+            if natural.water[c].is_nan() {
+                return glam::Vec2::ZERO;
+            }
+            worldgen.water_flow(base.x + (c % SAMPLES) as f32, base.z + (c / SAMPLES) as f32)
+        })
+        .collect();
+    let at = |x: usize, z: usize| flow[x.min(SAMPLES - 1) + SAMPLES * z.min(SAMPLES - 1)];
+    for v in &mut mesh.vertices {
+        // Sample i sits at local i - 1.
+        let (fx, fz) = ((v.position[0] + 1.0).max(0.0), (v.position[2] + 1.0).max(0.0));
+        let (x, z) = (fx as usize, fz as usize);
+        let (tx, tz) = (fx - x as f32, fz - z as f32);
+        let f = at(x, z).lerp(at(x + 1, z), tx).lerp(at(x, z + 1).lerp(at(x + 1, z + 1), tx), tz);
+        let byte = |v: f32| (128.0 + v * FLOW_SCALE).round().clamp(1.0, 255.0) as u8;
+        v.ore = [byte(f.x), byte(f.y), 255, 0];
+    }
+    mesh
+}
+
 /// Every materialised fluid chunk; everything else is pristine.
 #[derive(Default)]
 pub struct Fluids {
@@ -253,6 +327,36 @@ impl PackedFluid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn natural_water_meshes_at_its_surface_with_the_river_flow() {
+        let worldgen = WorldGen::new(1337);
+        // A river column (water above sea level, with a flow).
+        let (x, z, level) = (0..40000)
+            .map(|i| ((i % 200) as f32 * 7.0 - 700.0, (i / 200) as f32 * 7.0 - 700.0))
+            .find_map(|(x, z)| {
+                let l = worldgen.water_level(x, z)?;
+                (l > SEA_LEVEL + 2.0 && worldgen.water_flow(x, z).length() > 0.1).then_some((x, z, l))
+            })
+            .expect("a river");
+        let coord = crate::chunk_of(Vec3::new(x, level, z));
+        let mesh = natural_mesh(&worldgen, &worldgen.generate(coord));
+        assert!(!mesh.is_empty());
+        let origin = (coord * CHUNK).as_vec3();
+        // The top surface over the river column sits at the water level.
+        let top = mesh
+            .vertices
+            .iter()
+            .filter(|v| (origin.x + v.position[0] - x).abs() < 1.0 && (origin.z + v.position[2] - z).abs() < 1.0)
+            .map(|v| origin.y + v.position[1])
+            .fold(f32::MIN, f32::max);
+        assert!((top - level).abs() < 0.6, "surface {top} vs level {level}");
+        let flowing = mesh.vertices.iter().filter(|v| v.ore[2] == 255 && (v.ore[0] != 128 || v.ore[1] != 128));
+        assert!(flowing.count() > 0, "river vertices carry the flow");
+        // A chunk high above everything has none.
+        let sky = natural_mesh(&worldgen, &worldgen.generate(coord + IVec3::Y * 6));
+        assert!(sky.is_empty());
+    }
 
     #[test]
     fn the_sea_fills_low_columns_up_to_sea_level() {

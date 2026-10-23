@@ -1,8 +1,8 @@
-// Natural water (sea, lakes, rivers): the far-terrain grid at each sample's water surface, drawn
-// after the sky with alpha blending.
+// Natural water (sea, lakes, rivers) beyond the loaded chunks: the far-terrain grid at each
+// sample's water surface, drawn after the sky with alpha blending. Inside the chunk view radius the
+// chunks' own water meshes (fluid.wgsl) take over, as the chunk terrain does from far.wgsl.
 //
-// Every level draws its whole grid (near the camera too) and leaves the area of a finer drawn level
-// to it. A dry sample next to water carries the water's level on, so the surface runs on under the
+// Every level draws its whole grid and leaves the area of a finer drawn level to it. A dry sample next to water carries the water's level on, so the surface runs on under the
 // bank and the terrain itself (by depth) cuts the shoreline, following the ground rather than the
 // grid; samples with no water round them are dropped out of sight. Where a river steps down, the
 // grid between two levels makes a falling sheet, which foams. Rivers' flow (per sample) drifts and
@@ -30,6 +30,8 @@ const GRID: u32 = 253u;
 const TEX: i32 = 256;
 // Below this a sample has no water (clipmap::NO_WATER is -10000).
 const NONE: f32 = -5000.0;
+// How far inside the view radius this still draws (as far.wgsl: chunks cover at least that far).
+const CHUNK_OVERLAP: f32 = 24.0;
 
 fn wrap(g: i32) -> i32 {
     return ((g % TEX) + TEX) % TEX;
@@ -144,7 +146,7 @@ fn ripple_slope(p1: vec3<f32>, p2: vec3<f32>) -> vec2<f32> {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Ripple normals take derivatives of nothing here, so the discards can come first.
-    if in.wet < 0.01 {
+    if in.wet < 0.01 || length(in.rel.xz) < globals.fog.z - CHUNK_OVERLAP {
         discard;
     }
     let finer = levels[in.level].finer;

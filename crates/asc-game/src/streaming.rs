@@ -1,7 +1,8 @@
 //! Keeps the chunks around the camera generated, meshed and uploaded.
 //!
 //! The main thread decides what is wanted and in which order; a pool of worker threads builds chunks
-//! (worldgen + replayed edits + meshing) and sends meshes back. Only a few jobs per worker are in
+//! (worldgen + replayed edits + meshing, and the mesh of the chunk's natural water) and sends meshes
+//! back. Only a few jobs per worker are in
 //! flight at once so priorities stay fresh as the camera moves. Every request carries a version; edits
 //! bump the version, and a result is uploaded only if it is the newest one seen for that chunk.
 
@@ -12,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use ahash::{AHashMap, AHashSet};
 use asc_render::{Frustum, Renderer};
-use asc_world::{CHUNK, ChunkCoord, ChunkData, ChunkMesh, EditOp, World, WorldGen, chunk_of, mesh_chunk};
+use asc_world::fluid::{self, Fluids};
+use asc_world::{CHUNK, ChunkCoord, ChunkMesh, EditOp, World, WorldGen, chunk_of, mesh_chunk};
 use crossbeam_channel::{Receiver, Sender};
 use glam::{IVec2, IVec3, Vec3};
 
@@ -34,6 +36,10 @@ struct Built {
     coord: ChunkCoord,
     version: u32,
     mesh: ChunkMesh,
+    /// Its natural water and lava (drawn unless the chunk's fluid is materialised).
+    fluid: ChunkMesh,
+    /// The light of its natural lava, if any.
+    lava_light: Option<asc_render::PointLight>,
     /// The surface leaves through the chunk's top / bottom face, so the chunk above / below is needed.
     spills_up: bool,
     spills_down: bool,
@@ -70,6 +76,8 @@ pub struct Streamer {
     results: Receiver<Built>,
     workers: usize,
     slots: AHashMap<ChunkCoord, Slot>,
+    /// Lights of the loaded chunks' natural lava.
+    lights: AHashMap<ChunkCoord, asc_render::PointLight>,
     /// Chunks waiting for a worker, best first. Rebuilt when the camera changes chunk.
     queue: VecDeque<ChunkCoord>,
     /// Edited chunks jump the queue.
@@ -107,7 +115,11 @@ impl Streamer {
                     }
                     for job in rx {
                         let t0 = Instant::now();
-                        let data = ChunkData::build(&wg, job.coord, &job.ops);
+                        let mut data = wg.generate(job.coord);
+                        let fluid = fluid::natural_mesh(&wg, &data);
+                        let lava_light = lava_light(job.coord, &fluid);
+                        data.apply_ops(&job.ops);
+                        data.update_uniform();
                         let t1 = Instant::now();
                         let mesh = mesh_chunk(&data);
                         let (spills_up, spills_down) = spills(&mesh);
@@ -115,6 +127,8 @@ impl Streamer {
                             coord: job.coord,
                             version: job.version,
                             mesh,
+                            fluid,
+                            lava_light,
                             spills_up,
                             spills_down,
                             build_time: t1 - t0,
@@ -133,6 +147,7 @@ impl Streamer {
             results: done_rx,
             workers,
             slots: AHashMap::new(),
+            lights: AHashMap::new(),
             queue: VecDeque::new(),
             urgent: VecDeque::new(),
             in_flight: 0,
@@ -171,9 +186,10 @@ impl Streamer {
             let s = CHUNK as f32;
             let (mut lo, mut hi) = (f32::MAX, f32::MIN);
             for (dx, dz) in [(0.0, 0.0), (s, 0.0), (0.0, s), (s, s), (s * 0.5, s * 0.5)] {
-                let h = self.worldgen.height(base.x + dx, base.y + dz);
+                let (h, water) = self.worldgen.height_and_water(base.x + dx, base.y + dz);
                 lo = lo.min(h);
-                hi = hi.max(h);
+                // Up to the water's surface too (deep water's surface is in a chunk of its own).
+                hi = hi.max(water.map_or(h, |w| w.max(h)));
             }
             // Slopes inside the column can exceed the sampled corners; caves can open just below.
             (chunk_of(Vec3::splat(lo - 18.0)).y, chunk_of(Vec3::splat(hi + 12.0)).y)
@@ -195,23 +211,41 @@ impl Streamer {
         }
     }
 
-    pub fn update(&mut self, world: &World, camera: Vec3, frustum: &Frustum, renderer: &mut Renderer) {
+    /// `fluids`: the materialised fluid chunks, which draw their own meshes.
+    /// Lights of natural lava within `reach` of the camera, leaving out materialised chunks (they
+    /// light themselves).
+    pub fn lava_lights(&self, fluids: &Fluids, camera: Vec3, reach: f32) -> Vec<asc_render::PointLight> {
+        self.lights
+            .iter()
+            .filter(|(c, l)| !fluids.chunks.contains_key(*c) && l.position.distance(camera) < reach)
+            .map(|(_, l)| *l)
+            .collect()
+    }
+
+    pub fn update(
+        &mut self,
+        world: &World,
+        fluids: &Fluids,
+        camera: Vec3,
+        frustum: &Frustum,
+        renderer: &mut Renderer,
+    ) {
         let center = chunk_of(camera);
         if self.last_center != Some(center) || self.last_radius != self.view_radius {
             let t = Instant::now();
-            self.retarget(center, camera, frustum, renderer);
+            self.retarget(center, camera, frustum, fluids, renderer);
             self.stats.worst_retarget_ms = self.stats.worst_retarget_ms.max(t.elapsed().as_secs_f32() * 1e3);
             self.last_center = Some(center);
             self.last_radius = self.view_radius;
         }
         self.dispatch(world);
         let t = Instant::now();
-        self.receive(renderer);
+        self.receive(fluids, renderer);
         self.stats.worst_upload_ms = self.stats.worst_upload_ms.max(t.elapsed().as_secs_f32() * 1e3);
     }
 
     /// Recompute which chunks are wanted and in what order; drop the ones that fell out of range.
-    fn retarget(&mut self, center: IVec3, camera: Vec3, frustum: &Frustum, renderer: &mut Renderer) {
+    fn retarget(&mut self, center: IVec3, camera: Vec3, frustum: &Frustum, fluids: &Fluids, renderer: &mut Renderer) {
         let r = self.view_radius;
         let mut wanted: Vec<(f32, ChunkCoord)> = Vec::new();
         for dz in -r..=r {
@@ -260,6 +294,10 @@ impl Streamer {
             let inside = d.x * d.x + d.z * d.z <= keep * keep && d.y.abs() <= keep;
             if !inside && slot.in_flight == 0 {
                 renderer.remove_chunk(*coord);
+                self.lights.remove(coord);
+                if !fluids.chunks.contains_key(coord) {
+                    renderer.remove_fluid(*coord);
+                }
             }
             inside || slot.in_flight > 0
         });
@@ -293,7 +331,7 @@ impl Streamer {
         }
     }
 
-    fn receive(&mut self, renderer: &mut Renderer) {
+    fn receive(&mut self, fluids: &Fluids, renderer: &mut Renderer) {
         for built in self.results.try_iter() {
             self.in_flight -= 1;
             let alpha = 0.05;
@@ -319,6 +357,13 @@ impl Streamer {
             slot.shown = Some(built.version);
             let current = built.version == slot.wanted;
             renderer.upload_chunk(built.coord, &built.mesh);
+            if !fluids.chunks.contains_key(&built.coord) {
+                renderer.upload_fluid(built.coord, &built.fluid);
+            }
+            match built.lava_light {
+                Some(l) => self.lights.insert(built.coord, l),
+                None => self.lights.remove(&built.coord),
+            };
             // Follow the surface vertically: the band estimate misses peaks and steep cliffs.
             if built.spills_up {
                 self.follow(built.coord + IVec3::Y);
@@ -337,6 +382,17 @@ impl Streamer {
             }
         }
     }
+}
+
+/// A light at the middle of a chunk's natural lava surface, brighter and reaching further the more
+/// of it there is (as for simulated lava).
+fn lava_light(coord: ChunkCoord, mesh: &ChunkMesh) -> Option<asc_render::PointLight> {
+    let (mut sum, mut count) = (Vec3::ZERO, 0u32);
+    for v in mesh.vertices.iter().filter(|v| v.weights[1] > 128 && v.normal[1] > 64) {
+        sum += Vec3::from(v.position);
+        count += 1;
+    }
+    (count > 0).then(|| crate::fluids::lava_light_at(coord.as_vec3() * CHUNK as f32 + sum / count as f32, count))
 }
 
 /// Whether any vertex sits on the chunk's top or bottom face, i.e. the surface continues past it.

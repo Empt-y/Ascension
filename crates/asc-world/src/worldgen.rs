@@ -320,6 +320,19 @@ impl WorldGen {
         (gentle + (stepped - gentle) * steep).max(SEA_LEVEL)
     }
 
+    /// How the natural water at (x, z) flows: the river's flow where its water is a river's, zero on
+    /// the sea, lakes and dry land.
+    pub fn water_flow(&self, x: f32, z: f32) -> Vec2 {
+        let raw = self.raw_height(x, z);
+        let (h, river) = self.carve_river(x, z, raw);
+        let (h, _) = self.carve_lake(x, z, h);
+        if h >= SEA_LEVEL && river.is_some() && self.shape(x, z).1 == river {
+            self.river_flow(x, z)
+        } else {
+            Vec2::ZERO
+        }
+    }
+
     /// Which way a river at (x, z) flows, as a unit vector scaled by how steeply its land falls
     /// (zero off rivers): along the channel, towards the lower ground.
     pub fn river_flow(&self, x: f32, z: f32) -> Vec2 {
@@ -726,6 +739,7 @@ impl WorldGen {
             density: vec![DENSITY_CLAMP; n],
             material: vec![Material::Air as u8; n],
             surface: columns.iter().map(|c| c.height).collect(),
+            water: columns.iter().map(|c| c.water.unwrap_or(f32::NAN)).collect(),
             uniform: None,
         };
         // Whole chunk far above the terrain: leave it as air.

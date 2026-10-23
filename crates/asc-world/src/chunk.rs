@@ -39,6 +39,8 @@ pub struct ChunkData {
     /// Worldgen surface height of each sample column (`SAMPLES²`, x fastest). Edits don't change it;
     /// the mesher uses it to darken ambient light under the original surface (caves, overhangs).
     pub surface: Vec<f32>,
+    /// Natural water surface over each sample column (`SAMPLES²`), NaN where there's none.
+    pub water: Vec<f32>,
     pub uniform: Option<Uniform>,
 }
 

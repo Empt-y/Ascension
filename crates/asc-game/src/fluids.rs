@@ -28,8 +28,6 @@ pub struct ClientFluids {
     dirty: BTreeMap<[i32; 3], Option<Instant>>,
     last_mesh: AHashMap<ChunkCoord, Instant>,
     columns_changed: bool,
-    /// Chunks of the pristine lava sea meshed round the camera.
-    pristine_meshed: std::collections::BTreeSet<[i32; 3]>,
     /// Each chunk's lava light, worked out when it last changed (None: no lava).
     lights: AHashMap<ChunkCoord, Option<asc_render::PointLight>>,
 }
@@ -42,7 +40,6 @@ impl ClientFluids {
             dirty: BTreeMap::new(),
             last_mesh: AHashMap::new(),
             columns_changed: true,
-            pristine_meshed: std::collections::BTreeSet::new(),
             lights: AHashMap::new(),
         }
     }
@@ -105,7 +102,7 @@ impl ClientFluids {
         FluidKind::from_u8(ghost.kind[i])
     }
 
-    /// A light for every chunk of lava near the camera: at the middle of its surface, brighter and
+    /// A light for every materialised chunk of lava near the camera: at the middle of its surface, brighter and
     /// reaching further the more lava there is.
     pub fn lava_lights(&mut self, camera: Vec3) -> Vec<asc_render::PointLight> {
         let mut lights = Vec::new();
@@ -113,7 +110,6 @@ impl ClientFluids {
             .fluids
             .chunks
             .keys()
-            .chain(self.ghosts.keys())
             .copied()
             .filter(|c| (c.as_vec3() * CHUNK as f32 + Vec3::splat(16.0)).distance(camera) < 160.0)
             .collect();
@@ -124,8 +120,7 @@ impl ClientFluids {
                 }
                 continue;
             }
-            let ch = self.fluids.chunks.get(&coord).or_else(|| self.ghosts.get(&coord));
-            let Some(ch) = ch else { continue };
+            let Some(ch) = self.fluids.chunks.get(&coord) else { continue };
             let (mut sum, mut count) = (Vec3::ZERO, 0u32);
             for i in 0..CELLS {
                 if ch.kind[i] != FluidKind::Lava as u8 || ch.amount[i] == 0 {
@@ -139,52 +134,13 @@ impl ClientFluids {
                 sum += Vec3::new((i % 32) as f32, y as f32, (i / 1024) as f32);
                 count += 1;
             }
-            let light = (count > 0).then(|| {
-                let at = coord.as_vec3() * CHUNK as f32 + sum / count as f32 + Vec3::Y * 1.5;
-                let size = (count as f32).sqrt();
-                asc_render::PointLight {
-                    position: at,
-                    radius: 8.0 + size * 1.6,
-                    color: Vec3::new(1.0, 0.38, 0.08) * (1.5 + size * 0.12),
-                }
-            });
+            let light = (count > 0).then(|| lava_light_at(coord.as_vec3() * CHUNK as f32 + sum / count as f32, count));
             self.lights.insert(coord, light);
             if let Some(l) = light {
                 lights.push(l);
             }
         }
         lights
-    }
-
-    /// Deep underground, mesh the pristine lava sea around the camera (it isn't materialised, and
-    /// there's no far-terrain stand-in for it); drop those meshes again further away.
-    pub fn near_lava(&mut self, camera: Vec3, renderer: &mut Renderer) {
-        let lava_chunk = (fluid::LAVA_LEVEL / CHUNK as f32).floor() as i32;
-        let here = asc_world::chunk_of(camera);
-        let wanted = camera.y < fluid::LAVA_LEVEL + 96.0;
-        let mut keep = std::collections::BTreeSet::new();
-        if wanted {
-            for dz in -3..=3 {
-                for dx in -3..=3 {
-                    for y in [lava_chunk - 1, lava_chunk] {
-                        let c = IVec3::new(here.x + dx, y, here.z + dz);
-                        keep.insert(c.to_array());
-                        if !self.fluids.chunks.contains_key(&c) && self.pristine_meshed.insert(c.to_array()) {
-                            self.dirty.entry(c.to_array()).or_insert(None);
-                        }
-                    }
-                }
-            }
-        }
-        let gone: Vec<[i32; 3]> = self.pristine_meshed.iter().filter(|k| !keep.contains(*k)).copied().collect();
-        for k in gone {
-            self.pristine_meshed.remove(&k);
-            let c = IVec3::from_array(k);
-            if !self.fluids.chunks.contains_key(&c) {
-                renderer.remove_fluid(c);
-                self.ghosts.remove(&c);
-            }
-        }
     }
 
     fn mesh(&mut self, world: &World, coord: ChunkCoord) -> asc_world::ChunkMesh {
@@ -219,6 +175,7 @@ impl ClientFluids {
             material,
             // Open sky everywhere: water isn't darkened as if buried.
             surface: vec![1e9; SAMPLES * SAMPLES],
+            water: vec![f32::NAN; SAMPLES * SAMPLES],
             uniform: None,
         };
         data.update_uniform();
@@ -267,6 +224,16 @@ impl ClientFluids {
             columns.dedup();
             renderer.set_fluid_columns(&columns);
         }
+    }
+}
+
+/// The light of `count` cells of lava surface centred on `at`.
+pub fn lava_light_at(at: Vec3, count: u32) -> asc_render::PointLight {
+    let size = (count as f32).sqrt();
+    asc_render::PointLight {
+        position: at + Vec3::Y * 1.5,
+        radius: 8.0 + size * 1.6,
+        color: Vec3::new(1.0, 0.38, 0.08) * (1.5 + size * 0.12),
     }
 }
 
