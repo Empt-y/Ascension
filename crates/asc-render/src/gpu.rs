@@ -34,7 +34,12 @@ impl Gpu {
             label: Some("ascension"),
             // Stage timings where the GPU has them.
             required_features: adapter.features() & crate::timing::GpuTimer::features(),
-            required_limits: wgpu::Limits::default(),
+            // The default caps a buffer at 256 MB, which the chunk mesh arenas outgrow at long view
+            // distances; ask for what the GPU allows.
+            required_limits: wgpu::Limits {
+                max_buffer_size: adapter.limits().max_buffer_size,
+                ..wgpu::Limits::default()
+            },
             ..Default::default()
         }))
         .context("requesting GPU device")?;

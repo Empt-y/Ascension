@@ -100,29 +100,35 @@ impl Arena {
         })
     }
 
-    /// Store `data` and return its first element index, growing the buffer if needed.
-    pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, data: &[u8]) -> u32 {
+    /// Store `data` and return its first element index, growing the buffer if needed; `None` if it
+    /// can't grow any more (the device's buffer size limit).
+    pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, data: &[u8]) -> Option<u32> {
         let elements = (data.len() as u64 / self.stride) as u32;
         let start = match self.alloc.alloc(elements) {
             Some(start) => start,
             None => {
-                self.grow(device, queue, elements);
+                if !self.grow(device, queue, elements) {
+                    return None;
+                }
                 self.alloc.alloc(elements).expect("arena grew to fit")
             }
         };
         queue.write_buffer(&self.buffer, u64::from(start) * self.stride, data);
-        start
+        Some(start)
     }
 
     pub fn free(&mut self, start: u32, elements: u32) {
         self.alloc.free(start, elements);
     }
 
-    fn grow(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, at_least: u32) {
+    /// Grow to fit `at_least` more elements; false if the device's buffer size limit is in the way.
+    fn grow(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, at_least: u32) -> bool {
         let old = self.alloc.capacity();
         let max_elements = (device.limits().max_buffer_size / self.stride).min(u64::from(u32::MAX)) as u32;
         let new = old.saturating_mul(2).max(old + at_least).min(max_elements);
-        assert!(new >= old + at_least, "{} arena is at the device's buffer size limit", self.label);
+        if new < old.saturating_add(at_least) {
+            return false;
+        }
         log::info!("{} arena grows to {:.0} MB", self.label, (u64::from(new) * self.stride) as f64 / 1e6);
         let buffer = Self::create(device, self.label, self.usage, u64::from(new) * self.stride);
         // Submit the copy right away. Writes queued earlier (into the old buffer) run before it, and
@@ -133,6 +139,7 @@ impl Arena {
         queue.submit([encoder.finish()]);
         self.buffer = buffer;
         self.alloc.grow(new);
+        true
     }
 }
 

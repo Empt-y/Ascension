@@ -23,8 +23,10 @@ use glam::{IVec2, IVec3, Vec3};
 const JOBS_PER_WORKER: usize = 3;
 /// Chunks are dropped this many chunks beyond the view radius, so small moves don't thrash.
 const UNLOAD_MARGIN: i32 = 2;
-/// Vertical chunks kept around the camera regardless of terrain (caves, flying high).
+/// Vertical chunks kept around the camera regardless of terrain (caves, flying through hills)...
 const CAMERA_Y_REACH: i32 = 1;
+/// ...within this many chunks horizontally.
+const CAMERA_XZ_REACH: i32 = 4;
 /// Upload budget per frame.
 const MAX_UPLOADS_PER_FRAME: usize = 48;
 
@@ -260,7 +262,10 @@ impl Streamer {
                 let (band_lo, band_hi) = self.surface_band(col);
                 // The surface band (whatever the camera's height: seen from high up, that's the
                 // ground below) and the chunks round the camera, but not the air between them.
-                let near_camera = (center.y - CAMERA_Y_REACH)..=(center.y + CAMERA_Y_REACH);
+                // (Round the camera only close by: caves, and flying through nearby terrain.)
+                let close = dx * dx + dz * dz <= CAMERA_XZ_REACH * CAMERA_XZ_REACH;
+                #[allow(clippy::reversed_empty_ranges)]
+                let near_camera = if close { (center.y - CAMERA_Y_REACH)..=(center.y + CAMERA_Y_REACH) } else { 1..=0 };
                 let ys = (band_lo..=band_hi).chain(near_camera.filter(|y| *y < band_lo || *y > band_hi));
                 for y in ys {
                     // Below the surface band only chunks near the camera are worth filling (caves).

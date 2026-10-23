@@ -261,6 +261,8 @@ pub struct Renderer {
     /// Simulated water meshes, per chunk (sharing the terrain arenas), and the ones visible this
     /// frame (their offsets follow the terrain's).
     fluid_chunks: AHashMap<ChunkCoord, GpuChunk>,
+    /// The mesh arenas hit the device's buffer size limit (warned once).
+    arena_full_warned: bool,
     fluid_draw: Vec<ChunkCoord>,
     shadow_list: Vec<ChunkCoord>,
     /// Per cascade, the indices into `shadow_list` of the chunks that cast into it.
@@ -420,6 +422,7 @@ impl Renderer {
             msaa,
             draw_list: Vec::new(),
             fluid_chunks: AHashMap::new(),
+            arena_full_warned: false,
             fluid_draw: Vec::new(),
             shadow_list: Vec::new(),
             shadow_sets: Default::default(),
@@ -653,6 +656,28 @@ impl Renderer {
         }
     }
 
+    /// Put a mesh into the shared arenas: its first vertex and index, or `None` (logged once) if
+    /// they're at the device's buffer size limit, when the mesh is left out rather than crashing.
+    fn store_mesh(&mut self, mesh: &ChunkMesh) -> Option<(u32, u32)> {
+        let (device, queue) = (&self.gpu.device, &self.gpu.queue);
+        let vertex_count = mesh.vertices.len() as u32;
+        let first_vertex = self.vertices.upload(device, queue, bytemuck::cast_slice(&mesh.vertices));
+        let first_index = first_vertex.and_then(|_| self.indices.upload(device, queue, bytemuck::cast_slice(&mesh.indices)));
+        match (first_vertex, first_index) {
+            (Some(v), Some(i)) => Some((v, i)),
+            (v, _) => {
+                if let Some(v) = v {
+                    self.vertices.free(v, vertex_count);
+                }
+                if !self.arena_full_warned {
+                    self.arena_full_warned = true;
+                    log::warn!("chunk mesh storage is at the GPU's buffer size limit: leaving meshes out");
+                }
+                None
+            }
+        }
+    }
+
     pub fn upload_chunk(&mut self, coord: ChunkCoord, mesh: &ChunkMesh) {
         self.remove_chunk(coord);
         if mesh.is_empty() {
@@ -664,9 +689,7 @@ impl Renderer {
             min = min.min(p);
             max = max.max(p);
         }
-        let (device, queue) = (&self.gpu.device, &self.gpu.queue);
-        let first_vertex = self.vertices.upload(device, queue, bytemuck::cast_slice(&mesh.vertices));
-        let first_index = self.indices.upload(device, queue, bytemuck::cast_slice(&mesh.indices));
+        let Some((first_vertex, first_index)) = self.store_mesh(mesh) else { return };
         self.chunks.insert(
             coord,
             GpuChunk {
@@ -694,9 +717,7 @@ impl Renderer {
             min = min.min(p);
             max = max.max(p);
         }
-        let (device, queue) = (&self.gpu.device, &self.gpu.queue);
-        let first_vertex = self.vertices.upload(device, queue, bytemuck::cast_slice(&mesh.vertices));
-        let first_index = self.indices.upload(device, queue, bytemuck::cast_slice(&mesh.indices));
+        let Some((first_vertex, first_index)) = self.store_mesh(mesh) else { return };
         self.fluid_chunks.insert(
             coord,
             GpuChunk {

@@ -112,7 +112,8 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let tilted = tilt / max(length(tilt), 1e-3) * min(length(tilt) * 12.0, 2.0);
     let given = clamp(in.flow.z, 0.0, 1.0);
     let drift = mix(tilted, in.flow.xy, given);
-    let r = ripples(world.xz, globals.camera.w, drift) * flat * (1.0 - smoothstep(30.0, 200.0, dist));
+    // Fading with distance as water.wgsl's do, so the two match where they meet.
+    let r = ripples(world.xz, globals.camera.w, drift) * flat * (1.0 - smoothstep(60.0, 900.0, dist));
     n = normalize(n + vec3(-r.x, 0.0, -r.y));
     if dot(n, v) < 0.0 {
         n = -n;
@@ -136,6 +137,7 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let white = vec3(0.8, 0.85, 0.88) * (0.25 + 0.75 * daylight()) * (0.6 + 0.4 * max(sun_dir().y, 0.0));
     color = mix(color, white, foam);
     // Clear at the shore (depth 0), so the edge follows the depth's smooth line, not the mesh's.
-    let alpha = clamp(0.72 + 0.15 * smoothstep(0.5, 4.0, in.depth) + 0.15 * fresnel + foam * 0.4, 0.0, 0.97) * shore;
+    // (As water.wgsl's, which takes over at the view distance.)
+    let alpha = clamp(0.72 + 0.2 * smoothstep(0.5, 4.0, in.depth) + 0.25 * fresnel + foam * 0.5, 0.0, 0.97) * shore;
     return vec4(debug_hot(apply_fog(color, in.rel), 6.0), alpha);
 }
