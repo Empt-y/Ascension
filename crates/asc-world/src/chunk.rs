@@ -31,6 +31,7 @@ pub enum Uniform {
     Solid,
 }
 
+#[derive(Clone)]
 pub struct ChunkData {
     pub coord: ChunkCoord,
     /// `SAMPLES³` signed distances, x fastest. Sample `i` sits at `origin + (i - 1)`.

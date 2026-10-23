@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 
 use ahash::{AHashMap, AHashSet};
 use asc_render::{Frustum, Renderer};
-use asc_world::fluid::{self, Fluids};
+use asc_world::fluid;
+
+use crate::fluids::ClientFluids;
 use asc_world::{CHUNK, ChunkCoord, ChunkMesh, EditOp, World, WorldGen, chunk_of, mesh_chunk};
 use crossbeam_channel::{Receiver, Sender};
 use glam::{IVec2, IVec3, Vec3};
@@ -115,11 +117,12 @@ impl Streamer {
                     }
                     for job in rx {
                         let t0 = Instant::now();
-                        let mut data = wg.generate(job.coord);
-                        let fluid = fluid::natural_mesh(&wg, &data);
-                        let lava_light = lava_light(job.coord, &fluid);
+                        let natural = wg.generate(job.coord);
+                        let mut data = natural.clone();
                         data.apply_ops(&job.ops);
                         data.update_uniform();
+                        let fluid = fluid::natural_mesh(&wg, &natural, &data);
+                        let lava_light = lava_light(job.coord, &fluid);
                         let t1 = Instant::now();
                         let mesh = mesh_chunk(&data);
                         let (spills_up, spills_down) = spills(&mesh);
@@ -211,13 +214,13 @@ impl Streamer {
         }
     }
 
-    /// `fluids`: the materialised fluid chunks, which draw their own meshes.
+    /// `fluids`: the simulated water, which draws its chunks (and their neighbours) itself.
     /// Lights of natural lava within `reach` of the camera, leaving out materialised chunks (they
     /// light themselves).
-    pub fn lava_lights(&self, fluids: &Fluids, camera: Vec3, reach: f32) -> Vec<asc_render::PointLight> {
+    pub fn lava_lights(&self, fluids: &ClientFluids, camera: Vec3, reach: f32) -> Vec<asc_render::PointLight> {
         self.lights
             .iter()
-            .filter(|(c, l)| !fluids.chunks.contains_key(*c) && l.position.distance(camera) < reach)
+            .filter(|(c, l)| !fluids.fluids.chunks.contains_key(*c) && l.position.distance(camera) < reach)
             .map(|(_, l)| *l)
             .collect()
     }
@@ -225,7 +228,7 @@ impl Streamer {
     pub fn update(
         &mut self,
         world: &World,
-        fluids: &Fluids,
+        fluids: &ClientFluids,
         camera: Vec3,
         frustum: &Frustum,
         renderer: &mut Renderer,
@@ -245,7 +248,7 @@ impl Streamer {
     }
 
     /// Recompute which chunks are wanted and in what order; drop the ones that fell out of range.
-    fn retarget(&mut self, center: IVec3, camera: Vec3, frustum: &Frustum, fluids: &Fluids, renderer: &mut Renderer) {
+    fn retarget(&mut self, center: IVec3, camera: Vec3, frustum: &Frustum, fluids: &ClientFluids, renderer: &mut Renderer) {
         let r = self.view_radius;
         let mut wanted: Vec<(f32, ChunkCoord)> = Vec::new();
         for dz in -r..=r {
@@ -295,7 +298,7 @@ impl Streamer {
             if !inside && slot.in_flight == 0 {
                 renderer.remove_chunk(*coord);
                 self.lights.remove(coord);
-                if !fluids.chunks.contains_key(coord) {
+                if !fluids.owns(*coord) {
                     renderer.remove_fluid(*coord);
                 }
             }
@@ -331,7 +334,7 @@ impl Streamer {
         }
     }
 
-    fn receive(&mut self, fluids: &Fluids, renderer: &mut Renderer) {
+    fn receive(&mut self, fluids: &ClientFluids, renderer: &mut Renderer) {
         for built in self.results.try_iter() {
             self.in_flight -= 1;
             let alpha = 0.05;
@@ -357,7 +360,7 @@ impl Streamer {
             slot.shown = Some(built.version);
             let current = built.version == slot.wanted;
             renderer.upload_chunk(built.coord, &built.mesh);
-            if !fluids.chunks.contains_key(&built.coord) {
+            if !fluids.owns(built.coord) {
                 renderer.upload_fluid(built.coord, &built.fluid);
             }
             match built.lava_light {

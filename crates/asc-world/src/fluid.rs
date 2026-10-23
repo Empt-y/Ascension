@@ -101,8 +101,9 @@ pub fn water_level(worldgen: &WorldGen, x: f32, z: f32) -> Option<f32> {
     worldgen.water_level(x, z)
 }
 
-/// Natural water in cell `c` (ignoring edits): open cells under a water surface, down to the
-/// ground (caves under the sea floor stay dry until something opens them).
+/// Natural water in cell `c` (ignoring edits): open cells under a water surface, down to
+/// `NATURAL_DEPTH` under the ground (caves deeper under the sea floor stay dry until something
+/// opens them).
 pub fn pristine(worldgen: &WorldGen, c: IVec3) -> (FluidKind, u16) {
     let (x, z) = (c.x as f32, c.z as f32);
     if (c.y as f32) < LAVA_LEVEL + 0.5 {
@@ -114,7 +115,7 @@ pub fn pristine(worldgen: &WorldGen, c: IVec3) -> (FluidKind, u16) {
     }
     let Some(level) = water_level(worldgen, x, z) else { return (FluidKind::None, 0) };
     let amount = fill(c.y, level);
-    if amount == 0 || c.y as f32 + 0.5 < worldgen.height(x, z) - 1.0 {
+    if amount == 0 || c.y as f32 + 0.5 < worldgen.height(x, z) - NATURAL_DEPTH {
         return (FluidKind::None, 0);
     }
     if worldgen.sample(Vec3::new(x, c.y as f32, z)).0 <= 0.0 {
@@ -158,7 +159,7 @@ pub fn pristine_chunk(worldgen: &WorldGen, terrain: &ChunkData) -> FluidChunk {
                     // Natural water only down to the natural ground, and only where the ground was
                     // naturally open (a pit dug below sea level stays dry: nothing has let water in).
                     let natural_air = worldgen.sample(Vec3::new(wx, wy as f32, wz)).0 > 0.0;
-                    if a > 0 && wy as f32 + 0.5 >= surface - 1.0 && natural_air {
+                    if a > 0 && wy as f32 + 0.5 >= surface - NATURAL_DEPTH && natural_air {
                         out.kind[i] = FluidKind::Water as u8;
                         out.amount[i] = a;
                     }
@@ -169,46 +170,140 @@ pub fn pristine_chunk(worldgen: &WorldGen, terrain: &ChunkData) -> FluidChunk {
     out
 }
 
-/// Flow is stored in a fluid vertex's `ore` bytes: x and z around 128, `FLOW_SCALE` per m/s, and
-/// the third byte 255 to say it's there (simulated water leaves it zero).
+/// Vertex bytes of a fluid mesh (in `ore`): the river's flow x and z around 128, `FLOW_SCALE` per
+/// m/s; a flag (`FLAG_FLOW` with a flow, `FLAG_DEPTH` without); and the water's depth over the
+/// ground, `(depth + DEPTH_OFFSET) * DEPTH_SCALE`. Shading fades shallow water out, so shores
+/// follow the depth's smooth zero line rather than where two meshes cross.
 pub const FLOW_SCALE: f32 = 60.0;
+pub const FLAG_FLOW: u8 = 255;
+pub const FLAG_DEPTH: u8 = 1;
+pub const DEPTH_SCALE: f32 = 50.0;
+pub const DEPTH_OFFSET: f32 = 0.5;
+/// Natural water fills open cells this far below the natural ground (caves deeper stay dry).
+pub const NATURAL_DEPTH: f32 = 8.0;
+/// Columns of a fluid mesh's surface grid: the padded chunk's and one more all round.
+pub const RING: usize = crate::chunk::SAMPLES + 2;
 
-/// The mesh of a chunk's natural water and lava, from its own (unedited) samples, for drawing
-/// chunks whose fluid isn't materialised. Under a water surface the water also runs on into the
-/// ground (to a metre below the natural surface), so its edges are hidden in the bank and the
-/// terrain cuts the shoreline wherever it meets the surface. Each vertex carries the river's flow.
-pub fn natural_mesh(worldgen: &WorldGen, natural: &ChunkData) -> crate::ChunkMesh {
-    use crate::chunk::SAMPLES;
-    let n = SAMPLES * SAMPLES * SAMPLES;
-    let base = ChunkData::sample_pos(natural.coord, 0, 0, 0);
-    let lava_reach = base.y < LAVA_LEVEL + 1.0;
-    let water_reach = natural.water.iter().any(|l| !l.is_nan() && *l >= base.y - 0.5);
-    if !lava_reach && !water_reach {
-        return crate::ChunkMesh::default();
+/// What a fluid mesh is built from.
+pub struct FluidInput<'a> {
+    /// The built terrain (edits included): what is solid, and where the ground is.
+    pub terrain: &'a ChunkData,
+    /// Fluid kind and amount of every padded sample (`SAMPLES³`, as `ChunkData::index`).
+    pub kind: &'a [u8],
+    pub amount: &'a [u16],
+    /// The water surface over each column of the padded chunk and the ring round it (`RING²`,
+    /// padded column x at x + 1), NaN where there's none.
+    pub surface: &'a [f32],
+    /// The river's flow per padded column (`SAMPLES²`), for natural water.
+    pub flow: Option<&'a [glam::Vec2]>,
+}
+
+/// The water surface over a column, from its cells: the top of the highest water cell at or
+/// below `from` (scanning down to `to`), followed up while the water continues.
+pub fn column_surface(get: impl Fn(i32) -> (FluidKind, u16), from: i32, to: i32) -> f32 {
+    let water = |y: i32| {
+        let (k, a) = get(y);
+        (k == FluidKind::Water && a > 0).then_some(a)
+    };
+    let Some(mut y) = (to..=from).rev().find(|y| water(*y).is_some()) else { return f32::NAN };
+    while y < from + 64 && water(y + 1).is_some() {
+        y += 1;
     }
+    y as f32 - 0.5 + water(y).unwrap_or(0).min(FULL) as f32 / FULL as f32
+}
+
+/// Mesh a chunk's fluid. Each column's water surface is smoothed with its neighbours (so
+/// simulated water on a slope doesn't settle into 1 m stairs), and the water runs on into the
+/// ground under it, down and sideways into the banks, so its edges are buried and the terrain cuts
+/// the shore. Every vertex carries the depth (and, for rivers, the flow).
+pub fn mesh_fluid(input: &FluidInput) -> crate::ChunkMesh {
+    use crate::chunk::SAMPLES;
+    let terrain = input.terrain;
+    let base = ChunkData::sample_pos(terrain.coord, 0, 0, 0);
+    let ring = |x: usize, z: usize| input.surface[x + RING * z];
+    // Smoothed surfaces of the padded columns; dry columns beside water take it on (into the bank).
+    let mut surface = vec![f32::NAN; SAMPLES * SAMPLES];
+    for z in 0..SAMPLES {
+        for x in 0..SAMPLES {
+            let here = ring(x + 1, z + 1);
+            let (mut sum, mut n) = (0.0, 0);
+            for dz in 0..3 {
+                for dx in 0..3 {
+                    let s = ring(x + dx, z + dz);
+                    if !s.is_nan() && (here.is_nan() || (s - here).abs() < 1.5) {
+                        sum += s;
+                        n += 1;
+                    }
+                }
+            }
+            if n > 0 {
+                surface[x + SAMPLES * z] = sum / n as f32;
+            }
+        }
+    }
+    // The ground under each column's water: the highest crossing from solid (below) to open
+    // (above) no more than a little over the surface (a bank's ground is just above it).
+    let mut ground = vec![f32::NAN; SAMPLES * SAMPLES];
+    for z in 0..SAMPLES {
+        for x in 0..SAMPLES {
+            let s = surface[x + SAMPLES * z];
+            if s.is_nan() {
+                continue;
+            }
+            let d = |y: usize| terrain.density[ChunkData::index(x, y, z)];
+            let mut g = if d(SAMPLES - 1) < 0.0 { base.y + SAMPLES as f32 } else { base.y - 64.0 };
+            for y in (1..SAMPLES).rev() {
+                let (lo, hi) = (d(y - 1), d(y));
+                if lo < 0.0 && hi >= 0.0 {
+                    let at = base.y + (y - 1) as f32 + lo / (lo - hi);
+                    if at <= s + 3.0 {
+                        g = at;
+                        break;
+                    }
+                }
+            }
+            ground[x + SAMPLES * z] = g;
+        }
+    }
+
+    let n = SAMPLES * SAMPLES * SAMPLES;
     let mut density = vec![0.5f32; n];
     let mut material = vec![1u8; n];
     for z in 0..SAMPLES {
         for x in 0..SAMPLES {
             let column = x + SAMPLES * z;
-            let (level, ground) = (natural.water[column], natural.surface[column]);
+            let (s, g) = (surface[column], ground[column]);
+            let mut below_filled = false;
             for y in 0..SAMPLES {
                 let i = ChunkData::index(x, y, z);
-                let wy = base.y as i32 + y as i32;
-                let a = if (wy as f32) < LAVA_LEVEL + 0.5 {
+                let wy = base.y + y as f32;
+                let (kind, amount) = (FluidKind::from_u8(input.kind[i]), input.amount[i].min(FULL));
+                let f = if kind == FluidKind::Lava {
                     material[i] = 2;
-                    if natural.density[i] >= 0.0 { fill(wy, LAVA_LEVEL) } else { 0 }
-                } else if !level.is_nan() && wy as f32 + 0.5 >= ground - 1.0 {
-                    fill(wy, level)
+                    amount as f32 / FULL as f32
+                } else if s.is_nan() || wy - 0.5 >= s {
+                    if kind == FluidKind::Water { amount as f32 / FULL as f32 } else { 0.0 }
                 } else {
-                    0
+                    let top = (s - (wy - 0.5)).clamp(0.0, 1.0);
+                    let solid = terrain.density[i] < 0.0;
+                    if kind == FluidKind::Water {
+                        if wy + 0.5 <= s - 1.0 { 1.0 } else { top }
+                    } else if solid && wy + 0.5 >= g - 1.5 {
+                        top
+                    } else if !solid && below_filled && wy + 0.5 > s {
+                        // The cell holding a surface smoothed up above its column's own water.
+                        top
+                    } else {
+                        0.0
+                    }
                 };
-                density[i] = 0.5 - a as f32 / FULL as f32;
+                below_filled = f > 0.999;
+                density[i] = 0.5 - f;
             }
         }
     }
     let mut field = ChunkData {
-        coord: natural.coord,
+        coord: terrain.coord,
         density,
         material,
         // Open sky everywhere: water isn't darkened as if buried.
@@ -218,10 +313,90 @@ pub fn natural_mesh(worldgen: &WorldGen, natural: &ChunkData) -> crate::ChunkMes
     };
     field.update_uniform();
     let mut mesh = crate::mesh_chunk(&field);
-    if mesh.is_empty() {
-        return mesh;
+    // Per-vertex depth (and flow), blended over the columns round the vertex that have water.
+    let last = (SAMPLES - 1) as f32;
+    for v in &mut mesh.vertices {
+        // Sample i sits at local i - 1.
+        let (fx, fz) = ((v.position[0] + 1.0).clamp(0.0, last), (v.position[2] + 1.0).clamp(0.0, last));
+        let (x0, z0) = (fx.floor() as usize, fz.floor() as usize);
+        let (tx, tz) = (fx - x0 as f32, fz - z0 as f32);
+        let (mut depth, mut flow, mut weight) = (0.0, glam::Vec2::ZERO, 0.0);
+        let corners = [(0, 0, (1.0 - tx) * (1.0 - tz)), (1, 0, tx * (1.0 - tz)), (0, 1, (1.0 - tx) * tz), (1, 1, tx * tz)];
+        for (dx, dz, w) in corners {
+            let c = (x0 + dx).min(SAMPLES - 1) + SAMPLES * (z0 + dz).min(SAMPLES - 1);
+            if surface[c].is_nan() || w <= 0.0 {
+                continue;
+            }
+            depth += (surface[c] - ground[c]) * w;
+            if let Some(f) = input.flow {
+                flow += f[c] * w;
+            }
+            weight += w;
+        }
+        let (depth, flow) = if weight > 0.0 { (depth / weight, flow / weight) } else { (4.0, glam::Vec2::ZERO) };
+        let byte = |v: f32| (128.0 + v * FLOW_SCALE).round().clamp(1.0, 255.0) as u8;
+        let flag = if input.flow.is_some() { FLAG_FLOW } else { FLAG_DEPTH };
+        let depth = ((depth + DEPTH_OFFSET) * DEPTH_SCALE).round().clamp(0.0, 255.0) as u8;
+        v.ore = [byte(flow.x), byte(flow.y), flag, depth];
     }
-    // The flow per sample column (rivers only), blended to each vertex.
+    mesh
+}
+
+/// The natural fluid of every padded sample of a chunk, from its unedited samples.
+pub fn natural_cells(natural: &ChunkData) -> (Vec<u8>, Vec<u16>) {
+    use crate::chunk::SAMPLES;
+    let n = SAMPLES * SAMPLES * SAMPLES;
+    let base = ChunkData::sample_pos(natural.coord, 0, 0, 0);
+    let (mut kind, mut amount) = (vec![0u8; n], vec![0u16; n]);
+    for z in 0..SAMPLES {
+        for x in 0..SAMPLES {
+            let column = x + SAMPLES * z;
+            let (level, ground) = (natural.water[column], natural.surface[column]);
+            for y in 0..SAMPLES {
+                let i = ChunkData::index(x, y, z);
+                if natural.density[i] < 0.0 {
+                    continue;
+                }
+                let wy = base.y as i32 + y as i32;
+                let (k, a) = if (wy as f32) < LAVA_LEVEL + 0.5 {
+                    (FluidKind::Lava, fill(wy, LAVA_LEVEL))
+                } else if !level.is_nan() && wy as f32 + 0.5 >= ground - NATURAL_DEPTH {
+                    (FluidKind::Water, fill(wy, level))
+                } else {
+                    continue;
+                };
+                if a > 0 {
+                    kind[i] = k as u8;
+                    amount[i] = a;
+                }
+            }
+        }
+    }
+    (kind, amount)
+}
+
+/// The mesh of a chunk's natural water and lava, for chunks whose fluid isn't materialised:
+/// `natural` is its unedited samples (where the water is), `terrain` the built ones.
+pub fn natural_mesh(worldgen: &WorldGen, natural: &ChunkData, terrain: &ChunkData) -> crate::ChunkMesh {
+    use crate::chunk::SAMPLES;
+    let base = ChunkData::sample_pos(natural.coord, 0, 0, 0);
+    let lava_reach = base.y < LAVA_LEVEL + 1.0;
+    let water_reach = natural.water.iter().any(|l| !l.is_nan() && *l >= base.y - 0.5);
+    if !lava_reach && !water_reach {
+        return crate::ChunkMesh::default();
+    }
+    let (kind, amount) = natural_cells(natural);
+    let mut surface = vec![f32::NAN; RING * RING];
+    for z in 0..RING {
+        for x in 0..RING {
+            surface[x + RING * z] = if (1..=SAMPLES).contains(&x) && (1..=SAMPLES).contains(&z) {
+                natural.water[(x - 1) + SAMPLES * (z - 1)]
+            } else {
+                worldgen.water_level(base.x + x as f32 - 1.0, base.z + z as f32 - 1.0).unwrap_or(f32::NAN)
+            };
+        }
+    }
+    // Rivers only: lakes and the sea are still.
     let flow: Vec<glam::Vec2> = (0..SAMPLES * SAMPLES)
         .map(|c| {
             if natural.water[c].is_nan() {
@@ -230,17 +405,7 @@ pub fn natural_mesh(worldgen: &WorldGen, natural: &ChunkData) -> crate::ChunkMes
             worldgen.water_flow(base.x + (c % SAMPLES) as f32, base.z + (c / SAMPLES) as f32)
         })
         .collect();
-    let at = |x: usize, z: usize| flow[x.min(SAMPLES - 1) + SAMPLES * z.min(SAMPLES - 1)];
-    for v in &mut mesh.vertices {
-        // Sample i sits at local i - 1.
-        let (fx, fz) = ((v.position[0] + 1.0).max(0.0), (v.position[2] + 1.0).max(0.0));
-        let (x, z) = (fx as usize, fz as usize);
-        let (tx, tz) = (fx - x as f32, fz - z as f32);
-        let f = at(x, z).lerp(at(x + 1, z), tx).lerp(at(x, z + 1).lerp(at(x + 1, z + 1), tx), tz);
-        let byte = |v: f32| (128.0 + v * FLOW_SCALE).round().clamp(1.0, 255.0) as u8;
-        v.ore = [byte(f.x), byte(f.y), 255, 0];
-    }
-    mesh
+    mesh_fluid(&FluidInput { terrain, kind: &kind, amount: &amount, surface: &surface, flow: Some(&flow) })
 }
 
 /// Every materialised fluid chunk; everything else is pristine.
@@ -340,7 +505,8 @@ mod tests {
             })
             .expect("a river");
         let coord = crate::chunk_of(Vec3::new(x, level, z));
-        let mesh = natural_mesh(&worldgen, &worldgen.generate(coord));
+        let natural = worldgen.generate(coord);
+        let mesh = natural_mesh(&worldgen, &natural, &natural);
         assert!(!mesh.is_empty());
         let origin = (coord * CHUNK).as_vec3();
         // The top surface over the river column sits at the water level.
@@ -351,10 +517,11 @@ mod tests {
             .map(|v| origin.y + v.position[1])
             .fold(f32::MIN, f32::max);
         assert!((top - level).abs() < 0.6, "surface {top} vs level {level}");
-        let flowing = mesh.vertices.iter().filter(|v| v.ore[2] == 255 && (v.ore[0] != 128 || v.ore[1] != 128));
+        let flowing = mesh.vertices.iter().filter(|v| v.ore[2] == FLAG_FLOW && (v.ore[0] != 128 || v.ore[1] != 128));
         assert!(flowing.count() > 0, "river vertices carry the flow");
         // A chunk high above everything has none.
-        let sky = natural_mesh(&worldgen, &worldgen.generate(coord + IVec3::Y * 6));
+        let sky_chunk = worldgen.generate(coord + IVec3::Y * 6);
+        let sky = natural_mesh(&worldgen, &sky_chunk, &sky_chunk);
         assert!(sky.is_empty());
     }
 

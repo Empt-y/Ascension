@@ -5,7 +5,8 @@ use asc_world::{SEA_LEVEL, WorldGen};
 use glam::Vec3;
 
 fn main() {
-    let wg = WorldGen::new(1337);
+    let seed = std::env::var("SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(1337);
+    let wg = WorldGen::new(seed);
     let mut river = None;
     let mut lake = None;
     let mut fall = None;

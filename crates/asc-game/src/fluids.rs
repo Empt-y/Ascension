@@ -1,18 +1,18 @@
 //! The client's copy of the simulated water, and its meshes.
 //!
 //! The server sends every materialised fluid chunk (quantised levels) as it changes. Here they're
-//! kept for swimming and drawn: each chunk's cells become a density field (half a cell minus the
-//! fill), meshed with the terrain's surface nets. Neighbours that aren't materialised read as their
-//! pristine water, worked out once per chunk. The sea plane is told which chunk columns to leave
-//! to these meshes.
+//! kept for swimming and drawn with `fluid::mesh_fluid`, as are the chunks next to them (so the
+//! simulated water meets its surroundings without a seam; further out the streamer draws natural
+//! water the same way). Cells of chunks that aren't materialised read as their pristine water,
+//! worked out once per chunk. The sea plane is told which chunk columns to leave to these meshes.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use ahash::AHashMap;
 use asc_render::Renderer;
-use asc_world::fluid::{self, CELLS, FULL, FluidChunk, FluidKind, PackedFluid, cell_index};
-use asc_world::{CHUNK, ChunkCoord, ChunkData, SAMPLES, World, mesh_chunk};
+use asc_world::fluid::{self, CELLS, FULL, FluidChunk, FluidKind, PackedFluid, RING, cell_index};
+use asc_world::{CHUNK, ChunkCoord, ChunkData, SAMPLES, World};
 use glam::{IVec3, Vec3};
 
 /// A chunk is remeshed at most this often while its water moves.
@@ -30,6 +30,8 @@ pub struct ClientFluids {
     columns_changed: bool,
     /// Each chunk's lava light, worked out when it last changed (None: no lava).
     lights: AHashMap<ChunkCoord, Option<asc_render::PointLight>>,
+    /// Built terrain of the chunks meshed here, and the edit count it was built at.
+    terrain: AHashMap<ChunkCoord, (usize, Option<ChunkData>)>,
 }
 
 impl ClientFluids {
@@ -41,6 +43,7 @@ impl ClientFluids {
             last_mesh: AHashMap::new(),
             columns_changed: true,
             lights: AHashMap::new(),
+            terrain: AHashMap::new(),
         }
     }
 
@@ -57,11 +60,12 @@ impl ClientFluids {
         }
         self.fluids.chunks.insert(coord, ch);
         self.lights.remove(&coord);
-        // Its own mesh, and its neighbours' edges.
-        self.dirty.entry(coord.to_array()).or_insert(None);
-        for d in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
-            if self.fluids.chunks.contains_key(&(coord + d)) {
-                self.dirty.entry((coord + d).to_array()).or_insert(None);
+        // Its own mesh, and its neighbours' (which meet it, so they're drawn from here too).
+        for dz in -1..=1 {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    self.dirty.entry((coord + IVec3::new(dx, dy, dz)).to_array()).or_insert(None);
+                }
             }
         }
     }
@@ -72,34 +76,6 @@ impl ClientFluids {
             (FluidKind::Water, f) => f,
             _ => 0.0,
         }
-    }
-
-    /// The fill (0..=FULL) of a cell, materialised or pristine.
-    fn amount(&mut self, world: &World, c: IVec3) -> u16 {
-        let (coord, local) = fluid::split(c);
-        let i = cell_index(local.x as usize, local.y as usize, local.z as usize);
-        if let Some(ch) = self.fluids.chunks.get(&coord) {
-            return ch.amount[i];
-        }
-        let ghost = self
-            .ghosts
-            .entry(coord)
-            .or_insert_with(|| fluid::pristine_chunk(&world.worldgen, &world.build_chunk(coord)));
-        ghost.amount[i]
-    }
-
-    /// The fluid kind of a cell, materialised or pristine.
-    fn kind(&mut self, world: &World, c: IVec3) -> FluidKind {
-        let (coord, local) = fluid::split(c);
-        let i = cell_index(local.x as usize, local.y as usize, local.z as usize);
-        if let Some(ch) = self.fluids.chunks.get(&coord) {
-            return FluidKind::from_u8(ch.kind[i]);
-        }
-        let ghost = self
-            .ghosts
-            .entry(coord)
-            .or_insert_with(|| fluid::pristine_chunk(&world.worldgen, &world.build_chunk(coord)));
-        FluidKind::from_u8(ghost.kind[i])
     }
 
     /// A light for every materialised chunk of lava near the camera: at the middle of its surface, brighter and
@@ -143,43 +119,97 @@ impl ClientFluids {
         lights
     }
 
-    fn mesh(&mut self, world: &World, coord: ChunkCoord) -> asc_world::ChunkMesh {
-        let n = SAMPLES * SAMPLES * SAMPLES;
-        let base = coord * CHUNK - IVec3::ONE;
-        let mut density = vec![0.5f32; n];
-        for z in 0..SAMPLES {
-            for y in 0..SAMPLES {
-                for x in 0..SAMPLES {
-                    let c = base + IVec3::new(x as i32, y as i32, z as i32);
-                    let a = self.amount(world, c).min(FULL) as f32 / FULL as f32;
-                    density[ChunkData::index(x, y, z)] = 0.5 - a;
-                }
-            }
+    /// Whether this draws the chunk's fluid (rather than the streamer's natural mesh): it's
+    /// materialised or next to a chunk that is, so its mesh has to meet the simulated water.
+    pub fn owns(&self, coord: ChunkCoord) -> bool {
+        (-1..=1).any(|dz| {
+            (-1..=1).any(|dy| (-1..=1).any(|dx| self.fluids.chunks.contains_key(&(coord + IVec3::new(dx, dy, dz)))))
+        })
+    }
+
+    /// The chunk's built terrain, kept until the world's edits change.
+    fn terrain(&mut self, world: &World, coord: ChunkCoord) -> &ChunkData {
+        let edits = world.edits.len();
+        let entry = self.terrain.entry(coord).or_insert_with(|| (usize::MAX, None));
+        if entry.0 != edits || entry.1.is_none() {
+            *entry = (edits, Some(world.build_chunk(coord)));
         }
-        // The mesher blends materials per vertex; the fluid shader reads slot 1 (id 2) as "how much
-        // of this is lava" (water is id 1).
-        let mut material = vec![1u8; n];
-        for z in 0..SAMPLES {
-            for y in 0..SAMPLES {
-                for x in 0..SAMPLES {
-                    let c = base + IVec3::new(x as i32, y as i32, z as i32);
-                    if self.kind(world, c) == FluidKind::Lava {
-                        material[ChunkData::index(x, y, z)] = 2;
+        entry.1.as_ref().expect("just built")
+    }
+
+    fn mesh(&mut self, world: &World, coord: ChunkCoord) -> asc_world::ChunkMesh {
+        // Every cell the mesh reads: the padded samples, the ring of columns round them and a few
+        // cells above and below (for the water surfaces).
+        let base = coord * CHUNK;
+        let lo = base - IVec3::new(2, 7, 2);
+        let size = IVec3::new(RING as i32, SAMPLES as i32 + 12, RING as i32);
+        for cz in (lo.z.div_euclid(CHUNK))..=((lo.z + size.z - 1).div_euclid(CHUNK)) {
+            for cy in (lo.y.div_euclid(CHUNK))..=((lo.y + size.y - 1).div_euclid(CHUNK)) {
+                for cx in (lo.x.div_euclid(CHUNK))..=((lo.x + size.x - 1).div_euclid(CHUNK)) {
+                    let c = IVec3::new(cx, cy, cz);
+                    if !self.fluids.chunks.contains_key(&c) && !self.ghosts.contains_key(&c) {
+                        let ghost = fluid::pristine_chunk(&world.worldgen, &world.build_chunk(c));
+                        self.ghosts.insert(c, ghost);
                     }
                 }
             }
         }
-        let mut data = ChunkData {
-            coord,
-            density,
-            material,
-            // Open sky everywhere: water isn't darkened as if buried.
-            surface: vec![1e9; SAMPLES * SAMPLES],
-            water: vec![f32::NAN; SAMPLES * SAMPLES],
-            uniform: None,
+        let cells = size.x as usize * size.y as usize * size.z as usize;
+        let (mut kind, mut amount) = (vec![0u8; cells], vec![0u16; cells]);
+        let at = |p: IVec3| {
+            let r = p - lo;
+            r.x as usize + size.x as usize * (r.y as usize + size.y as usize * r.z as usize)
         };
-        data.update_uniform();
-        mesh_chunk(&data)
+        let mut last: Option<(ChunkCoord, &FluidChunk)> = None;
+        for z in 0..size.z {
+            for y in 0..size.y {
+                for x in 0..size.x {
+                    let c = lo + IVec3::new(x, y, z);
+                    let (chunk, local) = fluid::split(c);
+                    let ch = match last {
+                        Some((at, ch)) if at == chunk => ch,
+                        _ => {
+                            let ch = self.fluids.chunks.get(&chunk).or_else(|| self.ghosts.get(&chunk)).expect("gathered");
+                            last = Some((chunk, ch));
+                            ch
+                        }
+                    };
+                    let i = cell_index(local.x as usize, local.y as usize, local.z as usize);
+                    let k = at(c);
+                    kind[k] = ch.kind[i];
+                    amount[k] = ch.amount[i];
+                }
+            }
+        }
+        let get = |c: IVec3| {
+            let r = c - lo;
+            if r.cmplt(IVec3::ZERO).any() || r.cmpge(size).any() {
+                return (FluidKind::None, 0);
+            }
+            let k = at(c);
+            (FluidKind::from_u8(kind[k]), amount[k])
+        };
+        let mut surface = vec![f32::NAN; RING * RING];
+        for rz in 0..RING {
+            for rx in 0..RING {
+                let (x, z) = (lo.x + rx as i32, lo.z + rz as i32);
+                surface[rx + RING * rz] =
+                    fluid::column_surface(|y| get(IVec3::new(x, y, z)), lo.y + size.y - 1, lo.y);
+            }
+        }
+        let n = SAMPLES * SAMPLES * SAMPLES;
+        let (mut pk, mut pa) = (vec![0u8; n], vec![0u16; n]);
+        for z in 0..SAMPLES {
+            for y in 0..SAMPLES {
+                for x in 0..SAMPLES {
+                    let (k, a) = get(base - IVec3::ONE + IVec3::new(x as i32, y as i32, z as i32));
+                    pk[ChunkData::index(x, y, z)] = k as u8;
+                    pa[ChunkData::index(x, y, z)] = a;
+                }
+            }
+        }
+        let terrain = self.terrain(world, coord);
+        fluid::mesh_fluid(&fluid::FluidInput { terrain, kind: &pk, amount: &pa, surface: &surface, flow: None })
     }
 
     /// Remesh what changed (a few chunks a frame, each at most every `REMESH_INTERVAL`) and tell the

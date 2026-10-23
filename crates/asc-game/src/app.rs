@@ -566,7 +566,7 @@ impl State {
 
         let (w, h) = self.renderer.gpu().size();
         let frustum = Frustum::from_view_proj(self.camera.view_proj(w as f32 / h as f32));
-        self.streamer.update(&self.world, &self.fluids.fluids, self.camera.position, &frustum, &mut self.renderer);
+        self.streamer.update(&self.world, &self.fluids, self.camera.position, &frustum, &mut self.renderer);
         self.fluids.update(&self.world, &mut self.renderer);
         if self.renderer.far_enabled() {
             let p = self.camera.position;
@@ -653,7 +653,7 @@ impl State {
             underwater: self.fluids.fraction_at(&self.world, self.camera.position) > 0.5,
             lights: {
                 let mut lights = self.fluids.lava_lights(self.camera.position);
-                lights.extend(self.streamer.lava_lights(&self.fluids.fluids, self.camera.position, 160.0));
+                lights.extend(self.streamer.lava_lights(&self.fluids, self.camera.position, 160.0));
                 lights
             },
             brush: self

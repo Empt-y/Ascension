@@ -10,7 +10,8 @@ struct VsIn {
     @location(1) normal: vec4<f32>,
     // Material weights: slot 0 water, slot 1 lava (see the client's fluid mesher).
     @location(2) weights_a: vec4<f32>,
-    // Natural water: the river's flow (xy, around 0.5) and z = 1 to say it's there.
+    // fluid::FLOW_SCALE etc.: the river's flow (xy, around 0.5), a flag (z: 1 with a flow, 1/255
+    // with only a depth) and the water's depth over the ground (w).
     @location(6) flow: vec4<f32>,
     @builtin(instance_index) instance: u32,
 }
@@ -22,10 +23,14 @@ struct VsOut {
     @location(2) @interpolate(perspective, centroid) lava: f32,
     // xy: flow, z: how much of it is given (1) rather than taken from the tilt (0).
     @location(3) flow: vec3<f32>,
+    // The water's depth over the ground (large where unknown).
+    @location(4) depth: f32,
 }
 
-// fluid::FLOW_SCALE: bytes per m/s.
+// fluid::FLOW_SCALE, DEPTH_SCALE and DEPTH_OFFSET.
 const FLOW_SCALE: f32 = 60.0;
+const DEPTH_SCALE: f32 = 50.0;
+const DEPTH_OFFSET: f32 = 0.5;
 
 @vertex
 fn vs_main(in: VsIn) -> VsOut {
@@ -34,7 +39,9 @@ fn vs_main(in: VsIn) -> VsOut {
     out.clip = globals.view_proj * vec4(out.rel, 1.0);
     out.normal = in.normal.xyz;
     out.lava = in.weights_a.y / max(in.weights_a.x + in.weights_a.y, 1e-4);
-    out.flow = vec3((in.flow.xy - vec2(128.0 / 255.0)) * 255.0 / FLOW_SCALE, in.flow.z);
+    let given = select(0.0, 1.0, in.flow.z > 0.9);
+    out.flow = vec3((in.flow.xy - vec2(128.0 / 255.0)) * 255.0 / FLOW_SCALE * given, given);
+    out.depth = select(100.0, in.flow.w * 255.0 / DEPTH_SCALE - DEPTH_OFFSET, in.flow.z > 0.002);
     return out;
 }
 
@@ -90,18 +97,22 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let ndv = clamp(dot(n, v), 0.0, 1.0);
     let fresnel = 0.02 + 0.98 * pow(1.0 - ndv, 5.0);
     let reflected = sky_base(reflect(-v, n));
-    let body = vec3(0.03, 0.13, 0.15) * (0.25 + 0.75 * daylight());
+    let body = mix(vec3(0.03, 0.13, 0.15), vec3(0.004, 0.025, 0.05), smoothstep(0.5, 12.0, in.depth))
+        * (0.25 + 0.75 * daylight());
     var color = mix(body, reflected, fresnel);
     let h = normalize(v + sun_dir());
     color += sun_light() * pow(max(dot(n, h), 0.0), 300.0) * 4.0 * flat;
     // White water: where the surface falls steeply (waterfalls, rapids), and in patches drifting
     // down fast rivers.
     let speed = length(drift);
-    let falling = 1.0 - smoothstep(0.55, 0.92, abs(normalize(in.normal).y));
+    // (Not at the shore, where the water's buried edges meet the bank.)
+    let falling = (1.0 - smoothstep(0.55, 0.92, abs(normalize(in.normal).y))) * smoothstep(0.4, 1.2, in.depth);
     let churn = value_noise(vec3((world.xz - drift * globals.camera.w * 1.4) * 0.7, globals.camera.w * 0.6));
     let foam = max(falling * (0.55 + 0.45 * churn), smoothstep(0.72, 0.92, churn) * smoothstep(0.8, 1.8, speed) * 0.3);
     let white = vec3(0.8, 0.85, 0.88) * (0.25 + 0.75 * daylight()) * (0.6 + 0.4 * max(sun_dir().y, 0.0));
     color = mix(color, white, foam);
-    let alpha = clamp(0.78 + 0.2 * fresnel + foam * 0.4, 0.0, 0.97);
+    // Clear at the shore (depth 0), so the edge follows the depth's smooth line, not the mesh's.
+    let shore = smoothstep(0.0, 0.45, in.depth);
+    let alpha = clamp(0.72 + 0.15 * smoothstep(0.5, 4.0, in.depth) + 0.15 * fresnel + foam * 0.4, 0.0, 0.97) * shore;
     return vec4(debug_hot(apply_fog(color, in.rel), 6.0), alpha);
 }
