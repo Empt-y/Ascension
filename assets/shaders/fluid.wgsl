@@ -27,10 +27,12 @@ struct VsOut {
     @location(4) depth: f32,
 }
 
-// fluid::FLOW_SCALE, DEPTH_SCALE and DEPTH_OFFSET.
+// fluid::FLOW_SCALE, DEPTH_RANGE and DEPTH_OFFSET.
 const FLOW_SCALE: f32 = 60.0;
-const DEPTH_SCALE: f32 = 50.0;
+const DEPTH_RANGE: f32 = 40.0;
 const DEPTH_OFFSET: f32 = 0.5;
+// Beyond this (horizontally) water.wgsl draws the water instead (as far.wgsl takes the terrain).
+const CHUNK_OVERLAP: f32 = 24.0;
 
 @vertex
 fn vs_main(in: VsIn) -> VsOut {
@@ -41,7 +43,7 @@ fn vs_main(in: VsIn) -> VsOut {
     out.lava = in.weights_a.y / max(in.weights_a.x + in.weights_a.y, 1e-4);
     let given = select(0.0, 1.0, in.flow.z > 0.9);
     out.flow = vec3((in.flow.xy - vec2(128.0 / 255.0)) * 255.0 / FLOW_SCALE * given, given);
-    out.depth = select(100.0, in.flow.w * 255.0 / DEPTH_SCALE - DEPTH_OFFSET, in.flow.z > 0.002);
+    out.depth = select(100.0, in.flow.w * in.flow.w * DEPTH_RANGE - DEPTH_OFFSET, in.flow.z > 0.002);
     return out;
 }
 
@@ -80,6 +82,10 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     if in.lava > 0.5 {
         // Lava is opaque and gives its own light (it blooms); fog still covers it at a distance.
         return vec4(debug_hot(apply_fog(lava_color(world, globals.camera.w), in.rel), 7.0), 1.0);
+    }
+    if length(in.rel.xz) >= globals.fog.z - CHUNK_OVERLAP {
+        // The far water's from here on.
+        discard;
     }
     let dist = length(in.rel);
     let v = -in.rel / dist;

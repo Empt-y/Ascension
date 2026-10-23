@@ -152,7 +152,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let finer = levels[in.level].finer;
     if finer >= 0 {
         let f = levels[u32(finer)];
-        let half = (f32(MESH_HALF) - 0.5) * f.spacing;
+        // Up to the finer grid's very edge: water is see-through, so a strip drawn by both would
+        // show as a dark line (terrain, being opaque, can overlap; far.wgsl keeps a margin).
+        let half = f32(MESH_HALF) * f.spacing - 0.01;
         let c = vec2<f32>(f.center) * f.spacing;
         if all(abs(in.world_xz - c) < vec2(half)) {
             discard;

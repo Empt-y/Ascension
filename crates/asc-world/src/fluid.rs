@@ -182,12 +182,13 @@ pub fn pristine_chunk(worldgen: &WorldGen, terrain: &ChunkData) -> FluidChunk {
 
 /// Vertex bytes of a fluid mesh (in `ore`): the river's flow x and z around 128, `FLOW_SCALE` per
 /// m/s; a flag (`FLAG_FLOW` with a flow, `FLAG_DEPTH` without); and the water's depth over the
-/// ground, `(depth + DEPTH_OFFSET) * DEPTH_SCALE`. Shading fades shallow water out, so shores
+/// ground, `sqrt((depth + DEPTH_OFFSET) / DEPTH_RANGE) * 255` (fine at the shore, and deep enough
+/// that the open sea shades as the far water does). Shading fades shallow water out, so shores
 /// follow the depth's smooth zero line rather than where two meshes cross.
 pub const FLOW_SCALE: f32 = 60.0;
 pub const FLAG_FLOW: u8 = 255;
 pub const FLAG_DEPTH: u8 = 1;
-pub const DEPTH_SCALE: f32 = 50.0;
+pub const DEPTH_RANGE: f32 = 40.0;
 pub const DEPTH_OFFSET: f32 = 0.5;
 /// Natural water fills open cells this far below the natural ground (caves deeper stay dry).
 pub const NATURAL_DEPTH: f32 = 8.0;
@@ -362,7 +363,7 @@ pub fn mesh_fluid(input: &FluidInput) -> crate::ChunkMesh {
         let (depth, flow) = if weight > 0.0 { (depth / weight, flow / weight) } else { (4.0, glam::Vec2::ZERO) };
         let byte = |v: f32| (128.0 + v * FLOW_SCALE).round().clamp(1.0, 255.0) as u8;
         let flag = if input.flow.is_some() { FLAG_FLOW } else { FLAG_DEPTH };
-        let depth = ((depth + DEPTH_OFFSET) * DEPTH_SCALE).round().clamp(0.0, 255.0) as u8;
+        let depth = (((depth + DEPTH_OFFSET).max(0.0) / DEPTH_RANGE).sqrt() * 255.0).round().min(255.0) as u8;
         v.ore = [byte(flow.x), byte(flow.y), flag, depth];
     }
     mesh

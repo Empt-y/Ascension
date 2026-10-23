@@ -258,9 +258,11 @@ impl Streamer {
                 }
                 let col = IVec2::new(center.x + dx, center.z + dz);
                 let (band_lo, band_hi) = self.surface_band(col);
-                let lo = band_lo.min(center.y - CAMERA_Y_REACH).max(center.y - r);
-                let hi = band_hi.max(center.y + CAMERA_Y_REACH).min(center.y + r);
-                for y in lo..=hi {
+                // The surface band (whatever the camera's height: seen from high up, that's the
+                // ground below) and the chunks round the camera, but not the air between them.
+                let near_camera = (center.y - CAMERA_Y_REACH)..=(center.y + CAMERA_Y_REACH);
+                let ys = (band_lo..=band_hi).chain(near_camera.filter(|y| *y < band_lo || *y > band_hi));
+                for y in ys {
                     // Below the surface band only chunks near the camera are worth filling (caves).
                     let underground = y < band_lo;
                     if underground && (y - center.y).abs() > CAMERA_Y_REACH {
@@ -292,9 +294,13 @@ impl Streamer {
         }
 
         let keep = r + UNLOAD_MARGIN;
+        let column_range = &self.column_range;
         self.slots.retain(|coord, slot| {
             let d = *coord - center;
-            let inside = d.x * d.x + d.z * d.z <= keep * keep && d.y.abs() <= keep;
+            let in_band = column_range
+                .get(&IVec2::new(coord.x, coord.z))
+                .is_some_and(|(lo, hi)| (lo - 1..=hi + 1).contains(&coord.y));
+            let inside = d.x * d.x + d.z * d.z <= keep * keep && (d.y.abs() <= keep || in_band);
             if !inside && slot.in_flight == 0 {
                 renderer.remove_chunk(*coord);
                 self.lights.remove(coord);

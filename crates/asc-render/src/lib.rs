@@ -1167,7 +1167,9 @@ impl Renderer {
                     }
                 }
             }
-            if nearest.truncate().length() < view_distance && frustum.intersects_box(min, max) {
+            // Horizontal distance (as the streamer and the far terrain's hand-over measure it): from
+            // high up, the ground below is still in view.
+            if glam::Vec2::new(nearest.x, nearest.z).length() < view_distance && frustum.intersects_box(min, max) {
                 self.draw_list.push((dist, *coord));
                 stats.triangles += chunk.index_count as usize / 3;
             }
@@ -1180,7 +1182,8 @@ impl Renderer {
         for (coord, chunk) in &self.fluid_chunks {
             let origin = chunk_origin(*coord) - camera_pos;
             let (min, max) = (origin + chunk.min, origin + chunk.max);
-            if Vec3::ZERO.clamp(min, max).truncate().length() < view_distance && frustum.intersects_box(min, max) {
+            let nearest = Vec3::ZERO.clamp(min, max);
+            if glam::Vec2::new(nearest.x, nearest.z).length() < view_distance && frustum.intersects_box(min, max) {
                 self.fluid_draw.push(*coord);
             }
         }
