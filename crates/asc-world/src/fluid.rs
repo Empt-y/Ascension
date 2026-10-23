@@ -73,11 +73,17 @@ pub struct FluidChunk {
     pub amount: Vec<u16>,
     /// Cells inside terrain or a building (from the terrain chunk's samples).
     pub solid: Vec<bool>,
+    /// Each cell's natural amount (its pristine water or lava; zero elsewhere). Natural water is a
+    /// source: it's topped back up to this, so a river or lake keeps its level when disturbed.
+    pub source: Vec<u16>,
+    /// Open cells over a natural water surface: sources don't fill these (a river's upper
+    /// reaches would otherwise pour on into the air over its lower ones and flood its banks).
+    pub cap: Vec<bool>,
 }
 
 impl FluidChunk {
     pub fn empty() -> Self {
-        Self { kind: vec![0; CELLS], amount: vec![0; CELLS], solid: vec![false; CELLS] }
+        Self { kind: vec![0; CELLS], amount: vec![0; CELLS], solid: vec![false; CELLS], source: vec![0; CELLS], cap: vec![false; CELLS] }
     }
 
     pub fn total(&self) -> u64 {
@@ -151,6 +157,7 @@ pub fn pristine_chunk(worldgen: &WorldGen, terrain: &ChunkData) -> FluidChunk {
                     if a > 0 {
                         out.kind[i] = FluidKind::Lava as u8;
                         out.amount[i] = a;
+                        out.source[i] = a;
                     }
                     continue;
                 }
@@ -162,6 +169,9 @@ pub fn pristine_chunk(worldgen: &WorldGen, terrain: &ChunkData) -> FluidChunk {
                     if a > 0 && wy as f32 + 0.5 >= surface - NATURAL_DEPTH && natural_air {
                         out.kind[i] = FluidKind::Water as u8;
                         out.amount[i] = a;
+                        out.source[i] = a;
+                    } else if a == 0 {
+                        out.cap[i] = true;
                     }
                 }
             }

@@ -7,6 +7,11 @@
 //! is conserved, the order cells are visited in doesn't matter, and chunks run in parallel with the
 //! same result on any number of threads.
 //!
+//! Natural water is a source (as in Minecraft): each tick its cells are topped back up to their
+//! natural amount, and between two natural cells only water beyond that moves, so a disturbed river
+//! or lake keeps its level (rather than draining downhill out of the simulated stretch) while it
+//! refills whatever is dug beside or under it. Only that topping up adds water.
+//!
 //! The edges of the simulated region: a neighbouring chunk that isn't materialised is read as a
 //! "ghost" of its pristine state. Pristine water there is a reservoir (the sea refills whatever
 //! drains from it); pristine air that water wants to enter brings that chunk to life on the next
@@ -46,6 +51,23 @@ struct Cell {
     solid: bool,
     /// A ghost cell: read-only (pristine water is a reservoir; air there can't be entered yet).
     ghost: bool,
+    /// Its natural amount (a source), or zero.
+    source: i32,
+    /// Open air over a natural water surface (sources don't fill it).
+    cap: bool,
+}
+
+impl Cell {
+    /// A natural cell only passes on what it holds beyond its natural amount to another natural
+    /// cell or to the air over a natural surface (natural water is at rest as it is: a river's
+    /// slope mustn't run, nor pour into the air over its lower reaches). Into anything else (a dug
+    /// pit or channel) it flows, and is topped up again.
+    fn excess_pair(a: Cell, b: Cell) -> (Cell, Cell) {
+        let ex = |c: Cell| Cell { amount: (c.amount - c.source).max(0), ..c };
+        let a2 = if a.source > 0 && (b.source > 0 || b.cap) { ex(a) } else { a };
+        let b2 = if b.source > 0 && (a.source > 0 || a.cap) { ex(b) } else { b };
+        (a2, b2)
+    }
 }
 
 /// How much of `total` the lower of two stacked cells holds when settled: all of it up to a full
@@ -64,6 +86,7 @@ fn settled_lower(total: i32) -> i32 {
 /// Flow from `upper` down into `lower` (negative: pushed up). At most half of the giver goes, as
 /// each cell has two vertical neighbours.
 fn vertical(lower: Cell, upper: Cell) -> i32 {
+    let (lower, upper) = Cell::excess_pair(lower, upper);
     if lower.solid || upper.solid || (lower.kind != 0 && upper.kind != 0 && lower.kind != upper.kind) {
         return 0;
     }
@@ -80,6 +103,7 @@ fn vertical(lower: Cell, upper: Cell) -> i32 {
 
 /// Flow from `a` sideways into `b` (negative: b into a).
 fn sideways(a: Cell, b: Cell) -> i32 {
+    let (a, b) = Cell::excess_pair(a, b);
     if a.solid || b.solid || (a.kind != 0 && b.kind != 0 && a.kind != b.kind) {
         return 0;
     }
@@ -253,6 +277,10 @@ impl FluidSim {
                     for x in 0..n {
                         let i = cell_index(x, y, z);
                         let solid = terrain.density[asc_world::ChunkData::index(x + 1, y + 1, z + 1)] < 0.0;
+                        if solid {
+                            // Built over: no longer natural water.
+                            chunk.source[i] = 0;
+                        }
                         if solid && chunk.amount[i] > 0 && y + 1 < n {
                             let up = cell_index(x, y + 1, z);
                             if !chunk.solid[up] {
@@ -285,10 +313,12 @@ impl FluidSim {
         }
         let i = cell_index(l.x as usize, l.y as usize, l.z as usize);
         if let Some(ch) = self.fluids.chunks.get(&c) {
-            return Cell { kind: ch.kind[i], amount: ch.amount[i] as i32, solid: ch.solid[i], ghost: false };
+            let (amount, source) = (ch.amount[i] as i32, ch.source[i] as i32);
+            return Cell { kind: ch.kind[i], amount, solid: ch.solid[i], ghost: false, source, cap: ch.cap[i] };
         }
         if let Some(g) = self.ghosts.get(&c) {
-            return Cell { kind: g.kind[i], amount: g.amount[i] as i32, solid: g.solid[i], ghost: true };
+            let (amount, source) = (g.amount[i] as i32, g.source[i] as i32);
+            return Cell { kind: g.kind[i], amount, solid: g.solid[i], ghost: true, source, cap: g.cap[i] };
         }
         Cell { solid: true, ..Default::default() }
     }
@@ -308,7 +338,14 @@ impl FluidSim {
                     if ch.solid[i] {
                         continue;
                     }
-                    let here = Cell { kind: ch.kind[i], amount: ch.amount[i] as i32, solid: false, ghost: false };
+                    let here = Cell {
+                        kind: ch.kind[i],
+                        amount: ch.amount[i] as i32,
+                        solid: false,
+                        ghost: false,
+                        source: ch.source[i] as i32,
+                        cap: ch.cap[i],
+                    };
                     let p = IVec3::new(x, y, z);
                     let mut net = 0;
                     let mut inflow_kind = 0u8;
@@ -384,6 +421,7 @@ impl FluidSim {
                 wanted.extend(want.into_iter().map(|c| c.to_array()));
             }
         }
+        self.refill(&mut any_changed);
         self.react(&mut any_changed);
         for coord in wanted {
             self.materialise(world, IVec3::from_array(coord));
@@ -407,6 +445,32 @@ impl FluidSim {
             }
         }
         self.changed.extend(any_changed);
+    }
+
+    /// Top natural cells of awake chunks back up to their natural amount (sources).
+    fn refill(&mut self, any_changed: &mut BTreeSet<[i32; 3]>) {
+        for key in self.awake.keys() {
+            let coord = IVec3::from_array(*key);
+            let Some(ch) = self.fluids.chunks.get_mut(&coord) else { continue };
+            let mut changed = false;
+            for i in 0..CELLS {
+                let source = ch.source[i];
+                if source == 0 || ch.solid[i] || ch.amount[i] >= source {
+                    continue;
+                }
+                let y = coord.y * N + ((i / N as usize) % N as usize) as i32;
+                let kind = if (y as f32) < fluid::LAVA_LEVEL + 0.5 { FluidKind::Lava } else { FluidKind::Water } as u8;
+                if ch.kind[i] != 0 && ch.kind[i] != kind {
+                    continue;
+                }
+                ch.amount[i] = source;
+                ch.kind[i] = kind;
+                changed = true;
+            }
+            if changed {
+                any_changed.insert(*key);
+            }
+        }
     }
 
     /// The fluid at a world point (materialised or pristine).
@@ -606,6 +670,55 @@ mod tests {
         });
         assert!(found.is_some(), "no open cell found below the lava level");
         assert_ne!(fluid::pristine(&wg, IVec3::new(0, -100, 0)).0, FluidKind::Lava);
+    }
+
+    #[test]
+    fn a_disturbed_river_keeps_its_level_and_fills_what_is_dug_under_it() {
+        let mut world = World::new(1337);
+        let wg = world.worldgen.clone();
+        // Deep river water above sea level.
+        let (x, z, _) = (0..60000)
+            .map(|i| ((i % 300) as f32 * 2.0 - 300.0, (i / 300) as f32 * 2.0 - 200.0))
+            .find_map(|(x, z)| {
+                let l = wg.water_level(x, z)?;
+                (l > asc_world::SEA_LEVEL + 4.0 && l - wg.height(x, z) > 1.5).then_some((x, z, l))
+            })
+            .expect("a river");
+        let bed = wg.height(x, z);
+        let mut sim = FluidSim::new();
+        // Build a lump in the water, then dig it out and a pit into the bed under it.
+        let fill = EditOp { center: Vec3::new(x, bed + 0.5, z), radius: 1.6, kind: EditKind::Fill, material: asc_world::Material::Rock };
+        world.edits.push(fill);
+        sim.disturb(&world, &fill);
+        for _ in 0..100 {
+            sim.tick(&world);
+        }
+        for dx in [0.0, 1.5] {
+            let dig = EditOp { center: Vec3::new(x + dx, bed - 0.5, z), radius: 1.6, kind: EditKind::Dig, material: asc_world::Material::Air };
+            world.edits.push(dig);
+            sim.disturb(&world, &dig);
+        }
+        for _ in 0..600 {
+            sim.tick(&world);
+        }
+        // The pit is full, the river round it is at its natural level, and the disturbance hasn't
+        // spread down the river.
+        let (k, frac) = sim.fraction_at(&world, Vec3::new(x + 0.7, bed - 1.0, z));
+        assert!(k == FluidKind::Water && frac > 0.95, "the pit holds {frac} of {k:?}");
+        // (Away from the built lump, which still stands above the dug pit.)
+        let mut checked = 0;
+        let around = (-10..=10).step_by(2).flat_map(|dz| (-10..=10).step_by(2).map(move |dx| (dx, dz)));
+        for (dx, dz) in around.filter(|(dx, dz): &(i32, i32)| dx.abs().max(dz.abs()) >= 3) {
+            let (cx, cz) = (x + dx as f32, z + dz as f32);
+            let Some(natural) = wg.water_level(cx, cz).filter(|l| *l - wg.height(cx, cz) > 2.2) else { continue };
+            let above = sim.fraction_at(&world, Vec3::new(cx, natural + 1.2, cz)).1;
+            let below = sim.fraction_at(&world, Vec3::new(cx, natural - 1.5, cz)).1;
+            assert!(above < 0.05 && below > 0.95, "at ({cx}, {cz}) natural {natural}: {above} over it, {below} under");
+            checked += 1;
+        }
+        assert!(checked >= 6, "only {checked} deep columns checked");
+        assert!(sim.fluids.chunks.len() <= 12, "{} chunks materialised", sim.fluids.chunks.len());
+        assert!(sim.awake.is_empty(), "still awake: {:?}", sim.awake.keys().collect::<Vec<_>>());
     }
 
     #[test]
