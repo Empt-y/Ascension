@@ -15,6 +15,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("water", include_str!("../../../assets/shaders/water.wgsl")),
     ("fluid", include_str!("../../../assets/shaders/fluid.wgsl")),
     ("parts", include_str!("../../../assets/shaders/parts.wgsl")),
+    ("particles", include_str!("../../../assets/shaders/particles.wgsl")),
     ("taa", include_str!("../../../assets/shaders/taa.wgsl")),
 ];
 

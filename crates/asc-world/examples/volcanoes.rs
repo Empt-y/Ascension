@@ -36,6 +36,11 @@ fn main() {
             v.lava.map_or(String::new(), |l| format!(", lava lake at {l:.0} (here {:?})", wg.lava_level(c.x, c.y).map(|l| l.round()))),
             v.crater_lake.map_or(String::new(), |l| format!(", lake at {l:.0}")),
         );
+        println!(
+            "    breach toward ({:.2}, {:.2})",
+            v.tilt.x,
+            v.tilt.y,
+        );
         if v.kind == VolcanoKind::Super {
             for f in &v.features {
                 let p = f.at;

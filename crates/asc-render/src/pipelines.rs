@@ -235,6 +235,7 @@ pub struct Pipelines {
     pub far: wgpu::RenderPipeline,
     pub water: wgpu::RenderPipeline,
     pub fluid: wgpu::RenderPipeline,
+    pub particles: wgpu::RenderPipeline,
     pub parts: wgpu::RenderPipeline,
     pub parts_shadow: wgpu::RenderPipeline,
     pub ghost: wgpu::RenderPipeline,
@@ -335,6 +336,7 @@ impl Pipelines {
         let water_src = shaders.module(device, "water")?;
         let fluid_src = shaders.module(device, "fluid")?;
         let parts_src = shaders.module(device, "parts")?;
+        let particles_src = shaders.module(device, "particles")?;
         let depth_type = if msaa > 1 { "texture_depth_multisampled_2d" } else { "texture_depth_2d" };
         let taa_src = shaders.module_with(device, "taa", &[("DEPTH_TEXTURE", depth_type)])?;
 
@@ -506,6 +508,34 @@ impl Pipelines {
                 write_mask: wgpu::ColorWrites::ALL,
             }),
         );
+        // Particles: one instance each (a billboard of 6 vertices), premultiplied blending so smoke
+        // covers and glow adds in the same pass; depth tested, not written.
+        let particle_attrs = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4];
+        let particle_layout = [Some(wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<crate::Particle>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &particle_attrs,
+        })];
+        let particles = scene_builder.pipeline(
+            "particles",
+            &scene,
+            &particles_src,
+            ("vs_main", Some("fs_main")),
+            &particle_layout,
+            wgpu::PrimitiveState::default(),
+            Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Greater),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            Some(wgpu::ColorTargetState {
+                format: HDR_FORMAT,
+                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            }),
+        );
         let water = scene_builder.pipeline(
             "water",
             &far_layout,
@@ -594,6 +624,7 @@ impl Pipelines {
             far,
             water,
             fluid,
+            particles,
             parts,
             parts_shadow,
             ghost,

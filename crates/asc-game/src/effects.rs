@@ -1,0 +1,175 @@
+//! Particle effects the client makes from what the server says: a volcano's smoke billowing out of
+//! its crater (pale steam while it rumbles, dark ash clouds while it erupts), lava spraying up in
+//! the crater, and bombs glowing as they fly.
+
+use asc_render::{PARTICLE_GLOW, PARTICLE_SMOKE, Particle};
+use asc_sim::volcanism::{Phase, Report};
+use glam::{Vec2, Vec3};
+
+/// Smoke puffs a second from an erupting crater (at full strength), and lava sparks.
+const SMOKE_PER_SECOND: f32 = 22.0;
+const SPARKS_PER_SECOND: f32 = 60.0;
+/// How long a puff lives, how fast it rises (at first, m/s) and how big it grows (radius, m).
+const PUFF_LIFE: f32 = 45.0;
+const PUFF_RISE: f32 = 16.0;
+const PUFF_GROWTH: f32 = 1.4;
+const PUFF_START: f32 = 9.0;
+/// Puffs stop growing here: a plume is many billows, not a few huge blobs.
+const PUFF_MAX: f32 = 38.0;
+/// The wind carries the plume this way (m/s per 100 m above the crater: stronger higher up, so
+/// the plume leans and spreads).
+const DRIFT: Vec2 = Vec2::new(3.5, 1.2);
+
+struct Puff {
+    at: Vec3,
+    /// The height it set off from (the wind grows above it).
+    from: f32,
+    vel: Vec3,
+    size: f32,
+    age: f32,
+    /// 0 pale steam .. 1 dark ash.
+    dark: f32,
+    opacity: f32,
+    seed: f32,
+    spin: f32,
+}
+
+struct Spark {
+    at: Vec3,
+    vel: Vec3,
+    age: f32,
+    life: f32,
+    size: f32,
+}
+
+#[derive(Default)]
+pub struct Effects {
+    puffs: Vec<Puff>,
+    sparks: Vec<Spark>,
+    /// Fractions of a puff or spark still owed to each volcano (by index) at its rate.
+    owed: Vec<(f32, f32)>,
+    rng: u64,
+}
+
+impl Effects {
+    fn random(&mut self) -> f32 {
+        self.rng = self.rng.wrapping_mul(0x5851_F42D_4C95_7F2D).wrapping_add(0x1405_7B7E_F767_814F);
+        (self.rng >> 40) as f32 / (1u64 << 24) as f32
+    }
+
+    /// Step `dt` seconds on from what the server last reported.
+    pub fn update(&mut self, dt: f32, report: &Report) {
+        self.owed.resize(report.active.len(), (0.0, 0.0));
+        for (i, a) in report.active.iter().enumerate() {
+            let (smoke, dark, sparks) = match a.phase {
+                Phase::Rumbling => (0.35 + 0.4 * a.strength, 0.1, 0.0),
+                Phase::Erupting => (0.6 + 0.4 * a.strength, 1.0, a.strength),
+                Phase::Waning => (0.3 + 0.5 * a.strength, 0.7, 0.3 * a.strength),
+                Phase::Quiet => (0.0, 0.0, 0.0),
+            };
+            self.owed[i].0 += smoke * SMOKE_PER_SECOND * dt;
+            self.owed[i].1 += sparks * SPARKS_PER_SECOND * dt;
+            // The crater's middle (its rim's height) and roughly its radius.
+            let crater = (a.radius * 0.1).max(20.0);
+            while self.owed[i].0 >= 1.0 {
+                self.owed[i].0 -= 1.0;
+                let (r, ang) = (self.random().sqrt() * crater * 0.5, self.random() * std::f32::consts::TAU);
+                let at = a.summit + Vec3::new(ang.cos() * r, -10.0, ang.sin() * r);
+                let rise = PUFF_RISE * (0.6 + 0.6 * self.random()) * (0.5 + 0.5 * smoke);
+                let side = Vec2::from_angle(self.random() * std::f32::consts::TAU) * 2.0;
+                let puff = Puff {
+                    at,
+                    from: at.y,
+                    vel: Vec3::new(side.x, rise, side.y),
+                    size: PUFF_START * (0.7 + 0.6 * self.random()),
+                    age: 0.0,
+                    dark: (dark * (0.8 + 0.4 * self.random())).min(1.0),
+                    opacity: 0.18 + 0.12 * dark + 0.1 * self.random(),
+                    seed: self.random() * 100.0,
+                    spin: self.random() * std::f32::consts::TAU,
+                };
+                self.puffs.push(puff);
+            }
+            while self.owed[i].1 >= 1.0 {
+                self.owed[i].1 -= 1.0;
+                let ang = self.random() * std::f32::consts::TAU;
+                let r = self.random().sqrt() * crater * 0.35;
+                let out = 3.0 + 7.0 * self.random();
+                let spark = Spark {
+                    at: a.summit + Vec3::new(ang.cos() * r, -22.0, ang.sin() * r),
+                    vel: Vec3::new(ang.cos() * out, 18.0 + 22.0 * self.random(), ang.sin() * out),
+                    age: 0.0,
+                    life: 2.5 + 2.0 * self.random(),
+                    size: 0.8 + 1.6 * self.random(),
+                };
+                self.sparks.push(spark);
+            }
+        }
+        for p in &mut self.puffs {
+            p.age += dt;
+            // Rising slows as the puff spreads; the wind carries it off.
+            p.vel.y = (p.vel.y - 0.35 * dt).max(2.5);
+            let drift = DRIFT * ((p.at.y - p.from) / 100.0).clamp(0.0, 4.0);
+            p.at += Vec3::new(p.vel.x + drift.x, p.vel.y, p.vel.z + drift.y) * dt;
+            p.vel.x *= 1.0 - 0.4 * dt;
+            p.vel.z *= 1.0 - 0.4 * dt;
+            p.size = (p.size + PUFF_GROWTH * dt * (1.0 + p.age / 20.0)).min(PUFF_MAX);
+        }
+        self.puffs.retain(|p| p.age < PUFF_LIFE);
+        for s in &mut self.sparks {
+            s.age += dt;
+            s.vel.y -= 9.8 * dt;
+            s.at += s.vel * dt;
+        }
+        self.sparks.retain(|s| s.age < s.life);
+    }
+
+    /// This frame's particles (plus a glow for each bomb in the air).
+    pub fn particles(&self, report: &Report) -> Vec<Particle> {
+        let mut out = Vec::with_capacity(self.puffs.len() + self.sparks.len() + report.bombs.len());
+        for p in &self.puffs {
+            let fade_in = (p.age / 2.0).min(1.0);
+            let fade_out = 1.0 - ((p.age - PUFF_LIFE * 0.6) / (PUFF_LIFE * 0.4)).clamp(0.0, 1.0);
+            let shade = 0.6 - 0.32 * p.dark;
+            // Young puffs over an erupting crater are lit from below by the lava.
+            let glow = p.dark * (1.0 - (p.age / 8.0).min(1.0)) * 0.8;
+            out.push(Particle {
+                position: p.at.into(),
+                size: p.size,
+                color: [shade, shade * 0.97, shade * 0.93, p.opacity * fade_in * fade_out],
+                params: [PARTICLE_SMOKE, glow, p.spin + p.age * 0.05, p.seed],
+            });
+        }
+        for s in &self.sparks {
+            let cool = s.age / s.life;
+            let heat = 1.0 - cool * 0.6;
+            out.push(Particle {
+                position: s.at.into(),
+                size: s.size,
+                color: [3.0 * heat, 0.9 * heat * heat, 0.15 * heat * heat, 2.5 * (1.0 - cool * cool)],
+                params: [PARTICLE_GLOW, 0.0, 0.0, s.age * 13.0],
+            });
+        }
+        for &b in &report.bombs {
+            out.push(Particle {
+                position: b.into(),
+                size: 2.5,
+                color: [3.0, 0.8, 0.12, 3.0],
+                params: [PARTICLE_GLOW, 0.0, 0.0, b.x * 0.1],
+            });
+        }
+        out
+    }
+
+    /// How deep in the smoke `at` is (0..1): ash in the air only there.
+    pub fn smoke_at(&self, at: Vec3) -> f32 {
+        let mut ash: f32 = 0.0;
+        for p in &self.puffs {
+            let d = p.at.distance(at) / p.size;
+            if d < 1.0 {
+                ash = ash.max((1.0 - d) * p.dark * 2.0);
+            }
+        }
+        ash.min(1.0)
+    }
+}

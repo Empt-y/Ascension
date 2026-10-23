@@ -327,7 +327,10 @@ pub fn mesh_fluid(input: &FluidInput) -> crate::ChunkMesh {
                 let (kind, amount) = (FluidKind::from_u8(input.kind[i]), input.amount[i].min(FULL));
                 let f = if kind == FluidKind::Lava {
                     material[i] = 2;
-                    amount as f32 / FULL as f32
+                    // Lava runs in thin sheets down a slope: show any real amount as at least a
+                    // crust (a cell under half full has no surface at all), or flows are invisible.
+                    let a = amount as f32 / FULL as f32;
+                    if amount >= 30 { a.max(0.62) } else { a }
                 } else if s.is_nan() || wy - 0.5 >= s {
                     if kind == FluidKind::Water { amount as f32 / FULL as f32 } else { 0.0 }
                 } else {

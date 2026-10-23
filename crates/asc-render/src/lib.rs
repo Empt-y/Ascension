@@ -89,6 +89,24 @@ struct Globals {
 /// Point lights passed to the shaders each frame (the nearest of those set).
 pub const MAX_LIGHTS: usize = 16;
 
+/// A particle: a camera-facing soft billboard (see particles.wgsl).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Particle {
+    /// World position and radius (metres).
+    pub position: [f32; 3],
+    pub size: f32,
+    /// Colour, and opacity (smoke) or brightness (glow).
+    pub color: [f32; 4],
+    /// Kind (`PARTICLE_SMOKE` or `PARTICLE_GLOW`), glow from below (smoke), spin, seed.
+    pub params: [f32; 4],
+}
+
+pub const PARTICLE_SMOKE: f32 = 0.0;
+pub const PARTICLE_GLOW: f32 = 1.0;
+/// Particles drawn per frame at most (the farthest are dropped beyond it).
+const MAX_PARTICLES: usize = 8192;
+
 /// A point light: world position, reach in metres, and colour times intensity.
 #[derive(Clone, Copy, Debug)]
 pub struct PointLight {
@@ -175,6 +193,8 @@ pub struct FrameParams {
     pub lights: Vec<PointLight>,
     /// 0..1 volcanic ash in the air round the camera: darker sky, thicker fog, dimmer sun.
     pub ash: f32,
+    /// Smoke, sparks and the like this frame (any order: they're sorted far to near here).
+    pub particles: Vec<Particle>,
 }
 
 /// egui output for this frame.
@@ -265,6 +285,8 @@ pub struct Renderer {
     fluid_chunks: AHashMap<ChunkCoord, GpuChunk>,
     /// The mesh arenas hit the device's buffer size limit (warned once).
     arena_full_warned: bool,
+    particle_buffer: wgpu::Buffer,
+    particle_count: u32,
     fluid_draw: Vec<ChunkCoord>,
     shadow_list: Vec<ChunkCoord>,
     /// Per cascade, the indices into `shadow_list` of the chunks that cast into it.
@@ -372,6 +394,12 @@ impl Renderer {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let particle_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("particles"),
+            size: (MAX_PARTICLES * std::mem::size_of::<Particle>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let taa_debug = std::env::var("ASC_DEBUG_TAA").is_ok_and(|v| v == "1").then(|| TaaDebug::new(device));
         let (post_bg, bloom_bgs, taa_bgs) = Self::texture_bind_groups(
             device,
@@ -425,6 +453,8 @@ impl Renderer {
             draw_list: Vec::new(),
             fluid_chunks: AHashMap::new(),
             arena_full_warned: false,
+            particle_buffer,
+            particle_count: 0,
             fluid_draw: Vec::new(),
             shadow_list: Vec::new(),
             shadow_sets: Default::default(),
@@ -1043,6 +1073,18 @@ impl Renderer {
         stats.far_levels = if self.far.enabled { self.far.ready_levels() } else { 0 };
         stats.far_triangles = self.far.triangles();
 
+        // Particles far to near, so smoke blends over what's behind it.
+        let mut particles = frame.particles.clone();
+        let eye = cam.position;
+        let far = |p: &Particle| Vec3::from(p.position).distance_squared(eye);
+        particles.sort_unstable_by(|a, b| far(b).total_cmp(&far(a)));
+        let skip = particles.len().saturating_sub(MAX_PARTICLES);
+        let particles = &particles[skip..];
+        self.particle_count = particles.len() as u32;
+        if !particles.is_empty() {
+            queue.write_buffer(&self.particle_buffer, 0, bytemuck::cast_slice(particles));
+        }
+
         let device = &self.gpu.device;
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
@@ -1380,6 +1422,12 @@ impl Renderer {
             }
         }
         self.mark_in(&mut pass, "water");
+        if self.particle_count > 0 {
+            pass.set_bind_group(0, &self.scene_bg, &[]);
+            pass.set_pipeline(&self.pipelines.particles);
+            pass.set_vertex_buffer(0, self.particle_buffer.slice(..));
+            pass.draw(0..6, 0..self.particle_count);
+        }
         // The placement ghost blends over everything, including water.
         pass.set_bind_group(0, &self.scene_bg, &[]);
         pass.set_pipeline(&self.pipelines.ghost);

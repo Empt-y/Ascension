@@ -37,16 +37,16 @@ const STILL_LAVA: u16 = 900;
 const STEAM: u16 = 250;
 /// A chunk with no change for this many ticks falls asleep.
 const SLEEP_AFTER: u32 = 3;
-/// This long after spilled lava (not a volcano's own) turns up in a chunk, it sets into basalt, and
-/// thin spilled water there evaporates.
+/// Spilled lava (not a volcano's own) that hasn't moved for this many ticks sets into basalt, and
+/// thin spilled water as still evaporates: cell by cell, so a flow sets from its stalled edges.
 const COOL_AFTER: u32 = 1200;
 /// Spilled water this thin (with nothing over it) evaporates; spilled lava this thin just goes.
 const PUDDLE: u16 = 150;
-/// Lava-only chunks run every this many ticks; the cooling bookkeeping every `COOL_CHECK`.
+/// Lava-only chunks run every this many ticks; cooling is checked every `COOL_CHECK`.
 const LAVA_EVERY: u64 = 2;
 const COOL_CHECK: u64 = 10;
-/// Fresh spilled fluid arriving in a chunk (more than this since the last) restarts its cooling.
-const FRESH: u16 = 2 * FULL;
+/// A cell whose amount changes by more than this has moved (smaller changes are jitter).
+const MOVED: i32 = 20;
 const LAVA_CRUST: u16 = 40;
 const N: i32 = CHUNK;
 
@@ -148,9 +148,9 @@ pub struct FluidSim {
     /// Rock set from lava since the last `take_solidified`: runs up a column (the lowest cell, the
     /// height in metres from that cell's bottom: whole cells, then the top one's fill) and the rock.
     solidified: Vec<(IVec3, f32, asc_world::Material)>,
-    /// Chunks holding spilled lava or puddles: how long since fresh lava last arrived (or was
-    /// poured in), and how much spilled fluid it held then.
-    cooling: BTreeMap<[i32; 3], (u32, u64)>,
+    /// For chunks that have held spilled fluid: the tick each cell last moved (cooling and drying
+    /// up go by how long a cell has been still).
+    still: AHashMap<ChunkCoord, Vec<u64>>,
     /// Whether spilled lava cools and puddles dry up (off for tests of the flow rules alone).
     pub settle_spills: bool,
     /// Ticks run (for lava's slower cadence and the cooling bookkeeping).
@@ -170,7 +170,7 @@ impl FluidSim {
             awake: BTreeMap::new(),
             changed: BTreeSet::new(),
             solidified: Vec::new(),
-            cooling: BTreeMap::new(),
+            still: AHashMap::new(),
             settle_spills: true,
             ticks: 0,
             resting: ahash::AHashSet::new(),
@@ -196,7 +196,8 @@ impl FluidSim {
         ch.amount[i] = ch.amount[i].saturating_add(amount);
         self.awake.insert(coord.to_array(), 0);
         self.changed.insert(coord.to_array());
-        self.cooling.insert(coord.to_array(), (0, Self::spilled(ch)));
+        let ticks = self.ticks;
+        self.still.entry(coord).or_insert_with(|| vec![ticks; CELLS])[i] = ticks;
     }
 
     /// Whether a chunk holds lava and no water.
@@ -209,24 +210,13 @@ impl FluidSim {
         lava && !water
     }
 
-    /// How much fluid a chunk holds that isn't natural (it cools or dries up in time).
-    fn spilled(ch: &FluidChunk) -> u64 {
-        (0..CELLS).filter(|&i| ch.source[i] == 0).map(|i| ch.amount[i] as u64).sum()
-    }
-
     /// Spilled lava sets into basalt (in runs up each column) and thin puddles dry up, `COOL_AFTER`
     /// ticks after they turned up in a chunk.
     fn cool(&mut self) {
-        let mut done = Vec::new();
-        for (key, (slept, _)) in self.cooling.iter_mut() {
-            *slept += 1;
-            if *slept >= COOL_AFTER {
-                done.push(*key);
-            }
-        }
-        for key in done {
-            self.cooling.remove(&key);
-            let coord = IVec3::from_array(key);
+        let now = self.ticks;
+        let keys: Vec<ChunkCoord> = self.still.keys().copied().collect();
+        for coord in keys {
+            let key = coord.to_array();
             // Columns whose bottom cell sits on a volcano's own lava in the chunk below: spilled
             // lava on top of a lava lake stays molten (it's the lake, risen).
             let n = N as usize;
@@ -239,8 +229,14 @@ impl FluidSim {
                     }
                 }
             }
-            let Some(ch) = self.fluids.chunks.get_mut(&coord) else { continue };
+            let Some(ch) = self.fluids.chunks.get_mut(&coord) else {
+                self.still.remove(&coord);
+                continue;
+            };
+            let still = &self.still[&coord];
+            let cold = |i: usize| now.saturating_sub(still[i]) >= COOL_AFTER as u64;
             let mut changed = false;
+            let mut spill_left = false;
             for z in 0..n {
                 for x in 0..n {
                     // (lowest cell, cells, the top cell's fill)
@@ -248,7 +244,7 @@ impl FluidSim {
                     for y in 0..=n {
                         let i = if y < n { Some(cell_index(x, y, z)) } else { None };
                         let spilled_lava = i.filter(|&i| {
-                            ch.kind[i] == FluidKind::Lava as u8 && ch.source[i] == 0 && ch.amount[i] >= LAVA_CRUST
+                            ch.kind[i] == FluidKind::Lava as u8 && ch.source[i] == 0 && ch.amount[i] >= LAVA_CRUST && cold(i)
                         });
                         if let Some(i) = spilled_lava {
                             let a = ch.amount[i].min(FULL);
@@ -263,6 +259,7 @@ impl FluidSim {
                                 ch.kind[under] == FluidKind::Lava as u8 && ch.source[under] > 0
                             };
                             if on_lava {
+                                spill_left = true;
                                 continue;
                             }
                             // As thick as the lava was: the whole cells under the top one, and the
@@ -282,17 +279,23 @@ impl FluidSim {
                             continue;
                         }
                         let above_dry = y + 1 >= n || ch.amount[cell_index(x, y + 1, z)] == 0;
-                        let thin_lava = ch.kind[i] == FluidKind::Lava as u8;
-                        if thin_lava || (ch.amount[i] <= PUDDLE && above_dry) {
+                        let lava = ch.kind[i] == FluidKind::Lava as u8;
+                        let thin_lava = lava && ch.amount[i] < LAVA_CRUST;
+                        if cold(i) && (thin_lava || (!lava && ch.amount[i] <= PUDDLE && above_dry)) {
                             ch.amount[i] = 0;
                             ch.kind[i] = 0;
                             changed = true;
+                        } else {
+                            spill_left = true;
                         }
                     }
                 }
             }
             if changed {
                 self.changed.insert(key);
+            }
+            if !spill_left {
+                self.still.remove(&coord);
             }
         }
     }
@@ -619,14 +622,14 @@ impl FluidSim {
 
     /// One tick: a vertical pass then a horizontal one over every awake chunk, in parallel.
     pub fn tick(&mut self, world: &World) {
+        self.ticks += 1;
         if self.awake.is_empty() {
             // Settled spills still cool and dry up.
-            if self.settle_spills && !self.cooling.is_empty() {
+            if self.settle_spills && !self.still.is_empty() && self.ticks.is_multiple_of(COOL_CHECK) {
                 self.cool();
             }
             return;
         }
-        self.ticks += 1;
         let mut any_changed: BTreeSet<[i32; 3]> = BTreeSet::new();
         let mut wanted: BTreeSet<[i32; 3]> = BTreeSet::new();
         // Lava is slow: chunks holding only lava run every `LAVA_EVERY` ticks (all on the same
@@ -647,7 +650,17 @@ impl FluidSim {
                 if changed {
                     let ch = self.fluids.chunks.get_mut(&coord).expect("awake chunks are materialised");
                     ch.kind = kind;
-                    ch.amount = amount;
+                    let old = std::mem::replace(&mut ch.amount, amount);
+                    // Where spilled fluid moved, note when (it cools or dries up once still).
+                    let ticks = self.ticks;
+                    let moved = (0..CELLS).filter(|&i| ch.source[i] == 0 && (ch.amount[i] as i32 - old[i] as i32).abs() > MOVED);
+                    let mut moved = moved.peekable();
+                    if moved.peek().is_some() {
+                        let still = self.still.entry(coord).or_insert_with(|| vec![ticks; CELLS]);
+                        for i in moved {
+                            still[i] = ticks;
+                        }
+                    }
                     any_changed.insert(coord.to_array());
                 }
                 wanted.extend(want.into_iter().map(|c| c.to_array()));
@@ -676,26 +689,7 @@ impl FluidSim {
             }
         }
         self.awake.retain(|_, quiet| *quiet < SLEEP_AFTER);
-        // Spilled fluid starts cooling (or drying) where it turns up, and keeps molten while more
-        // keeps arriving (a flow's front, fed from behind): only when its chunk has had no fresh
-        // fluid for a while does it set. Creeping (no gain) doesn't count.
-        // (Every few ticks, over the awake chunks: summing a chunk is a full pass over it.)
-        let check: Vec<[i32; 3]> = if self.ticks.is_multiple_of(COOL_CHECK) { self.awake.keys().copied().collect() } else { Vec::new() };
-        for key in &check {
-            let Some(ch) = self.fluids.chunks.get(&IVec3::from_array(*key)) else { continue };
-            let total = Self::spilled(ch);
-            if total == 0 {
-                continue;
-            }
-            match self.cooling.get_mut(key) {
-                Some((slept, had)) if total > *had + FRESH as u64 => (*slept, *had) = (0, total),
-                Some(_) => {}
-                None => {
-                    self.cooling.insert(*key, (0, total));
-                }
-            }
-        }
-        if self.settle_spills {
+        if self.settle_spills && self.ticks.is_multiple_of(COOL_CHECK) {
             self.cool();
         }
         for c in wake {

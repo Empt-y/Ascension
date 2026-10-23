@@ -5,6 +5,7 @@ mod app;
 use asc_sim::{content, inventory, ore_nodes, save, sim};
 mod assets;
 mod building;
+mod effects;
 mod far;
 mod fluids;
 mod hud;

@@ -263,6 +263,9 @@ struct State {
     /// What the server last said about volcanoes near by.
     volcanism: asc_sim::volcanism::Report,
     erupt_sent: bool,
+    /// Smoke, lava spray and glowing bombs from the volcanoes near by, and when they last moved.
+    effects: crate::effects::Effects,
+    effects_at: std::time::Instant,
     /// Where things left at death lie.
     stashes: std::collections::BTreeMap<u32, Vec3>,
     /// The simulated water, as the server sends it.
@@ -438,6 +441,8 @@ impl State {
             fluid_test_end: Vec3::ZERO,
             volcanism: Default::default(),
             erupt_sent: false,
+            effects: Default::default(),
+            effects_at: std::time::Instant::now(),
             fluids,
             stashes,
             pending_ops: Vec::new(),
@@ -658,10 +663,15 @@ impl State {
         self.egui_state.handle_platform_output(&self.window, output.platform_output);
         let primitives = self.egui_ctx.tessellate(output.shapes, output.pixels_per_point);
 
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(self.effects_at).as_secs_f32().min(0.25);
+        self.effects_at = now;
+        self.effects.update(dt, &self.volcanism);
         let (ash, shake) = self.volcanic_air();
         let params = FrameParams {
             camera: Camera { position: self.camera.position + shake, ..self.camera },
             ash,
+            particles: self.effects.particles(&self.volcanism),
             sun_dir: self.sim.sun_dir(),
             view_distance: self.streamer.view_radius as f32 * 32.0,
             underwater: self.fluids.fraction_at(&self.world, self.camera.position) > 0.5,
@@ -1134,20 +1144,15 @@ impl State {
         }
     }
 
-    /// Ash in the air round the camera (0..1) from erupting volcanoes near by, and how far to
-    /// shake the camera (rumbling and erupting ones).
+    /// Ash in the air round the camera (0..1: only inside a volcano's smoke), and how far to shake
+    /// the camera (rumbling and erupting volcanoes near by).
     fn volcanic_air(&self) -> (f32, Vec3) {
         use asc_sim::volcanism::Phase;
         let at = self.camera.position;
-        let (mut ash, mut quake) = (0.0f32, 0.0f32);
+        let ash = self.effects.smoke_at(at);
+        let mut quake = 0.0f32;
         for a in &self.volcanism.active {
             let d = Vec2::new(a.summit.x - at.x, a.summit.z - at.z).length();
-            let plume = match a.phase {
-                Phase::Erupting => a.strength,
-                Phase::Waning => a.strength * 0.8,
-                _ => 0.0,
-            };
-            ash = ash.max(plume * (1.0 - smoothstep(a.radius, a.radius * 5.0, d)));
             let shaking = match a.phase {
                 Phase::Rumbling => a.strength * 0.5,
                 Phase::Erupting => a.strength,
