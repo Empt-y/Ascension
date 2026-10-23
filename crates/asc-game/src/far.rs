@@ -58,10 +58,12 @@ pub fn compute(worldgen: &WorldGen, level: usize, rect: GridRect) -> Samples {
     let (w, h) = (size.x as usize + 2, size.y as usize + 2);
     let mut border = Vec::with_capacity(w * h);
     let mut water = Vec::with_capacity(w * h);
+    let mut ice = Vec::with_capacity(w * h);
     for z in rect.min.y - 1..=rect.max.y + 1 {
         for x in rect.min.x - 1..=rect.max.x + 1 {
-            let (height, level, lava) = worldgen.height_water_lava(x as f32 * s, z as f32 * s);
+            let (height, level, lava, ice_top) = worldgen.height_water_lava(x as f32 * s, z as f32 * s);
             border.push(height);
+            ice.push(ice_top);
             // Lava is drawn by the far water too (flagged), in its place.
             water.push(lava.map(|l| (l, true)).or(level.map(|l| (l, false))));
         }
@@ -86,8 +88,9 @@ pub fn compute(worldgen: &WorldGen, level: usize, rect: GridRect) -> Samples {
             let (fx, fz) = (x as f32 * s, z as f32 * s);
             let flow = if level.is_some() && !lava { worldgen.water_flow(fx, fz) } else { glam::Vec2::ZERO };
             out.water.push([level.unwrap_or(asc_render::clipmap::NO_WATER), flow.x, flow.y, if lava { 1.0 } else { 0.0 }]);
-            out.materials
-                .push(worldgen.surface_material_at(x as f32 * s, z as f32 * s, height, slope, level) as u8);
+            // Glaciers' snow and ice, else the ground's own surface.
+            let material = ice[(j + 1) * w + i + 1].unwrap_or_else(|| worldgen.surface_material_at(fx, fz, height, slope, level));
+            out.materials.push(material as u8);
         }
     }
     out

@@ -365,3 +365,59 @@ fn chunk_seams_are_bit_exact_on_the_gpu() {
         assert!(exact > 10, "only {exact} shared vertices between {a:?} and {b:?}");
     }
 }
+
+/// The thickest glacier ice on a coarse grid within `reach` of the origin, and where.
+fn thickest_ice(wg: &asc_world::WorldGen, reach: f32) -> (f32, f32, f32) {
+    let mut best = (0.0, 0.0, 0.0);
+    let n = (reach / 64.0) as i32;
+    for j in -n..=n {
+        for i in -n..=n {
+            let (x, z) = (i as f32 * 64.0, j as f32 * 64.0);
+            let t = wg.ice_thickness(x, z);
+            if t > best.0 {
+                best = (t, x, z);
+            }
+        }
+    }
+    best
+}
+
+#[test]
+fn cold_country_has_glaciers_with_caves_and_crevasses() {
+    let wg = asc_world::WorldGen::new(1256132528);
+    let (ice, cx, cz) = thickest_ice(&wg, 8000.0);
+    assert!(ice > 20.0, "thickest ice {ice} m");
+    let top = wg.height(cx, cz);
+    // Solid ice under the surface, no water on it, snow or ice on top.
+    let line = wg.line(cx, cz);
+    let solid_ice = (1..(ice as i32 - 1)).filter(|k| {
+        let (d, m) = line(top - *k as f32);
+        d < 0.0 && m == Material::Ice as u8
+    });
+    assert!(solid_ice.count() > (ice as usize) / 3, "little ice in the column at ({cx}, {cz})");
+    assert!(wg.water_level(cx, cz).is_none(), "water on the glacier");
+    assert!(matches!(wg.surface_material(cx, cz), Material::Snow | Material::Ice));
+    // Round it: some open space inside thick ice (caves), and crevasses cracking its surface.
+    let (mut open, mut cracked, mut columns) = (0, 0, 0);
+    for dz in -60..60 {
+        for dx in -60..60 {
+            let (x, z) = (cx + dx as f32, cz + dz as f32);
+            let t = wg.ice_thickness(x, z);
+            if t < 16.0 {
+                continue;
+            }
+            columns += 1;
+            let top = wg.height(x, z);
+            let line = wg.line(x, z);
+            if line(top - 1.5).0 > 0.0 {
+                cracked += 1;
+            }
+            if (4..(t as i32 - 2)).any(|k| line(top - k as f32).0 > 0.0) {
+                open += 1;
+            }
+        }
+    }
+    assert!(columns > 500, "only {columns} columns of thick ice");
+    assert!(open * 20 > columns, "caves in only {open} of {columns} columns");
+    assert!(cracked * 200 > columns && cracked * 8 < columns, "{cracked} of {columns} columns cracked");
+}

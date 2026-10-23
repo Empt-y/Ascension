@@ -35,6 +35,19 @@ const RIVER_MAX_CUT: f32 = 45.0;
 const LAKE_CELL: f32 = 640.0;
 const LAKE_CHANCE: f32 = 0.32;
 const LAKE_RADIUS: [f32; 2] = [30.0, 120.0];
+/// Glaciers: in cold country, ice fills the land up to this far over its smooth base level (so
+/// valleys fill and ridges stand clear; on flat arctic ground it's an ice sheet), at most
+/// `ICE_MAX` thick. Fully glaciated below `ICE_COLD` (lapsed temperature at the ice's surface),
+/// none above `ICE_WARM`: the snout of a valley glacier is where it warms up downhill.
+const ICE_ABOVE: f32 = 16.0;
+const ICE_MAX: f32 = 70.0;
+const ICE_COLD: f32 = 0.07;
+const ICE_WARM: f32 = 0.15;
+/// Snow lies on glaciers colder than this (their upper, accumulating reaches); bare ice below.
+const ICE_SNOW: f32 = 0.1;
+/// Ice this thick or more holds caves; crevasses open in ice thicker than `CREVASSE_ICE`.
+const ICE_CAVE_ICE: f32 = 14.0;
+const CREVASSE_ICE: f32 = 8.0;
 
 /// A lake basin: a bowl carved below `level`, which sits just under the lowest point of its rim so
 /// the water can't spill.
@@ -120,7 +133,7 @@ pub struct Ground {
     pub moisture: f32,
     /// Whether the surface is under the sea.
     pub underwater: bool,
-    /// 0..1 how bare volcanic ground is (ash, fresh rock): plants thin out on it.
+    /// 0..1 how bare the ground is (volcanic ash and fresh rock, glacier ice): plants thin out on it.
     pub barren: f32,
     /// 0..1 how volcanic the ground is (1 on a volcano proper): veins favour it differently.
     pub volcanic: f32,
@@ -158,13 +171,20 @@ pub struct WorldGen {
     calderas: RwLock<AHashMap<IVec2, Option<Arc<Volcano>>>>,
 }
 
-/// A column's shape: its height, natural water and lava, and volcanic ground.
+/// A column's shape: its height (the top of any ice), natural water and lava, volcanic ground,
+/// and glacier ice.
 #[derive(Clone, Copy, Debug)]
 struct Shape {
     height: f32,
     water: Option<f32>,
     lava: Option<f32>,
     volcanic: volcano::Surface,
+    /// Glacier ice over the rock (the top `ice` metres under `height`), and how deep a crevasse
+    /// cuts into it here.
+    ice: f32,
+    crevasse: f32,
+    /// Snow on the ice's surface (a glacier's colder reaches).
+    snow: bool,
 }
 
 /// Per-(x, z) values shared by every sample in a column.
@@ -187,6 +207,10 @@ struct Column {
     /// Natural lava surface over the column (a crater or a caldera's pool), if any.
     lava: Option<f32>,
     volcanic: volcano::Surface,
+    /// Glacier ice at the top of the column, a crevasse's depth, and snow on the ice.
+    ice: f32,
+    crevasse: f32,
+    ice_snow: bool,
 }
 
 fn noise(seed: i32, kind: NoiseType, freq: f32, fractal: Option<(FractalType, i32)>) -> FastNoiseLite {
@@ -310,10 +334,17 @@ impl WorldGen {
         self.shape(x, z).1
     }
 
-    /// Height, natural water and natural lava together (one evaluation).
-    pub fn height_water_lava(&self, x: f32, z: f32) -> (f32, Option<f32>, Option<f32>) {
+    /// Height, natural water and lava, and the glacier's surface material (snow or ice; `None`
+    /// without ice) together, in one evaluation (for the far terrain).
+    pub fn height_water_lava(&self, x: f32, z: f32) -> (f32, Option<f32>, Option<f32>, Option<Material>) {
         let s = self.shape_full(x, z);
-        (s.height, s.water, s.lava)
+        let ice = (s.ice > 0.3).then_some(if s.snow { Material::Snow } else { Material::Ice });
+        (s.height, s.water, s.lava, ice)
+    }
+
+    /// How thick the glacier ice is at (x, z).
+    pub fn ice_thickness(&self, x: f32, z: f32) -> f32 {
+        self.shape_full(x, z).ice
     }
 
     /// Height and natural water surface together (one evaluation instead of two).
@@ -343,7 +374,34 @@ impl WorldGen {
         } else {
             [river, lake, volcanic_water].into_iter().flatten().filter(|l| *l > h).reduce(f32::max)
         };
-        Shape { height: h, water, lava: lava.filter(|l| *l > h), volcanic }
+        let (ice, crevasse, snow) = if volcanic.strength > 0.0 || h < SEA_LEVEL { (0.0, 0.0, false) } else { self.glacier(x, z, h) };
+        // Rivers and lakes under a glacier are frozen into it.
+        let water = water.filter(|_| ice < 0.5);
+        Shape { height: h + ice, water, lava: lava.filter(|l| *l > h), volcanic, ice, crevasse, snow }
+    }
+
+    /// Glacier ice over land at `h`: its thickness, a crevasse's depth, and whether snow lies on it.
+    fn glacier(&self, x: f32, z: f32, h: f32) -> (f32, f32, bool) {
+        let base = self.continent.get_noise_2d(x, z) * 40.0 + 10.0 + self.hills.get_noise_2d(x, z) * 7.0;
+        let top = base + ICE_ABOVE;
+        if top <= h {
+            return (0.0, 0.0, false);
+        }
+        let (t0, _) = self.climate(x, z);
+        let t = t0 - (top - 20.0).max(0.0) * LAPSE;
+        let cold = smoothstep(ICE_WARM, ICE_COLD, t);
+        if cold <= 0.0 {
+            return (0.0, 0.0, false);
+        }
+        let ice = ((top - h) * cold).min(ICE_MAX);
+        // Crevasses: narrow cracks along the lines of a ridged noise, across thick ice.
+        let mut crevasse = 0.0;
+        if ice > CREVASSE_ICE {
+            let line = 1.0 - (self.dunes.get_noise_2d(x * 1.8 + 7000.0, z * 0.7) * 0.5 + 0.5);
+            let crack = smoothstep(0.07, 0.02, line);
+            crevasse = crack * ice * 0.75 * smoothstep(CREVASSE_ICE, CREVASSE_ICE * 2.0, ice);
+        }
+        (ice, crevasse, t < ICE_SNOW)
     }
 
     /// The volcano (cone or caldera) whose ground holds (x, z), if any.
@@ -657,6 +715,9 @@ impl WorldGen {
             water,
             lava: shape.lava,
             volcanic: shape.volcanic,
+            ice: shape.ice,
+            crevasse: shape.crevasse,
+            ice_snow: shape.snow,
         }
     }
 
@@ -674,7 +735,8 @@ impl WorldGen {
         // Woods thin out on steep ground.
         let forest = forest * (1.0 - smoothstep(0.75, 1.1, col.slope));
         let underwater = col.water.is_some_and(|l| l > col.height + 0.3) || col.lava.is_some();
-        let barren = col.volcanic.barren;
+        // Nothing grows on glaciers either.
+        let barren = if col.ice > 0.5 { 1.0 } else { col.volcanic.barren };
         let volcanic = col.volcanic.strength;
         Ground { height: col.height, slope: col.slope, biome, forest, temperature, moisture, underwater, barren, volcanic }
     }
@@ -701,6 +763,9 @@ impl WorldGen {
             water,
             lava: None,
             volcanic: self.volcanic_surface(x, z, height),
+            ice: 0.0,
+            crevasse: 0.0,
+            ice_snow: false,
         };
         Material::from_u8(self.material(Vec3::new(x, height - 0.5, z), &col, &[]))
     }
@@ -721,6 +786,28 @@ impl WorldGen {
         }
         let mut d = surface;
         let depth = col.height - p.y;
+        if col.ice > 0.0 && depth < col.ice {
+            // Crevasses: a slot down into the ice.
+            if depth < col.crevasse {
+                d = d.max((col.crevasse - depth).min(1.5));
+            }
+            // Ice caves: tunnels through thick ice, wider and smoother than the rock's.
+            if col.ice > ICE_CAVE_ICE && depth > 3.0 && depth < col.ice - 1.5 {
+                let a = self.cave_a.get_noise_3d(p.x * 0.6, p.y * 0.9, p.z * 0.6);
+                let b = self.cave_b.get_noise_3d(p.x * 0.6, p.y * 0.9, p.z * 0.6);
+                let room = smoothstep(3.0, 6.0, depth) * smoothstep(1.5, 4.0, col.ice - depth);
+                let tunnel = (a.abs().max(b.abs()) - 0.11 * room) * 25.0;
+                d = smooth_max(d, -tunnel, 2.5);
+            }
+            let d = d.clamp(-DENSITY_CLAMP, DENSITY_CLAMP);
+            if d >= 0.0 {
+                return (d, Material::Air as u8);
+            }
+            let m = if col.ice_snow && depth < 0.6 { Material::Snow } else { Material::Ice };
+            return (d, m as u8);
+        }
+        // Under any ice, the rock's own depth.
+        let depth = depth - col.ice;
         if depth > 2.0 || col.entrance > 0.0 {
             // Spaghetti tunnels: where two noise fields are both near zero. They pinch shut over the
             // last ~14 m below the surface, except in entrance regions, so the surface is only broken

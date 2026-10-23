@@ -57,6 +57,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         shadow = shadow_factor(in.rel, geometric);
     }
     var color = shade_terrain(s, n, in.rel, occlusion, shadow);
+    // Ice lets daylight through: its walls glow a soft blue, most where they're buried (ice caves).
+    let total = dot(in.weights_a + in.weights_b + in.weights_c + in.weights_d, vec4(1.0));
+    let ice = in.weights_c.y / max(total, 1e-4);
+    if ice > 0.0 {
+        color += vec3(0.05, 0.16, 0.26) * ice * (0.35 + 0.65 * (1.0 - occlusion)) * (0.15 + 0.85 * daylight());
+    }
 
     // Brush preview: a soft glowing rim where the surface meets the dig sphere.
     if globals.brush.w > 0.0 {
