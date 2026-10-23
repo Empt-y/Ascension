@@ -273,3 +273,38 @@ impl Default for ClientFluids {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A chunk next to simulated water is meshed here, from the simulation's cells and their
+    /// neighbours' pristine water: it should show the same water as the chunk's natural mesh.
+    #[test]
+    fn chunks_next_to_simulated_water_mesh_their_water() {
+        let world = World::new(1256132528);
+        let mut fluids = ClientFluids::new();
+        let materialised = IVec3::new(-74, -1, 54);
+        let pristine = fluid::pristine_chunk(&world.worldgen, &world.build_chunk(materialised));
+        fluids.apply(materialised, &PackedFluid::pack(&pristine));
+        for dz in -1..=1 {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let coord = materialised + IVec3::new(dx, dy, dz);
+                    let natural = world.worldgen.generate(coord);
+                    let expected = fluid::natural_mesh(&world.worldgen, &natural, &natural);
+                    let ours = fluids.mesh(&world, coord);
+                    let water = |m: &asc_world::ChunkMesh| m.vertices.iter().filter(|v| v.weights[0] > 128).count();
+                    // Vertices deep enough to be drawn (the shader fades depth 0 to clear).
+                    let visible = |m: &asc_world::ChunkMesh| {
+                        m.vertices.iter().filter(|v| v.weights[0] > 128 && v.ore[2] > 0 && v.ore[3] > 30).count()
+                    };
+                    let (e, o) = (water(&expected), water(&ours));
+                    println!("{coord}: natural {e} water vertices ({} visible), meshed here {o} ({} visible)", visible(&expected), visible(&ours));
+                    assert!(visible(&expected) == 0 || visible(&ours) * 2 > visible(&expected), "{coord}: ours aren't drawn");
+                    assert!(e == 0 || o * 2 > e, "{coord}: natural mesh has {e} water vertices, ours {o}");
+                }
+            }
+        }
+    }
+}

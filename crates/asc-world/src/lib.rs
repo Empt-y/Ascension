@@ -13,6 +13,7 @@ mod mesh;
 pub mod ores;
 mod raycast;
 pub mod volcano;
+pub mod weather;
 mod worldgen;
 
 pub use chunk::{CHUNK, ChunkCoord, ChunkData, SAMPLES, chunk_of, chunk_origin};

@@ -24,7 +24,7 @@ const SHORE_BELOW: f32 = 4.0;
 const SHORE_ABOVE: f32 = 1.0;
 /// Temperature falls by this much per metre above 20 m, so mountains grow cold belts (taiga, then
 /// tundra, then arctic snow) whatever the climate below them.
-const LAPSE: f32 = 0.0034;
+pub(crate) const LAPSE: f32 = 0.0034;
 
 /// Rivers: their surfaces step down in terraces this tall (each step a waterfall).
 const RIVER_STEP: f32 = 3.0;
@@ -316,6 +316,11 @@ impl WorldGen {
         let t = (0.5 + 0.75 * self.temperature.get_noise_2d(x, z)).clamp(0.0, 1.0);
         let m = (0.5 + 0.9 * self.moisture.get_noise_2d(x, z)).clamp(0.0, 1.0);
         (t, m)
+    }
+
+    /// The climate at (x, z) at sea level: temperature and moisture, 0..1.
+    pub fn climate_at(&self, x: f32, z: f32) -> (f32, f32) {
+        self.climate(x, z)
     }
 
     /// 1 in hot, dry desert, fading to 0 at its edges.
