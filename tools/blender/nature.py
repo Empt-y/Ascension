@@ -4,6 +4,9 @@ Run headless (tools/build_nature.py does this for you):
 
     blender --background --factory-startup --python tools/blender/nature.py -- <nature.toml> <out dir>
 
+With `burnt` after the out dir it instead writes `<id>_burnt1..3.glb` for every tree, shrub, plant and
+grass: the same plant (same builder and seed) scorched, charred and burnt out (see `BURN`).
+
 Each `[[model]]` in the spec names a builder below and a seed; the builder grows the model from a
 few organic primitives: tapered tubes for trunks and limbs, noise-displaced blobs for rocks, and
 leaf cards (double-sided quads and curved strips carrying the cut-out textures drawn by
@@ -28,7 +31,8 @@ import bpy
 from mathutils import Vector, noise
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from bl_common import MATERIALS, export, game_to_blender, material, measure, render_preview  # noqa: E402
+from bl_common import MATERIALS, export, game_to_blender, measure, render_preview  # noqa: E402
+from bl_common import material as plain_material  # noqa: E402
 
 UP = Vector((0.0, 1.0, 0.0))
 DOWN = Vector((0.0, -1.0, 0.0))
@@ -37,6 +41,44 @@ TAU = 2.0 * math.pi
 
 def g2b(p):
     return game_to_blender(p[0], p[1], p[2])
+
+
+# ---------------------------------------------------------------------------------------------
+# Burning: 0 untouched, 1 scorched (leaves browned, some fallen; bark darkened), 2 charred (most
+# leaves gone, the rest shrivelled black-brown; bark charred), 3 burnt out (no leaves, black).
+
+BURN = 0
+# Share of leaf cards left at each stage, and of grass blades (burnt grass stays as black stubble).
+BURN_KEEP = (1.0, 0.8, 0.35, 0.0)
+GRASS_KEEP = (1.0, 0.9, 0.7, 0.5)
+# The rule for the model being built: trees and shrubs lose all their leaves; grass and small
+# plants keep some as black stubble.
+KEEP = BURN_KEEP
+# Which leaf cards fall: its own sequence, so the plant itself grows the same.
+BURN_RNG = random.Random(0)
+WOOD = ("bark_", "wood_", "trunk", "branch")
+UNBURNT = ("rock", "sandstone", "snow", "ice")
+
+
+def burnt_color(name, color):
+    """A material's colour at the current burn stage: wood chars, living tissue scorches brown
+    then goes black; rock, snow and ice stay as they are."""
+    if BURN == 0 or name.startswith(UNBURNT):
+        return color
+    if name.startswith(WOOD):
+        targets = ((0.05, 0.035, 0.025, 0.5), (0.02, 0.017, 0.015, 0.85), (0.014, 0.012, 0.011, 1.0))
+    else:
+        targets = ((0.30, 0.16, 0.05, 0.7), (0.06, 0.04, 0.025, 0.85), (0.02, 0.018, 0.016, 1.0))
+    r, g, b, t = targets[BURN - 1]
+    return tuple(lerp(c, x, t) for c, x in zip(color, (r, g, b)))
+
+
+def material(name, color, roughness, metallic=0.0):
+    """`bl_common.material`, coloured for the current burn stage (charred surfaces are rough)."""
+    if BURN == 0:
+        return plain_material(name, color, roughness, metallic)
+    rough = roughness if name.startswith(UNBURNT) else max(roughness, 0.9)
+    return plain_material(f"{name}_burnt{BURN}", burnt_color(name, color), rough, metallic)
 
 
 def horizontal(angle):
@@ -104,6 +146,9 @@ class Mesh:
     def card(self, corners, mat, normals, uvs=((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))):
         """A double-sided textured quad: `corners` in (0,0) (1,0) (1,1) (0,1) texture order (or the
         given `uvs`), with `normals` (one per corner, game space) used on both sides."""
+        if BURN and BURN_RNG.random() >= KEEP[BURN]:
+            # Burnt off.
+            return
         if self.mid:
             self.cards += 1
             if self.cards % self.card_keep:
@@ -382,6 +427,11 @@ def card_material(name, texture, tint=(1.0, 1.0, 1.0), roughness=0.75):
     if BUILDING_MID and os.path.isfile(os.path.join(TEXTURES, f"{texture}_mid.png")):
         texture, name = f"{texture}_mid", f"{name}_mid"
         MID_TEXTURES_USED.append(texture)
+    if BURN:
+        # Scorched brown, then shrivelled dark (burnt-out plants keep no cards).
+        burn_tint = ((1.2, 0.55, 0.2), (0.35, 0.22, 0.12), (0.1, 0.08, 0.06))[BURN - 1]
+        tint = tuple(t * b for t, b in zip(tint, burn_tint))
+        name = f"{name}_burnt{BURN}"
     key = f"card_{name}"
     if key in MATERIALS:
         return MATERIALS[key]
@@ -454,6 +504,9 @@ def hang_cards(m, rng, twigs, mat, size, per_twig, center, radii, outward=0.6, j
 def strip_card(m, points, widths, sides, mat, normals):
     """A curved double-sided textured strip: the texture's v runs along `points` (0 at the first),
     u across `widths[i]` along `sides[i]`. `normals[i]` is used at both edges of row i."""
+    if BURN and BURN_RNG.random() >= KEEP[BURN]:
+        # Burnt off.
+        return
     n = len(points)
     for facing_sign in (1.0, -1.0):
         rows = []
@@ -1381,12 +1434,46 @@ def build_impostor(name, center, size):
     return m.finish()
 
 
+def burnt(spec, out_dir, only):
+    """The burnt stages of every tree, shrub, plant and grass (no previews or far/mid versions)."""
+    global BURN, KEEP
+    report_path = os.path.join(out_dir, "report_burnt.json")
+    report = {}
+    for model in spec["model"]:
+        if model["kind"] not in ("tree", "shrub", "plant", "grass") or (only and model["id"] not in only):
+            continue
+        for stage in (1, 2, 3):
+            name = f"{model['id']}_burnt{stage}"
+            BURN = stage
+            KEEP = BURN_KEEP if model["kind"] in ("tree", "shrub") else GRASS_KEEP
+            # A small tuft can lose every blade by chance: try another fall until something's left.
+            for attempt in range(8):
+                bpy.ops.wm.read_factory_settings(use_empty=True)
+                MATERIALS.clear()
+                BURN_RNG.seed(f"{model['id']}/{stage}/{attempt}")
+                m = Mesh(name)
+                BUILDERS[model["builder"]](m, random.Random(model["seed"]))
+                obj = m.finish()
+                report[name] = measure(obj)
+                if report[name]["triangles"] > 0:
+                    break
+            export(obj, os.path.join(out_dir, f"{name}.glb"))
+            print(f"PART {name}: {report[name]['triangles']} triangles", flush=True)
+    BURN, KEEP = 0, BURN_KEEP
+    with open(report_path, "w") as f:
+        json.dump(report, f, indent=2)
+    print("PARTS DONE", flush=True)
+
+
 def main():
     argv = sys.argv[sys.argv.index("--") + 1 :]
     spec_path, out_dir = argv[0], argv[1]
     only = set(argv[2].split(",")) if len(argv) > 2 and argv[2] else None
     with open(spec_path, "rb") as f:
         spec = tomllib.load(f)
+    if len(argv) > 2 and argv[2] == "burnt":
+        burnt(spec, out_dir, set(argv[3].split(",")) if len(argv) > 3 and argv[3] else None)
+        return
     os.makedirs(os.path.join(out_dir, "previews"), exist_ok=True)
     report_path = os.path.join(out_dir, "report.json")
     report = {}
