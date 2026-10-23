@@ -1,6 +1,6 @@
 //! Particle effects the client makes from what the server says: a volcano's smoke billowing out of
 //! its crater (pale steam while it rumbles, dark ash clouds while it erupts), lava spraying up in
-//! the crater, bombs glowing as they fly, and flames and smoke over burning ground.
+//! the crater, bombs glowing as they fly, and flames over burning ground.
 
 use asc_render::{PARTICLE_GLOW, PARTICLE_SMOKE, Particle};
 use asc_sim::volcanism::{Phase, Report};
@@ -49,7 +49,6 @@ struct Spark {
 
 /// Fire: flames a second per burning cell (catching, then burning hard), drawn within `FIRE_REACH`.
 const FLAMES_PER_SECOND: [f32; 2] = [2.0, 5.0];
-const FIRE_SMOKE_PER_SECOND: f32 = 0.35;
 const FIRE_REACH: f32 = 300.0;
 
 /// Ground-hugging cloud puffs a second per pyroclastic flow, and no more puffs in all than this
@@ -63,9 +62,9 @@ pub struct Effects {
     /// Flow puffs still owed.
     owed_flow: f32,
     sparks: Vec<Spark>,
-    /// Burning ground: fire cell and stage (1 catching, 2 burning hard), and fractions of a flame
-    /// and a smoke puff still owed to it.
-    burning: std::collections::HashMap<IVec2, (u8, f32, f32)>,
+    /// Burning ground: fire cell and stage (1 catching, 2 burning hard), and the part of a flame
+    /// still owed to it.
+    burning: std::collections::HashMap<IVec2, (u8, f32)>,
     /// Fractions of a puff or spark still owed to each volcano (by index) at its rate.
     owed: Vec<(f32, f32)>,
     rng: u64,
@@ -82,7 +81,7 @@ impl Effects {
         for &(c, stage) in changed {
             let cell = IVec2::from_array(c);
             if (1..=2).contains(&stage) {
-                self.burning.entry(cell).or_insert((stage, 0.0, 0.0)).0 = stage;
+                self.burning.entry(cell).or_insert((stage, 0.0)).0 = stage;
             } else {
                 self.burning.remove(&cell);
             }
@@ -94,7 +93,7 @@ impl Effects {
         let mut near: Vec<(f32, IVec2, u8)> = self
             .burning
             .iter()
-            .map(|(c, (stage, _, _))| {
+            .map(|(c, (stage, _))| {
                 let centre = (c.as_vec2() + 0.5) * asc_sim::fire::CELL;
                 (centre.distance_squared(Vec2::new(camera.x, camera.z)), *c, *stage)
             })
@@ -115,7 +114,7 @@ impl Effects {
             .collect()
     }
 
-    /// Flames and smoke over the burning ground near `camera`.
+    /// Flames over the burning ground near `camera` (no smoke: up close it filled the screen).
     fn fire(&mut self, dt: f32, worldgen: &asc_world::WorldGen, camera: Vec3) {
         let cells: Vec<IVec2> = self.burning.keys().copied().collect();
         for cell in cells {
@@ -123,9 +122,8 @@ impl Effects {
             if centre.distance_squared(Vec2::new(camera.x, camera.z)) > FIRE_REACH * FIRE_REACH {
                 continue;
             }
-            let (stage, owed_flame, owed_smoke) = self.burning[&cell];
+            let (stage, owed_flame) = self.burning[&cell];
             let mut flames = owed_flame + FLAMES_PER_SECOND[stage as usize - 1] * dt;
-            let mut smoke = owed_smoke + FIRE_SMOKE_PER_SECOND * stage as f32 * dt;
             while flames >= 1.0 {
                 flames -= 1.0;
                 let at = centre + Vec2::new(self.random() - 0.5, self.random() - 0.5) * asc_sim::fire::CELL;
@@ -140,27 +138,7 @@ impl Effects {
                 };
                 self.sparks.push(spark);
             }
-            while smoke >= 1.0 {
-                smoke -= 1.0;
-                let at = centre + Vec2::new(self.random() - 0.5, self.random() - 0.5) * asc_sim::fire::CELL;
-                let ground = worldgen.height(at.x, at.y) + 2.0 * stage as f32;
-                let puff = Puff {
-                    at: Vec3::new(at.x, ground, at.y),
-                    from: ground,
-                    vel: Vec3::new(0.0, 2.0 + 2.0 * self.random(), 0.0),
-                    size: 2.0 + 2.0 * self.random(),
-                    age: 0.0,
-                    dark: 0.55 + 0.25 * self.random(),
-                    opacity: 0.2 + 0.1 * self.random(),
-                    seed: self.random() * 100.0,
-                    spin: self.random() * std::f32::consts::TAU,
-                    lift: 1.0,
-                    max: PUFF_MAX,
-                    hot: 0.3,
-                };
-                self.puffs.push(puff);
-            }
-            self.burning.insert(cell, (stage, flames, smoke));
+            self.burning.insert(cell, (stage, flames));
         }
     }
 
