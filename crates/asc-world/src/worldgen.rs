@@ -150,6 +150,8 @@ pub struct WorldGen {
     cavern: FastNoiseLite,
     /// 2D mask choosing the rare places where tunnels may reach the surface.
     entrance: FastNoiseLite,
+    /// 2D mask choosing where caves run at all (about a third of the ground).
+    cave_region: FastNoiseLite,
     /// Low-frequency woodland mask: woods where it's high (with clearings and edges).
     forest: FastNoiseLite,
     /// Climate: very low-frequency temperature and moisture.
@@ -253,6 +255,7 @@ impl WorldGen {
             cave_b: noise(seed.wrapping_add(6), OpenSimplex2, 0.012, None),
             cavern: noise(seed.wrapping_add(8), OpenSimplex2, 0.007, Some((FBm, 2))),
             entrance: noise(seed.wrapping_add(9), OpenSimplex2, 0.004, None),
+            cave_region: noise(seed.wrapping_add(16), OpenSimplex2, 0.0025, Some((FBm, 2))),
             forest: noise(seed.wrapping_add(10), OpenSimplex2, 0.0028, Some((FBm, 3))),
             temperature: noise(seed.wrapping_add(11), OpenSimplex2, 0.00005, Some((FBm, 2))),
             moisture: noise(seed.wrapping_add(12), OpenSimplex2, 0.00008, Some((FBm, 2))),
@@ -412,10 +415,10 @@ impl WorldGen {
     /// The volcano (cone or caldera) whose ground holds (x, z), if any.
     fn volcano_at(&self, p: Vec2) -> Option<Arc<Volcano>> {
         let caldera = self.caldera_in((p / volcano::CALDERA_CELL).floor().as_ivec2());
-        if let Some(c) = caldera.as_ref().filter(|c| c.center.distance(p) < c.radius * 1.3) {
+        if let Some(c) = caldera.as_ref().filter(|c| c.center.distance(p) < c.radius * volcano::REACH) {
             return Some(c.clone());
         }
-        self.cone_in((p / volcano::CONE_CELL).floor().as_ivec2()).filter(|c| c.center.distance(p) < c.radius * 1.3)
+        self.cone_in((p / volcano::CONE_CELL).floor().as_ivec2()).filter(|c| c.center.distance(p) < c.radius * volcano::REACH)
     }
 
     fn caldera_in(&self, cell: IVec2) -> Option<Arc<Volcano>> {
@@ -818,7 +821,9 @@ impl WorldGen {
             // last ~14 m below the surface, except in entrance regions, so the surface is only broken
             // by the occasional cave mouth rather than trenches everywhere.
             let near_surface = smoothstep(4.0, 14.0, depth);
-            let width = 0.085 * near_surface.max(col.entrance * smoothstep(-2.0, 2.0, depth));
+            // Caves run only in scattered cave regions (a third of the ground or so).
+            let region = smoothstep(0.15, 0.4, self.cave_region.get_noise_2d(p.x, p.z));
+            let width = 0.085 * region * near_surface.max(col.entrance * smoothstep(-2.0, 2.0, depth));
             if width > 0.0 {
                 let a = self.cave_a.get_noise_3d(p.x, p.y * 1.25, p.z);
                 let b = self.cave_b.get_noise_3d(p.x, p.y * 1.25, p.z);
@@ -927,7 +932,7 @@ impl WorldGen {
             (VolcanoKind::Super, Some(FeatureKind::Geyser)) => Some(Material::Pumice),
             (VolcanoKind::Super, _) if v.d < 0.62 => Some(if patch > 0.7 { Material::Sulfur } else { Material::Ash }),
             (VolcanoKind::Super, _) if v.d < 0.8 => Some(Material::Basalt),
-            (VolcanoKind::Active, _) if v.strength > 0.4 => Some(if patch > 0.6 { Material::Basalt } else { Material::Ash }),
+            (VolcanoKind::Active, _) if v.strength > 0.4 => Some(if patch > 0.75 { Material::Basalt } else { Material::Ash }),
             (VolcanoKind::Dormant, _) if v.d < 0.45 => Some(if patch > 0.5 { Material::Pumice } else { Material::Basalt }),
             _ => None,
         }

@@ -141,7 +141,7 @@ fn vs_main(in: VsIn) -> VsOut {
         // itself shadowed it (dark bases on sunlit tufts).
         out.sun = sun_light() * shadow_factor_foliage(place(in, false) + sun_dir() * FOLIAGE_SHADOW_LIFT, n);
         let edge = smoothstep(globals.far.x * 0.75, globals.far.x * 0.97, length(out.rel.xz));
-        out.fog = vec4(sky_base(normalize(out.rel)), max(fog_amount(out.rel), edge));
+        out.fog = vec4(sky_base(normalize(out.rel)), max(fog_total(out.rel), edge));
         if underwater() {
             out.fog = vec4(water_fog_color(), water_fog_amount(out.rel));
         }

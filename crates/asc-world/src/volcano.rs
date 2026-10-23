@@ -8,6 +8,9 @@
 
 use glam::Vec2;
 
+/// How far (in radii) a volcano's shape reaches: it eases back to the land between its foot and
+/// here.
+pub const REACH: f32 = 1.3;
 /// Cones: one chance per cell this wide.
 pub const CONE_CELL: f32 = 3072.0;
 const CONE_CHANCE: f32 = 0.15;
@@ -75,7 +78,9 @@ pub struct Volcano {
     /// An active crater's lava lake.
     pub lava: Option<f32>,
     pub features: Vec<Feature>,
-    /// Which way a caldera's floor falls (unit), toward its lake.
+    /// Which way a caldera's floor falls (unit), toward its lake; for an active cone, which way
+    /// its rim is breached (the notch its lava spills through when it erupts, and the channel
+    /// down the flank below it). Zero for dormant cones.
     pub tilt: Vec2,
 }
 
@@ -131,6 +136,12 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// How far a volcano's shape (beyond its foot, `d` radii out) still holds: 1 on it, easing to 0
+/// by `REACH`.
+fn foot(d: f32) -> f32 {
+    1.0 - smoothstep(0.95, REACH, d)
+}
+
 fn smooth_max(a: f32, b: f32, k: f32) -> f32 {
     let h = (0.5 + 0.5 * (a - b) / k).clamp(0.0, 1.0);
     b + (a - b) * h + k * h * (1.0 - h)
@@ -144,7 +155,8 @@ pub fn place_cone(seed: i32, cell: glam::IVec2, land: impl Fn(Vec2) -> f32, cald
         return None;
     }
     let radius = r.range(CONE_RADIUS);
-    let margin = CONE_RADIUS[1] * 1.3;
+    // Its reach (`REACH` radii) stays inside the cell, where it's looked up.
+    let margin = CONE_RADIUS[1] * REACH + 10.0;
     let center = cell.as_vec2() * CONE_CELL + Vec2::splat(margin) + Vec2::new(r.next(), r.next()) * (CONE_CELL - 2.0 * margin);
     if caldera.is_some_and(|c| c.center.distance(center) < c.radius + radius * 1.3) {
         return None;
@@ -160,6 +172,7 @@ pub fn place_cone(seed: i32, cell: glam::IVec2, land: impl Fn(Vec2) -> f32, cald
     let rim = base + height * (1.0 - crater_radius / radius).powf(1.6);
     let crater_depth = 35.0 + 40.0 * r.next();
     let crater_floor = rim - crater_depth;
+    let breach = if active { Vec2::from_angle(r.next() * std::f32::consts::TAU) } else { Vec2::ZERO };
     let (kind, lava, crater_lake) = if active {
         (VolcanoKind::Active, Some(crater_floor + 6.0 + 6.0 * r.next()), None)
     } else {
@@ -177,7 +190,7 @@ pub fn place_cone(seed: i32, cell: glam::IVec2, land: impl Fn(Vec2) -> f32, cald
         crater_lake,
         lava,
         features: Vec::new(),
-        tilt: Vec2::ZERO,
+        tilt: breach,
     })
 }
 
@@ -188,10 +201,11 @@ pub fn place_caldera(seed: i32, cell: glam::IVec2, land: impl Fn(Vec2) -> f32, f
         return None;
     }
     let radius = r.range(CALDERA_RADIUS);
-    let margin = CALDERA_RADIUS[1] * 1.1;
+    let margin = CALDERA_RADIUS[1] * REACH + 10.0;
     let center = cell.as_vec2() * CALDERA_CELL + Vec2::splat(margin) + Vec2::new(r.next(), r.next()) * (CALDERA_CELL - 2.0 * margin);
     let base = land(center);
-    if !(crate::SEA_LEVEL + 2.0..110.0).contains(&base) {
+    // High enough that its sunken floor and lake stay above the sea.
+    if !(crate::SEA_LEVEL + FLOOR_DROP + FLOOR_TILT..110.0).contains(&base) {
         return None;
     }
     let mut v = Volcano {
@@ -247,7 +261,7 @@ impl Volcano {
     pub fn shape(&self, p: Vec2, h: f32, noise: impl Fn(Vec2) -> f32) -> Option<Shaped> {
         let dist = p.distance(self.center);
         let d = dist / self.radius;
-        if d >= 1.3 {
+        if d >= REACH {
             return None;
         }
         Some(match self.kind {
@@ -271,7 +285,12 @@ impl Volcano {
             let t = dist / rc;
             cone = cone.min(self.crater_floor + (rim - self.crater_floor) * t.powf(2.5));
         }
-        let height = if in_crater { cone } else { smooth_max(h, cone, 15.0) };
+        if let Some(lava) = self.lava.filter(|_| self.tilt != Vec2::ZERO) {
+            cone = cone.min(self.channel(rel, rim, lava));
+        }
+        // Built up over the land, easing back to the land itself round its foot (a smooth max with
+        // the cone alone would lift low ground round it up to its base).
+        let height = if in_crater { cone } else { h + (smooth_max(h, cone, 15.0) - h) * foot(d) };
         let water = self.crater_lake.filter(|l| in_crater && *l > height);
         let lava = self.lava.filter(|l| in_crater && *l > height);
         let strength = 1.0 - smoothstep(0.75, 1.1, d);
@@ -289,6 +308,30 @@ impl Volcano {
         }
     }
 
+    /// The breach in an active cone's rim and the lava channel down the flank below it: a U-shaped
+    /// trench whose floor drops through the rim to just over the lava lake (so the lake spills
+    /// through when it rises), then follows the flank down, shallowing. `rel` from the centre.
+    fn channel(&self, rel: Vec2, rim: f32, lava: f32) -> f32 {
+        let along = rel.dot(self.tilt);
+        let across = rel.perp_dot(self.tilt).abs();
+        let rc = self.crater_radius;
+        // From the lava lake's edge in the crater, through the rim and down the flank.
+        if along < rc * 0.35 || along > self.radius * 0.8 {
+            return f32::MAX;
+        }
+        let width = 7.0 + 0.025 * along;
+        if across > width {
+            return f32::MAX;
+        }
+        let slope = self.base + self.height * (1.0 - along / self.radius).max(0.0).powf(1.6);
+        // Deep enough at the rim to come down to the lava (plus a step), easing to 4 m down the flank.
+        let notch = (rim - (lava + 1.5)).max(4.0);
+        let depth = 4.0 + (notch - 4.0) * smoothstep(rc * 2.2, rc, along);
+        // In the crater the floor stays at the notch's level, just over the lake.
+        let floor = if along < rc { lava + 1.5 } else { slope.min(rim) - depth };
+        floor + depth * (across / width).powi(2)
+    }
+
     fn caldera(&self, p: Vec2, d: f32, h: f32, noise: impl Fn(Vec2) -> f32) -> Shaped {
         let rim_top = self.base + self.height;
         let strength = 1.0 - smoothstep(0.85, 1.15, d);
@@ -297,7 +340,8 @@ impl Volcano {
             // The outer slope, rising gently to the rim.
             let rise = self.height * smoothstep(1.0, RIM, d).powf(1.3);
             surface.barren = 0.3 * (1.0 - smoothstep(RIM, 0.8, d));
-            return Shaped { height: smooth_max(h, self.base + rise, 20.0), surface, ..Default::default() };
+            let height = h + (smooth_max(h, self.base + rise, 20.0) - h) * foot(d);
+            return Shaped { height, surface, ..Default::default() };
         }
         // The floor, and the wall down to it from the rim.
         let floor = floor_height(self, p, &noise);

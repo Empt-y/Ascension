@@ -196,8 +196,9 @@ mod tests {
     fn nodes_are_deterministic_and_sit_on_ore() {
         let worldgen = WorldGen::new(1337);
         let (mut surface_count, mut deep_count) = (0, 0);
-        for i in 0..60 {
-            let column = IVec2::new(i * 5 - 150, (i * 17) % 90 - 45);
+        // (Cave-floor nodes need caves, which run only in some regions: look over a wide area.)
+        for i in 0..240 {
+            let column = IVec2::new(i * 23 - 2760, (i * 37) % 400 - 200);
             let s = surface(7, &worldgen, column);
             assert_eq!(s, surface(7, &worldgen, column));
             for n in &s {
@@ -215,7 +216,7 @@ mod tests {
             }
             deep_count += d.len();
         }
-        println!("{surface_count} outcrops, {deep_count} underground nodes in 60 columns");
+        println!("{surface_count} outcrops, {deep_count} underground nodes in 240 columns");
         assert!(surface_count > 0 && deep_count > 0);
     }
 }

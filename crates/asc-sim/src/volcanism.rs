@@ -21,7 +21,7 @@ use crate::fluids::FluidSim;
 /// Ticks from one eruption's start to the next (40–70 minutes at 20 ticks a second).
 const ERUPTION_CYCLE: [u64; 2] = [48_000, 84_000];
 pub const RUMBLE_TICKS: u64 = 1200;
-pub const ERUPT_TICKS: u64 = 2400;
+pub const ERUPT_TICKS: u64 = 4800;
 pub const WANE_TICKS: u64 = 1200;
 /// Geysers blow every 3–6 minutes, for 12 seconds.
 const GEYSER_CYCLE: [u64; 2] = [3600, 7200];
@@ -33,8 +33,11 @@ const FOLLOW: f32 = 6000.0;
 const NEAR: f32 = 3000.0;
 const POUR_REACH: f32 = 2500.0;
 const GEYSER_REACH: f32 = 500.0;
-/// Lava poured at each vent per tick at full strength (a cell is `FULL`).
-const VENT_FLOW: u16 = 900;
+/// Lava welling up into the crater per tick at full strength, at each of `WELLS` places across
+/// its lake (a cell is `FULL`): the lake rises, spills through the rim's breach and runs down the
+/// channel below it.
+const WELL_FLOW: u16 = 2500;
+const WELLS: usize = 6;
 /// A bomb thrown every this many ticks, and what one does to a player it lands beside.
 const BOMB_EVERY: u64 = 6;
 const BOMB_REACH: f32 = 6.0;
@@ -75,7 +78,7 @@ struct Tracked {
     /// A stable identity for its clock (its centre, to the metre).
     key: [i32; 2],
     summit: Vec3,
-    /// Where lava spills over the rim when it erupts.
+    /// Where lava wells up into the crater's lake when it erupts.
     vents: Vec<IVec3>,
     /// Geysers (calderas): vent cell, clock period and offset.
     geysers: Vec<(IVec3, u64, u64)>,
@@ -197,22 +200,19 @@ impl Volcanism {
         let rim_height = |a: f32, r: f32| wg.height(c.x + a.cos() * r, c.y + a.sin() * r);
         let summit = Vec3::new(c.x, rim_height(0.0, v.crater_radius), c.y);
         let mut vents = Vec::new();
-        if v.kind == VolcanoKind::Active {
-            // The rim's two lowest points (well apart), just outside it.
-            let mut rim: Vec<(f32, f32)> =
-                (0..48).map(|i| i as f32 / 48.0 * std::f32::consts::TAU).map(|a| (rim_height(a, v.crater_radius), a)).collect();
-            rim.sort_by(|a, b| a.0.total_cmp(&b.0));
-            let mut picked: Vec<f32> = Vec::new();
-            for (_, a) in rim {
-                let apart = picked.iter().all(|p| (((a - p).rem_euclid(std::f32::consts::TAU)) - std::f32::consts::PI).abs() < 2.1);
-                if picked.len() < 2 && apart {
-                    picked.push(a);
-                }
-            }
-            for a in picked {
-                let r = v.crater_radius * 1.15;
+        if let Some(lava) = v.lava.filter(|_| v.kind == VolcanoKind::Active) {
+            // Wells over the lava lake, just over its surface (it rises), and across the breach
+            // in the rim, where it spills over the lip and down the channel.
+            for k in 0..WELLS {
+                let a = k as f32 / WELLS as f32 * std::f32::consts::TAU;
+                let r = v.crater_radius * 0.25;
                 let (x, z) = (c.x + a.cos() * r, c.y + a.sin() * r);
-                vents.push(IVec3::new(x.round() as i32, (wg.height(x, z) + 1.5).ceil() as i32, z.round() as i32));
+                vents.push(IVec3::new(x.round() as i32, lava.ceil() as i32, z.round() as i32));
+            }
+            let across = Vec2::new(-v.tilt.y, v.tilt.x);
+            for k in -2..=2 {
+                let at = c + v.tilt * v.crater_radius * 0.9 + across * (k as f32 * 2.5);
+                vents.push(IVec3::new(at.x.round() as i32, (wg.height(at.x, at.y) + 1.0).ceil() as i32, at.y.round() as i32));
             }
         }
         let geysers = v
@@ -289,7 +289,7 @@ impl Volcanism {
             let pour = Vec2::new(t.summit.x, t.summit.z).distance(p) < POUR_REACH;
             if phase == Phase::Erupting && pour {
                 for &vent in &t.vents {
-                    fluids.pour(world, vent, FluidKind::Lava, (VENT_FLOW as f32 * strength.max(0.2)) as u16);
+                    fluids.pour(world, vent, FluidKind::Lava, (WELL_FLOW as f32 * strength.max(0.2)) as u16);
                 }
                 if ticks.is_multiple_of(BOMB_EVERY) {
                     throws.push((t.summit, t.volcano.crater_radius, strength));

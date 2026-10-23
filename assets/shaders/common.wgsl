@@ -151,10 +151,18 @@ fn sky_base(dir: vec3<f32>) -> vec3<f32> {
     col += glow_col * (pow(mu, 8.0) * 0.35 + pow(mu, 64.0) * 0.8) * (day * 0.6 + dusk);
     let a = ash();
     if a > 0.0 {
-        let cloud = vec3(0.12, 0.10, 0.085) * (0.15 + 0.85 * day) + vec3(0.25, 0.06, 0.02) * (1.0 - smoothstep(-0.3, 0.3, dir.y)) * 0.5;
+        // (Lit dull red from below at night, by the lava; by day just grey-brown.)
+        let cloud = vec3(0.12, 0.10, 0.085) * (0.15 + 0.85 * day)
+            + vec3(0.25, 0.06, 0.02) * (1.0 - smoothstep(-0.3, 0.3, dir.y)) * 0.5 * (1.0 - day);
         col = mix(col, cloud, a * 0.9);
     }
     return col;
+}
+
+// Fog with any volcanic ash in the air: ash thickens it (at its worst, most of the way to opaque
+// a kilometre out). Everything fogged should use this.
+fn fog_total(rel: vec3<f32>) -> f32 {
+    return max(fog_amount(rel), 1.0 - exp(-length(rel) * 0.0015 * ash()));
 }
 
 // Fraction of light lost to fog along a camera-relative ray (analytic exponential height fog).
@@ -194,8 +202,7 @@ fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
     }
     let dir = normalize(rel);
     let fog_col = sky_base(dir);
-    // Ash thickens the air: a few hundred metres at its worst.
-    let f = max(fog_amount(rel), 1.0 - exp(-length(rel) * 0.006 * ash()));
+    let f = fog_total(rel);
     let horizontal = length(rel.xz);
     let edge = smoothstep(globals.far.x * 0.75, globals.far.x * 0.97, horizontal);
     return mix(color, fog_col, max(f, edge));
@@ -334,10 +341,11 @@ fn terrain_surface(wa: vec4<f32>, wb: vec4<f32>, wc: vec4<f32>, wd: vec4<f32>, o
     let ice = mix(vec3(0.50, 0.68, 0.86), vec3(0.62, 0.78, 0.92), broad);
     let sandstone = mix(vec3(0.44, 0.28, 0.16), vec3(0.56, 0.38, 0.23), broad);
 
-    let basalt = mix(vec3(0.045, 0.045, 0.05), vec3(0.08, 0.075, 0.075), broad);
+    let basalt = mix(vec3(0.022, 0.022, 0.025), vec3(0.04, 0.037, 0.037), broad);
     let obsidian = vec3(0.015, 0.014, 0.02);
     let pumice = mix(vec3(0.42, 0.40, 0.37), vec3(0.55, 0.52, 0.48), broad);
-    let ash = mix(vec3(0.12, 0.115, 0.11), vec3(0.2, 0.19, 0.18), broad);
+    // Fresh ash is dark: charcoal grey, a little warm.
+    let ash = mix(vec3(0.05, 0.046, 0.043), vec3(0.08, 0.072, 0.066), broad);
     let sulfur = mix(vec3(0.62, 0.52, 0.06), vec3(0.78, 0.68, 0.14), broad);
     let total = max(dot(wa, vec4(1.0)) + dot(wb, vec4(1.0)) + dot(wc, vec4(1.0)) + dot(wd, vec4(1.0)), 1e-4);
     var s: Surface;
