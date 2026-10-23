@@ -37,7 +37,7 @@ use targets::{BLOOM_LEVELS, CASCADES, SHADOW_LAYERS, SHADOW_SIZE, Targets};
 
 /// With far terrain on, everything has faded into the sky by this distance (metres).
 pub const FAR_RANGE: f32 = 14_000.0;
-const DEFAULT_FOG_DENSITY: f32 = 0.00045;
+const DEFAULT_FOG_DENSITY: f32 = 0.0003;
 /// Samples per pixel for the scene pass (4x MSAA smooths silhouettes and geometric edges).
 pub const DEFAULT_MSAA: u32 = 4;
 
@@ -971,7 +971,9 @@ impl Renderer {
         let daylight = smoothstep(-0.08, 0.25, frame.sun_dir.y);
         // Open the exposure up only once it's actually getting dark, not while a low sun is still up.
         let night = 1.0 - smoothstep(-0.15, 0.03, frame.sun_dir.y);
-        let exposure = 1.0 + night;
+        // (Below 1 by day: full sun pushed light colours up into the flat top of the tonemap curve,
+        // which read as washed out.)
+        let exposure = 0.8 + 1.2 * night;
         let time = self.start.elapsed().as_secs_f32();
         let mut lights: Vec<PointLight> = frame.lights.clone();
         lights.sort_by(|a, b| {

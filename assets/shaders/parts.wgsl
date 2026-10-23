@@ -130,7 +130,7 @@ fn vs_main(in: VsIn) -> VsOut {
     if material.extra.w > 0.5 {
         let n = normalize(out.normal);
         let sky_col = sky_base(normalize(vec3(n.x, max(n.y, 0.2), n.z)));
-        let sky_amb = mix(vec3(dot(sky_col, vec3(0.2126, 0.7152, 0.0722))), sky_col, 0.6) * 0.8;
+        let sky_amb = mix(vec3(dot(sky_col, vec3(0.2126, 0.7152, 0.0722))), sky_col, 0.6) * 0.65;
         let ground_amb = vec3(0.10, 0.08, 0.06) * (0.15 + 0.85 * daylight());
         let moon = vec3(0.05, 0.065, 0.12) * (1.0 - daylight()) * max(dot(n, -sun_dir()), 0.0);
         out.ambient = mix(ground_amb, sky_amb, n.y * 0.5 + 0.5) + moon;
@@ -183,7 +183,8 @@ fn shade_foliage(in: VsOut, albedo: vec3<f32>, n: vec3<f32>, occlusion: f32) -> 
     let wrap = max(dot(n, l) + 0.45, 0.0) / 1.45;
     let through = pow(max(dot(-v, l), 0.0), 3.0) * 0.55 + 0.12;
     let sun = in.sun * (wrap + through * vec3(1.0, 1.08, 0.75)) * mix(0.35, 1.0, occlusion);
-    let color = albedo * (sun + in.ambient * occlusion + point_light(in.rel, n, 0.5));
+    // (The leaf textures are light: toned down here, or crowns read a pale mint in full sun.)
+    let color = albedo * 0.75 * (sun + in.ambient * occlusion + point_light(in.rel, n, 0.5));
     return mix(color, in.fog.rgb, in.fog.a);
 }
 

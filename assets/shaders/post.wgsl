@@ -1,4 +1,5 @@
-// HDR -> display: exposure, ACES tonemap, a little extra saturation. The sRGB swapchain encodes.
+// HDR -> display: exposure, ACES tonemap, a gentle contrast curve and a little extra saturation.
+// The sRGB swapchain encodes.
 
 @group(1) @binding(0) var hdr: texture_2d<f32>;
 @group(1) @binding(1) var bloom: texture_2d<f32>;
@@ -52,7 +53,11 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
         let lobe = max(-limit, min(max3(lobe_rgb), 0.0)) * globals.upscale.y;
         col = clamp((lobe * (n + w + e + s) + col) / (4.0 * lobe + 1.0), vec3(0.0), vec3(1.0));
     }
+    // A gentle S-curve on top of ACES (it flattens the midtones, which read as washed out), and
+    // a little extra saturation.
+    let curved = col * col * (3.0 - 2.0 * col);
+    col = mix(col, curved, 0.35);
     let luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
-    col = max(mix(vec3(luma), col, 1.12), vec3(0.0));
+    col = clamp(mix(vec3(luma), col, 1.22), vec3(0.0), vec3(1.0));
     return vec4(col, 1.0);
 }

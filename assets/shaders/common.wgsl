@@ -316,11 +316,12 @@ fn terrain_surface(wa: vec4<f32>, wb: vec4<f32>, wc: vec4<f32>, wd: vec4<f32>, o
     let fine = 0.5 + tone;
 
     let soil = mix(vec3(0.22, 0.13, 0.07), vec3(0.30, 0.19, 0.10), broad);
-    let lush = mix(vec3(0.10, 0.34, 0.06), vec3(0.24, 0.42, 0.05), broad);
+    // (Real grass is darker than it looks: much brighter and full sun turns it neon.)
+    let lush = mix(vec3(0.045, 0.15, 0.03), vec3(0.11, 0.21, 0.035), broad);
     // Grass gives way to soil on slopes.
     let grass = mix(soil, lush, smoothstep(0.62, 0.82, n.y));
     let rock = mix(vec3(0.24, 0.23, 0.24), vec3(0.36, 0.32, 0.29), broad);
-    let sand = mix(vec3(0.34, 0.28, 0.18), vec3(0.40, 0.33, 0.22), broad);
+    let sand = mix(vec3(0.27, 0.22, 0.14), vec3(0.33, 0.27, 0.18), broad);
     let snow = vec3(0.85, 0.88, 0.95);
     // Ore: clumps and streaks of the mineral through darker host rock.
     let ore_color = ore.rgb * ore.rgb;
