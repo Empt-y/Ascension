@@ -181,8 +181,9 @@ pub const DEPTH_SCALE: f32 = 50.0;
 pub const DEPTH_OFFSET: f32 = 0.5;
 /// Natural water fills open cells this far below the natural ground (caves deeper stay dry).
 pub const NATURAL_DEPTH: f32 = 8.0;
-/// Columns of a fluid mesh's surface grid: the padded chunk's and one more all round.
-pub const RING: usize = crate::chunk::SAMPLES + 2;
+/// Columns of a fluid mesh's surface grid: the padded chunk's and `MARGIN` more all round.
+pub const MARGIN: usize = 2;
+pub const RING: usize = crate::chunk::SAMPLES + 2 * MARGIN;
 
 /// What a fluid mesh is built from.
 pub struct FluidInput<'a> {
@@ -192,7 +193,7 @@ pub struct FluidInput<'a> {
     pub kind: &'a [u8],
     pub amount: &'a [u16],
     /// The water surface over each column of the padded chunk and the ring round it (`RING²`,
-    /// padded column x at x + 1), NaN where there's none.
+    /// padded column x at x + MARGIN), NaN where there's none.
     pub surface: &'a [f32],
     /// The river's flow per padded column (`SAMPLES²`), for natural water.
     pub flow: Option<&'a [glam::Vec2]>,
@@ -221,14 +222,17 @@ pub fn mesh_fluid(input: &FluidInput) -> crate::ChunkMesh {
     let terrain = input.terrain;
     let base = ChunkData::sample_pos(terrain.coord, 0, 0, 0);
     let ring = |x: usize, z: usize| input.surface[x + RING * z];
-    // Smoothed surfaces of the padded columns; dry columns beside water take it on (into the bank).
+    // Smoothed surfaces of the padded columns (with their neighbours); dry columns up to two
+    // from water take it on, so its buried edge ends well inside the bank (one column in, the end
+    // of it could show where the bank is only a little higher than the water).
     let mut surface = vec![f32::NAN; SAMPLES * SAMPLES];
     for z in 0..SAMPLES {
         for x in 0..SAMPLES {
-            let here = ring(x + 1, z + 1);
+            let here = ring(x + MARGIN, z + MARGIN);
+            let reach = if here.is_nan() { 2 } else { 1 };
             let (mut sum, mut n) = (0.0, 0);
-            for dz in 0..3 {
-                for dx in 0..3 {
+            for dz in MARGIN - reach..=MARGIN + reach {
+                for dx in MARGIN - reach..=MARGIN + reach {
                     let s = ring(x + dx, z + dz);
                     if !s.is_nan() && (here.is_nan() || (s - here).abs() < 1.5) {
                         sum += s;
@@ -241,9 +245,15 @@ pub fn mesh_fluid(input: &FluidInput) -> crate::ChunkMesh {
             }
         }
     }
-    // The ground under each column's water: the highest crossing from solid (below) to open
-    // (above) no more than a little over the surface (a bank's ground is just above it).
+    // The ground under each column's water: going down through open cells from a little over the
+    // surface (a bank's ground is just above it), the first solid. If the column is solid there
+    // already (the ground is higher, or this chunk is buried) or open all the way down, the
+    // natural ground, which is then above or below the chunk: never the chunk's own top face or a
+    // buried cave's floor, or buried chunks under water would fill their cells.
     let mut ground = vec![f32::NAN; SAMPLES * SAMPLES];
+    // Whether the water reaches that ground (water in the open cell over it, or a bank at about
+    // the water's height): only then is the ground under it filled.
+    let mut reached = vec![false; SAMPLES * SAMPLES];
     for z in 0..SAMPLES {
         for x in 0..SAMPLES {
             let s = surface[x + SAMPLES * z];
@@ -251,13 +261,15 @@ pub fn mesh_fluid(input: &FluidInput) -> crate::ChunkMesh {
                 continue;
             }
             let d = |y: usize| terrain.density[ChunkData::index(x, y, z)];
-            let mut g = if d(SAMPLES - 1) < 0.0 { base.y + SAMPLES as f32 } else { base.y - 64.0 };
-            for y in (1..SAMPLES).rev() {
-                let (lo, hi) = (d(y - 1), d(y));
-                if lo < 0.0 && hi >= 0.0 {
-                    let at = base.y + (y - 1) as f32 + lo / (lo - hi);
-                    if at <= s + 3.0 {
-                        g = at;
+            let mut g = terrain.surface[x + SAMPLES * z];
+            let start = ((s + 3.0 - base.y).floor() as i32).min(SAMPLES as i32 - 1);
+            if start >= 1 && d(start as usize) >= 0.0 {
+                for y in (1..=start as usize).rev() {
+                    let (lo, hi) = (d(y - 1), d(y));
+                    if lo < 0.0 {
+                        g = base.y + (y - 1) as f32 + lo / (lo - hi);
+                        let over = ChunkData::index(x, y, z);
+                        reached[x + SAMPLES * z] = input.kind[over] == FluidKind::Water as u8 || g > s - 0.5;
                         break;
                     }
                 }
@@ -272,7 +284,7 @@ pub fn mesh_fluid(input: &FluidInput) -> crate::ChunkMesh {
     for z in 0..SAMPLES {
         for x in 0..SAMPLES {
             let column = x + SAMPLES * z;
-            let (s, g) = (surface[column], ground[column]);
+            let (s, g, reached) = (surface[column], ground[column], reached[column]);
             let mut below_filled = false;
             for y in 0..SAMPLES {
                 let i = ChunkData::index(x, y, z);
@@ -288,10 +300,12 @@ pub fn mesh_fluid(input: &FluidInput) -> crate::ChunkMesh {
                     let solid = terrain.density[i] < 0.0;
                     if kind == FluidKind::Water {
                         if wy + 0.5 <= s - 1.0 { 1.0 } else { top }
-                    } else if solid && wy + 0.5 >= g - 1.5 {
+                    } else if solid && reached && wy + 0.5 >= g - 1.5 && wy - 0.5 < g {
+                        // Just under the ground the water reaches: its edges are buried there.
                         top
-                    } else if !solid && below_filled && wy + 0.5 > s {
-                        // The cell holding a surface smoothed up above its column's own water.
+                    } else if !solid && below_filled {
+                        // Open over water or the buried edge, under the (smoothed) surface: water
+                        // too, or a thin sheet would lie on the ground under the real surface.
                         top
                     } else {
                         0.0
@@ -324,10 +338,12 @@ pub fn mesh_fluid(input: &FluidInput) -> crate::ChunkMesh {
         let corners = [(0, 0, (1.0 - tx) * (1.0 - tz)), (1, 0, tx * (1.0 - tz)), (0, 1, (1.0 - tx) * tz), (1, 1, tx * tz)];
         for (dx, dz, w) in corners {
             let c = (x0 + dx).min(SAMPLES - 1) + SAMPLES * (z0 + dz).min(SAMPLES - 1);
-            if surface[c].is_nan() || w <= 0.0 {
+            if w <= 0.0 {
                 continue;
             }
-            depth += (surface[c] - ground[c]) * w;
+            // Columns with no water near them count as dry: the faces where the water's buried
+            // edge ends, next to them, fade out with the shore.
+            depth += (if surface[c].is_nan() { -1.0 } else { surface[c] - ground[c] }) * w;
             if let Some(f) = input.flow {
                 flow += f[c] * w;
             }
@@ -389,10 +405,12 @@ pub fn natural_mesh(worldgen: &WorldGen, natural: &ChunkData, terrain: &ChunkDat
     let mut surface = vec![f32::NAN; RING * RING];
     for z in 0..RING {
         for x in 0..RING {
-            surface[x + RING * z] = if (1..=SAMPLES).contains(&x) && (1..=SAMPLES).contains(&z) {
-                natural.water[(x - 1) + SAMPLES * (z - 1)]
+            let inside = MARGIN..SAMPLES + MARGIN;
+            surface[x + RING * z] = if inside.contains(&x) && inside.contains(&z) {
+                natural.water[(x - MARGIN) + SAMPLES * (z - MARGIN)]
             } else {
-                worldgen.water_level(base.x + x as f32 - 1.0, base.z + z as f32 - 1.0).unwrap_or(f32::NAN)
+                let (wx, wz) = (base.x + x as f32 - MARGIN as f32, base.z + z as f32 - MARGIN as f32);
+                worldgen.water_level(wx, wz).unwrap_or(f32::NAN)
             };
         }
     }
@@ -492,6 +510,33 @@ impl PackedFluid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chunks_buried_under_water_have_no_water_mesh() {
+        let worldgen = WorldGen::new(1337);
+        let mut checked = 0;
+        for i in 0..4000 {
+            let (x, z) = ((i % 64) as f32 * 37.0 - 1200.0, (i / 64) as f32 * 41.0 - 1300.0);
+            let (h, level) = worldgen.height_and_water(x, z);
+            if level.is_none() {
+                continue;
+            }
+            // A chunk whose top is well under the bed (deeper than natural water reaches into caves).
+            let coord = crate::chunk_of(Vec3::new(x, h - NATURAL_DEPTH - 40.0, z));
+            if ((coord.y + 1) * CHUNK) as f32 > h - NATURAL_DEPTH - 2.0 {
+                continue;
+            }
+            let natural = worldgen.generate(coord);
+            let mesh = natural_mesh(&worldgen, &natural, &natural);
+            let water = mesh.vertices.iter().filter(|v| v.weights[0] > 128).count();
+            assert_eq!(water, 0, "water inside the ground under ({x}, {z}), chunk {coord}");
+            checked += 1;
+            if checked >= 12 {
+                break;
+            }
+        }
+        assert!(checked >= 6, "only {checked} buried chunks found");
+    }
 
     #[test]
     fn natural_water_meshes_at_its_surface_with_the_river_flow() {

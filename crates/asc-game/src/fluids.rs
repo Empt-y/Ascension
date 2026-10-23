@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use ahash::AHashMap;
 use asc_render::Renderer;
-use asc_world::fluid::{self, CELLS, FULL, FluidChunk, FluidKind, PackedFluid, RING, cell_index};
+use asc_world::fluid::{self, CELLS, FULL, FluidChunk, FluidKind, PackedFluid, MARGIN, RING, cell_index};
 use asc_world::{CHUNK, ChunkCoord, ChunkData, SAMPLES, World};
 use glam::{IVec3, Vec3};
 
@@ -141,7 +141,8 @@ impl ClientFluids {
         // Every cell the mesh reads: the padded samples, the ring of columns round them and a few
         // cells above and below (for the water surfaces).
         let base = coord * CHUNK;
-        let lo = base - IVec3::new(2, 7, 2);
+        // Padded sample 0 is at base - 1; the ring reaches MARGIN columns further.
+        let lo = base - IVec3::new(1 + MARGIN as i32, 7, 1 + MARGIN as i32);
         let size = IVec3::new(RING as i32, SAMPLES as i32 + 12, RING as i32);
         for cz in (lo.z.div_euclid(CHUNK))..=((lo.z + size.z - 1).div_euclid(CHUNK)) {
             for cy in (lo.y.div_euclid(CHUNK))..=((lo.y + size.y - 1).div_euclid(CHUNK)) {

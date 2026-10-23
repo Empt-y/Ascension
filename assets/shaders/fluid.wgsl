@@ -73,19 +73,36 @@ fn lava_color(world: vec3<f32>, t: f32) -> vec3<f32> {
 @fragment
 fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let world = in.rel + globals.camera.xyz;
+    // The triangle's own normal (vertex normals tilt at the rim, where the surface bends into the
+    // bank, and would read as falling water in a strip along every shore). Derivatives, so before
+    // any return or discard.
+    let face_y = abs(normalize(cross(dpdx(in.rel), dpdy(in.rel))).y);
     if in.lava > 0.5 {
         // Lava is opaque and gives its own light (it blooms); fog still covers it at a distance.
         return vec4(debug_hot(apply_fog(lava_color(world, globals.camera.w), in.rel), 7.0), 1.0);
     }
     let dist = length(in.rel);
     let v = -in.rel / dist;
-    // The mesh normal points out of the water; seen from inside it, flip it towards the eye.
-    var n = normalize(in.normal);
+    // The mesh normal points out of the water; seen from inside it, flip it towards the eye. At
+    // the shore the surface bends down into the bank (its buried edge): keep it level there, or
+    // the rim catches the sun and sky in a bright line.
+    let shore = smoothstep(0.0, 0.45, in.depth);
+    if shore < 0.01 {
+        // Clear: don't write depth either (the bank beyond shows through).
+        discard;
+    }
+    // Anything short of a falling sheet is levelled: water lies flat, and the mesh's tilt at the
+    // rim is only the 1 m cells bending down into the bank (left in, it draws the sun's glint as
+    // lines along the shore). Ripples alone shape the surface.
+    let mesh_n = normalize(in.normal);
+    let sheet = 1.0 - smoothstep(0.3, 0.6, face_y);
+    let keep = sheet * smoothstep(0.0, 0.8, in.depth);
+    var n = normalize(mix(vec3(0.0, sign(mesh_n.y + 1e-4), 0.0), mesh_n, keep));
     // Ripples on surfaces facing up (not on the sides of falling water).
     let flat = smoothstep(0.6, 0.9, abs(n.y));
     // Rivers carry their flow; simulated water runs downhill, the way its surface tilts (the
     // normal leans that way).
-    let tilt = vec2(n.x, n.z);
+    let tilt = vec2(mesh_n.x, mesh_n.z);
     let tilted = tilt / max(length(tilt), 1e-3) * min(length(tilt) * 12.0, 2.0);
     let given = clamp(in.flow.z, 0.0, 1.0);
     let drift = mix(tilted, in.flow.xy, given);
@@ -101,18 +118,18 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         * (0.25 + 0.75 * daylight());
     var color = mix(body, reflected, fresnel);
     let h = normalize(v + sun_dir());
-    color += sun_light() * pow(max(dot(n, h), 0.0), 300.0) * 4.0 * flat;
+    // (Not in the shallows, where the mesh bends into the bank and the glint would trace it.)
+    color += sun_light() * pow(max(dot(n, h), 0.0), 300.0) * 4.0 * flat * smoothstep(0.6, 1.6, in.depth);
     // White water: where the surface falls steeply (waterfalls, rapids), and in patches drifting
     // down fast rivers.
     let speed = length(drift);
     // (Not at the shore, where the water's buried edges meet the bank.)
-    let falling = (1.0 - smoothstep(0.55, 0.92, abs(normalize(in.normal).y))) * smoothstep(0.4, 1.2, in.depth);
+    let falling = (1.0 - smoothstep(0.25, 0.5, face_y)) * smoothstep(0.8, 1.6, in.depth);
     let churn = value_noise(vec3((world.xz - drift * globals.camera.w * 1.4) * 0.7, globals.camera.w * 0.6));
-    let foam = max(falling * (0.55 + 0.45 * churn), smoothstep(0.72, 0.92, churn) * smoothstep(0.8, 1.8, speed) * 0.3);
+    let foam = max(falling * (0.55 + 0.45 * churn), smoothstep(0.8, 0.97, churn) * smoothstep(1.0, 2.0, speed) * 0.15);
     let white = vec3(0.8, 0.85, 0.88) * (0.25 + 0.75 * daylight()) * (0.6 + 0.4 * max(sun_dir().y, 0.0));
     color = mix(color, white, foam);
     // Clear at the shore (depth 0), so the edge follows the depth's smooth line, not the mesh's.
-    let shore = smoothstep(0.0, 0.45, in.depth);
     let alpha = clamp(0.72 + 0.15 * smoothstep(0.5, 4.0, in.depth) + 0.15 * fresnel + foam * 0.4, 0.0, 0.97) * shore;
     return vec4(debug_hot(apply_fog(color, in.rel), 6.0), alpha);
 }
