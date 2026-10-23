@@ -47,9 +47,17 @@ const FLAMES_PER_SECOND: [f32; 2] = [2.0, 5.0];
 const FIRE_SMOKE_PER_SECOND: f32 = 0.35;
 const FIRE_REACH: f32 = 300.0;
 
+/// Ground-hugging cloud puffs a second per pyroclastic flow and per blast, and no more puffs in
+/// all than this while they make them.
+const FLOW_PUFFS_PER_SECOND: f32 = 40.0;
+const BLAST_PUFFS_PER_SECOND: f32 = 120.0;
+const FLOW_PUFFS_CAP: usize = 3000;
+
 #[derive(Default)]
 pub struct Effects {
     puffs: Vec<Puff>,
+    /// Flow and blast puffs still owed.
+    owed_flow: f32,
     sparks: Vec<Spark>,
     /// Burning ground: fire cell and stage (1 catching, 2 burning hard), and fractions of a flame
     /// and a smoke puff still owed to it.
@@ -149,9 +157,59 @@ impl Effects {
         }
     }
 
+    /// Pyroclastic flows: a churning dark cloud boiling along the ground behind each front.
+    /// Blasts: dust thrown up along the shockwave's ring, mostly on the side it was thrown to.
+    fn flows_and_blasts(&mut self, dt: f32, report: &Report, worldgen: &asc_world::WorldGen) {
+        let sources = report.flows.len() + report.blasts.len();
+        if sources == 0 {
+            self.owed_flow = 0.0;
+            return;
+        }
+        let rate = FLOW_PUFFS_PER_SECOND * report.flows.len() as f32 + BLAST_PUFFS_PER_SECOND * report.blasts.len() as f32;
+        self.owed_flow = (self.owed_flow + rate * dt).min(FLOW_PUFFS_CAP.saturating_sub(self.puffs.len()) as f32);
+        while self.owed_flow >= 1.0 {
+            self.owed_flow -= 1.0;
+            let pick = ((self.random() * sources as f32) as usize).min(sources - 1);
+            let (at, vel, size) = if let Some(f) = report.flows.get(pick) {
+                if f.front >= f.length {
+                    continue;
+                }
+                // Anywhere in the deadly body behind the front, across its width.
+                let along = (f.front - self.random() * 350.0).max(0.0);
+                let half = f.width * 0.5 * (0.25 + 0.75 * (along / f.length).clamp(0.0, 1.0));
+                let p = Vec2::new(f.origin.x, f.origin.z) + f.dir * along + f.dir.perp() * (self.random() - 0.5) * 2.0 * half;
+                let ground = worldgen.height(p.x, p.y);
+                let forward = f.dir * (20.0 + 15.0 * self.random());
+                let at = Vec3::new(p.x, ground + 5.0 + self.random() * 25.0, p.y);
+                (at, Vec3::new(forward.x, 3.0 + 5.0 * self.random(), forward.y), 25.0 + 25.0 * self.random())
+            } else {
+                let b = &report.blasts[pick - report.flows.len()];
+                let wide = if self.random() < 0.75 { 1.0 } else { std::f32::consts::PI };
+                let dir = Vec2::from_angle(b.dir.to_angle() + (self.random() - 0.5) * 2.0 * wide);
+                let p = Vec2::new(b.center.x, b.center.z) + dir * b.radius;
+                let ground = worldgen.height(p.x, p.y);
+                let out = dir * 30.0;
+                (Vec3::new(p.x, ground + 10.0, p.y), Vec3::new(out.x, 8.0 + 10.0 * self.random(), out.y), 30.0 + 30.0 * self.random())
+            };
+            let puff = Puff {
+                at,
+                from: at.y,
+                vel,
+                size,
+                age: 0.0,
+                dark: 0.75 + 0.25 * self.random(),
+                opacity: 0.35 + 0.2 * self.random(),
+                seed: self.random() * 100.0,
+                spin: self.random() * std::f32::consts::TAU,
+            };
+            self.puffs.push(puff);
+        }
+    }
+
     /// Step `dt` seconds on from what the server last reported.
     pub fn update(&mut self, dt: f32, report: &Report, worldgen: &asc_world::WorldGen, camera: Vec3) {
         self.fire(dt, worldgen, camera);
+        self.flows_and_blasts(dt, report, worldgen);
         self.owed.resize(report.active.len(), (0.0, 0.0));
         for (i, a) in report.active.iter().enumerate() {
             let (smoke, dark, sparks) = match a.phase {

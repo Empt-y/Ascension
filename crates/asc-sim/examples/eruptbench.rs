@@ -17,7 +17,7 @@ fn main() {
     let player = Vec3::new(x, wg.height(x, z) + 1.0, z);
     let mut volcanism = Volcanism::new(seed);
     let mut fluids = FluidSim::new();
-    volcanism.force(&world, player, 0);
+    volcanism.force(&world, player, 0, asc_sim::volcanism::Kind::Natural);
     let (mut v_ms, mut f_ms, mut worst) = (0.0f64, 0.0f64, 0.0f64);
     for ticks in 0..(RUMBLE_TICKS + asc_sim::volcanism::ERUPT_TICKS + 600) {
         let t0 = Instant::now();

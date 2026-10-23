@@ -17,7 +17,7 @@ fn main() {
     let player = Vec3::new(v.center.x + v.radius * 0.4, 200.0, v.center.y);
     let mut volcanism = Volcanism::new(seed);
     let mut fluids = FluidSim::new();
-    volcanism.force(&world, player, 0);
+    volcanism.force(&world, player, 0, asc_sim::volcanism::Kind::Natural);
     for t in RUMBLE_TICKS..RUMBLE_TICKS + ticks {
         volcanism.tick(&world, &mut fluids, player, t);
         fluids.tick(&world);

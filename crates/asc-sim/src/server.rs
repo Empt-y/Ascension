@@ -152,6 +152,8 @@ pub struct Server {
     pub fluid_sim: crate::fluids::FluidSim,
     volcanism: crate::volcanism::Volcanism,
     fire: crate::fire::Fire,
+    /// Where pyroclastic flows and blasts have passed.
+    scars: Vec<crate::volcanism::Scar>,
     next_stash: u32,
     seed: i32,
     save_dir: PathBuf,
@@ -239,6 +241,7 @@ impl Server {
             fluid_sim,
             volcanism: crate::volcanism::Volcanism::new(seed),
             fire,
+            scars: loaded.as_ref().map_or_else(Vec::new, |g| g.scars.clone()),
             next_stash,
             seed,
             save_dir,
@@ -273,6 +276,7 @@ impl Server {
             vitals: p.vitals,
             stashes: self.stashes.iter().map(|s| (s.id, Vec3::from(s.at))).collect(),
             fire: self.fire.stages(self.sim.ticks),
+            scars: self.scars.clone(),
             fluids: {
                 // In coordinate order: the same state always makes the same message.
                 let mut f: Vec<_> = self
@@ -320,6 +324,16 @@ impl Server {
         for (amount, cause) in events.hurt {
             let outcome = self.player.vitals.hurt(amount, cause);
             self.apply(outcome);
+        }
+        // A blast's collapsed flank: the terrain cut away for good.
+        for op in events.edits {
+            let dirty = self.world.edits.push(op);
+            let _ = dirty;
+            self.outbox.push(ServerMsg::Edited(op));
+        }
+        for scar in events.scars {
+            self.scars.push(scar);
+            self.outbox.push(ServerMsg::Scar(scar));
         }
         // Fire: bombs and spilled lava set what grows where they land alight; it spreads.
         let ticks = self.sim.ticks;
@@ -491,11 +505,11 @@ impl Server {
                 self.sim.time_of_day = t.rem_euclid(1.0);
                 self.outbox.push(ServerMsg::Time { ticks: self.sim.ticks, time_of_day: self.sim.time_of_day });
             }
-            ClientMsg::Erupt => {
+            ClientMsg::Erupt(kind) => {
                 if !self.player.cheats && self.validate {
                     return;
                 }
-                match self.volcanism.force(&self.world, self.player.feet, self.sim.ticks) {
+                match self.volcanism.force(&self.world, self.player.feet, self.sim.ticks, kind) {
                     Some(at) => {
                         log::info!("forced an eruption at {at}");
                         self.outbox.push(ServerMsg::Notice(format!("Eruption started at ({:.0}, {:.0}, {:.0})", at.x, at.y, at.z)));
@@ -741,6 +755,7 @@ impl Server {
                 f
             },
             burnt: self.fire.stages(self.sim.ticks).into_iter().map(|(c, _)| c).collect(),
+            scars: self.scars.clone(),
         }
     }
 

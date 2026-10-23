@@ -350,6 +350,8 @@ pub struct Scatter {
     removed: HashSet<NodeId>,
     /// Burning or burnt ground: fire cell and stage (1 scorched .. 3 burnt out).
     fire: HashMap<IVec2, u8>,
+    /// Where pyroclastic flows and blasts have passed: plants there are burnt out.
+    scars: Vec<asc_sim::volcanism::Scar>,
     last_center: Option<IVec2>,
     stats: ScatterStats,
 }
@@ -402,6 +404,7 @@ impl Scatter {
             colliders: HashMap::new(),
             removed: HashSet::new(),
             fire: HashMap::new(),
+            scars: Vec::new(),
             last_center: None,
             stats: ScatterStats::default(),
         }
@@ -482,9 +485,11 @@ impl Scatter {
         let removed = &self.removed;
         let kept: Vec<&Placed> = raw.iter().filter(|p| keep(world, structures, removed, p)).collect();
         // Plants on burning or burnt ground show their burnt stage.
+        let scarred = |p: &Placed| self.scars.iter().any(|s| s.contains(Vec2::new(p.position.x, p.position.z)));
         let model = |p: &Placed| {
             let cell = asc_sim::fire::cell_of(p.position.x, p.position.z);
-            match (self.fire.get(&cell), self.config.burnt.get(&p.model)) {
+            let stage = if scarred(p) { Some(&3) } else { self.fire.get(&cell) };
+            match (stage, self.config.burnt.get(&p.model)) {
                 (Some(&stage), Some(stages)) if (1..=3).contains(&stage) => stages[stage as usize - 1],
                 _ => p.model,
             }
@@ -579,6 +584,13 @@ impl Scatter {
             let centre = (cell.as_vec2() + 0.5) * asc_sim::fire::CELL;
             self.invalidate(Vec3::new(centre.x, 0.0, centre.y), asc_sim::fire::CELL);
         }
+    }
+
+    /// A pyroclastic flow or blast has passed: what grew there is burnt out.
+    pub fn add_scar(&mut self, scar: asc_sim::volcanism::Scar) {
+        let (centre, radius) = scar.bounds();
+        self.scars.push(scar);
+        self.invalidate(Vec3::new(centre.x, 0.0, centre.y), radius);
     }
 
     /// Take a node out of the world (it has been mined).

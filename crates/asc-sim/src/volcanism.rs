@@ -1,5 +1,12 @@
 //! Volcanoes over time: active cones erupt now and then, and calderas' geysers blow.
 //!
+//! Some eruptions are worse. About a third send pyroclastic flows racing down the mountain (a
+//! ground-hugging avalanche of hot ash, death to anyone it catches), and about one in twelve opens
+//! with a lateral blast like Mount St Helens': the flank on its breach side collapses (the
+//! terrain is cut away for good, leaving a horseshoe crater) and a shockwave races out at the
+//! speed of sound, lethal for kilometres in front of the mountain. Flows and blasts leave scars
+//! where nothing survives.
+//!
 //! Each active cone keeps its own clock, worked out from the seed and the tick count (so nothing
 //! about it needs saving): a long quiet spell, then a rumbling warning, an eruption and a waning.
 //! Erupting, it pours lava out of vents at the low points of its crater rim, which runs down the
@@ -26,6 +33,107 @@ pub const WANE_TICKS: u64 = 1200;
 /// Geysers blow every 3–6 minutes, for 12 seconds.
 const GEYSER_CYCLE: [u64; 2] = [3600, 7200];
 const GEYSER_BLOW: u64 = 240;
+/// Pyroclastic flows and lateral blasts (see the module doc).
+const FLOW_CHANCE: f32 = 0.35;
+const BLAST_CHANCE: f32 = 0.08;
+/// A flow's speed at first (m/s; it slows as it spreads), how far it runs (in cone radii), how
+/// wide it gets at its end (m), and how deep its deadly front is (m).
+const FLOW_SPEED: f32 = 45.0;
+const FLOW_REACH: [f32; 2] = [4.0, 6.0];
+const FLOW_WIDTH: f32 = 260.0;
+const FLOW_FRONT: f32 = 350.0;
+/// A flow's cloud is deadly up to this high over the ground.
+const FLOW_HEIGHT: f32 = 60.0;
+/// The blast: shockwave speed (m/s), lethal reach in front of the mountain (within
+/// `BLAST_SECTOR` radians of its direction) and behind it, and painful a little beyond.
+const SHOCK_SPEED: f32 = 340.0;
+const BLAST_REACH: f32 = 3000.0;
+const BLAST_BEHIND: f32 = 800.0;
+const BLAST_SECTOR: f32 = 1.2;
+const LETHAL: i32 = 1_000_000;
+
+/// Ground where a flow or blast passed (plants there are dead and gone).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Scar {
+    Flow { origin: Vec2, dir: Vec2, length: f32, width: f32 },
+    Blast { center: Vec2, dir: Vec2 },
+}
+
+impl Scar {
+    /// A circle round it (centre, radius).
+    pub fn bounds(&self) -> (Vec2, f32) {
+        match *self {
+            Scar::Flow { origin, dir, length, width } => (origin + dir * length * 0.5, length * 0.5 + width),
+            Scar::Blast { center, .. } => (center, BLAST_REACH),
+        }
+    }
+
+    pub fn contains(&self, p: Vec2) -> bool {
+        match *self {
+            Scar::Flow { origin, dir, length, width } => {
+                let rel = p - origin;
+                let along = rel.dot(dir);
+                (0.0..=length).contains(&along) && rel.perp_dot(dir).abs() < flow_half_width(along, length, width)
+            }
+            Scar::Blast { center, dir } => {
+                let rel = p - center;
+                rel.length() < blast_reach(rel, dir) * 0.85
+            }
+        }
+    }
+}
+
+/// Half a flow's width `along` metres down it (narrow at the summit, spreading).
+fn flow_half_width(along: f32, length: f32, width: f32) -> f32 {
+    width * 0.5 * (0.25 + 0.75 * (along / length).clamp(0.0, 1.0))
+}
+
+/// How far the blast is lethal in the direction of `rel` (from its centre).
+fn blast_reach(rel: Vec2, dir: Vec2) -> f32 {
+    let off = rel.normalize_or_zero().dot(dir).clamp(-1.0, 1.0).acos();
+    let front = 1.0 - ((off - BLAST_SECTOR * 0.6) / (BLAST_SECTOR * 0.4)).clamp(0.0, 1.0);
+    BLAST_BEHIND + (BLAST_REACH - BLAST_BEHIND) * front
+}
+
+/// A pyroclastic flow on its way down.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Flow {
+    pub origin: Vec3,
+    pub dir: Vec2,
+    /// How far its front has got, and how far it will.
+    pub front: f32,
+    pub length: f32,
+    pub width: f32,
+}
+
+/// A lateral blast's shockwave.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Blast {
+    pub center: Vec3,
+    pub dir: Vec2,
+    /// How far the shockwave has got.
+    pub radius: f32,
+}
+
+/// The worst an eruption will do: a lateral blast (its direction) and flows (when, and which way).
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Plan {
+    blast: Option<Vec2>,
+    flows: Vec<(u64, Vec2)>,
+}
+
+/// What a forced eruption should do (cheats).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Kind {
+    /// Whatever the eruption's own plan says.
+    #[default]
+    Natural,
+    /// Pyroclastic flows.
+    Flows,
+    /// A lateral blast (and flows).
+    Blast,
+}
+
 /// Volcanoes followed within this distance of the player, and told about within `NEAR`. Their
 /// lava only pours, and geysers only blow, where the player could see it (simulating them further
 /// off would only cost time).
@@ -68,6 +176,8 @@ pub struct Activity {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Report {
     pub active: Vec<Activity>,
+    pub flows: Vec<Flow>,
+    pub blasts: Vec<Blast>,
     /// Bombs in the air: where, and how big (0 smallest .. `BOMB_SIZES` - 1).
     pub bombs: Vec<(Vec3, u8)>,
     /// Blowing geysers: vent and strength.
@@ -104,14 +214,21 @@ pub struct Events {
     pub notices: Vec<String>,
     /// Where bombs landed (they set what grows there alight).
     pub landed: Vec<Vec3>,
+    /// Terrain blown away (a blast's collapsed flank).
+    pub edits: Vec<asc_world::EditOp>,
+    /// New scars (flows and blasts), to keep and tell clients about.
+    pub scars: Vec<Scar>,
 }
 
 pub struct Volcanism {
     tracked: Vec<Tracked>,
     /// Where (and when) the tracked list was last looked up.
     refreshed: Option<(Vec2, u64)>,
-    /// Eruptions brought forward (cheats): volcano key and the tick it started rumbling.
-    forced: Vec<([i32; 2], u64)>,
+    /// Eruptions brought forward (cheats): volcano key, the tick it started rumbling, and what it
+    /// should do.
+    forced: Vec<([i32; 2], u64, Kind)>,
+    flows: Vec<(u64, Flow)>,
+    blasts: Vec<(u64, Blast)>,
     /// Geysers brought forward: vent and tick.
     forced_geysers: Vec<(IVec3, u64)>,
     bombs: Vec<Bomb>,
@@ -158,6 +275,8 @@ impl Volcanism {
             refreshed: None,
             forced: Vec::new(),
             forced_geysers: Vec::new(),
+            flows: Vec::new(),
+            blasts: Vec::new(),
             bombs: Vec::new(),
             rng: seed as u32 as u64 ^ 0x6572_7570,
             seed,
@@ -172,19 +291,93 @@ impl Volcanism {
 
     /// The phase of tracked volcano `t` at `ticks`.
     fn phase(&self, t: &Tracked, ticks: u64) -> (Phase, f32) {
-        if t.volcano.kind != VolcanoKind::Active {
-            return (Phase::Quiet, 0.0);
+        match self.clock(t, ticks) {
+            Some((into, _, _)) => phase_at(into),
+            None => (Phase::Quiet, 0.0),
         }
-        if let Some((_, start)) = self.forced.iter().find(|(k, _)| *k == t.key)
+    }
+
+    /// Where tracked volcano `t` is in its cycle at `ticks`: ticks into it, which cycle it is (for
+    /// its plan), and what a forced eruption should do. `None` for anything but an active cone.
+    fn clock(&self, t: &Tracked, ticks: u64) -> Option<(u64, u64, Kind)> {
+        if t.volcano.kind != VolcanoKind::Active {
+            return None;
+        }
+        if let Some((_, start, kind)) = self.forced.iter().find(|(k, _, _)| *k == t.key)
             && ticks >= *start
             && ticks - start < RUMBLE_TICKS + ERUPT_TICKS + WANE_TICKS
         {
-            return phase_at(ticks - start);
+            return Some((ticks - start, *start, *kind));
         }
         let h = hash(self.seed, t.key, 0x6379_636c);
         let period = ERUPTION_CYCLE[0] + ((ERUPTION_CYCLE[1] - ERUPTION_CYCLE[0]) as f32 * unit(h)) as u64;
         let offset = (period as f32 * unit(h.rotate_left(17))) as u64;
-        phase_at((ticks + offset) % period)
+        Some(((ticks + offset) % period, (ticks + offset) / period, Kind::Natural))
+    }
+
+    /// What eruption `cycle` of tracked volcano `t` will do, beyond lava and bombs.
+    fn plan(&self, t: &Tracked, cycle: u64, kind: Kind) -> Plan {
+        let h = hash(self.seed, t.key, 0x706c_616e ^ cycle.wrapping_mul(0x2545_F491_4F6C_DD1D));
+        let (roll_blast, roll_flow) = (unit(h), unit(h.rotate_left(21)));
+        let blast = match kind {
+            Kind::Blast => true,
+            Kind::Flows => false,
+            Kind::Natural => roll_blast < BLAST_CHANCE,
+        };
+        let flows = blast || kind == Kind::Flows || (kind == Kind::Natural && roll_flow < FLOW_CHANCE);
+        // Through the weak side: the breach.
+        let breach = if t.volcano.tilt == Vec2::ZERO { Vec2::X } else { t.volcano.tilt };
+        let mut plan = Plan { blast: blast.then_some(breach), flows: Vec::new() };
+        if flows {
+            let count = 1 + (unit(h.rotate_left(33)) * 2.99) as u64;
+            for k in 0..count {
+                let a = unit(h.rotate_left(40 + k as u32 * 5)) * std::f32::consts::TAU;
+                // A blast's flows pour out through the opened flank.
+                let dir = if blast { Vec2::from_angle(breach.to_angle() + (unit(h ^ k) - 0.5) * 1.2) } else { Vec2::from_angle(a) };
+                plan.flows.push((RUMBLE_TICKS + 200 + k * 700, dir));
+            }
+        }
+        plan
+    }
+
+    /// Start what eruption plans call for at `into` ticks into tracked volcano `i`'s cycle.
+    #[allow(clippy::too_many_arguments)]
+    fn begin(&mut self, i: usize, into: u64, cycle: u64, kind: Kind, ticks: u64, world: &World, events: &mut Events) {
+        let t = &self.tracked[i];
+        let plan = self.plan(t, cycle, kind);
+        let (v, summit) = (t.volcano.clone(), t.summit);
+        let c = Vec2::new(summit.x, summit.z);
+        if let Some(dir) = plan.blast
+            && into == RUMBLE_TICKS
+        {
+            // The flank collapses: a horseshoe cut out of the summit and the side facing `dir`.
+            for k in 0..4 {
+                let along = (0.05 + 0.16 * k as f32) * v.radius;
+                let at = c + dir * along;
+                let y = summit.y - v.height * (0.15 + 0.13 * k as f32);
+                let radius = v.radius * (0.4 - 0.06 * k as f32);
+                events.edits.push(asc_world::EditOp {
+                    center: Vec3::new(at.x, y, at.y),
+                    radius,
+                    kind: asc_world::EditKind::Dig,
+                    material: asc_world::Material::Air,
+                });
+            }
+            self.blasts.push((ticks, Blast { center: summit, dir, radius: 0.0 }));
+            events.scars.push(Scar::Blast { center: c, dir });
+            events.notices.push("The volcano explodes!".into());
+        }
+        for (k, &(at, dir)) in plan.flows.iter().enumerate() {
+            if into != at {
+                continue;
+            }
+            let length = v.radius * (FLOW_REACH[0] + (FLOW_REACH[1] - FLOW_REACH[0]) * unit(hash(self.seed, t_key(&v), cycle ^ k as u64)));
+            let width = FLOW_WIDTH * (0.7 + 0.6 * unit(hash(self.seed, t_key(&v), cycle ^ 0x77 ^ k as u64)));
+            self.flows.push((ticks, Flow { origin: summit, dir, front: 0.0, length, width }));
+            events.scars.push(Scar::Flow { origin: c, dir, length, width });
+            events.notices.push("A pyroclastic flow is racing down the mountain!".into());
+            let _ = world;
+        }
     }
 
     /// Whether geyser `g` (vent, period, offset) is blowing at `ticks`, and how hard.
@@ -237,16 +430,17 @@ impl Volcanism {
         Tracked { volcano: v, key, summit, vents, geysers, last_phase: Phase::Quiet }
     }
 
-    /// Bring the nearest active volcano's eruption, and the nearest geysers, forward to now.
-    pub fn force(&mut self, world: &World, player: Vec3, ticks: u64) -> Option<Vec3> {
+    /// Bring the nearest active volcano's eruption (doing `kind`), and the nearest geysers,
+    /// forward to now.
+    pub fn force(&mut self, world: &World, player: Vec3, ticks: u64, kind: Kind) -> Option<Vec3> {
         let near = world.worldgen.volcanoes_near(Vec2::new(player.x, player.z), 20_000.0);
         let p = Vec2::new(player.x, player.z);
         let active = near.iter().filter(|v| v.kind == VolcanoKind::Active).min_by(|a, b| a.center.distance(p).total_cmp(&b.center.distance(p)));
         let mut at = None;
         if let Some(v) = active {
             let key = [v.center.x.round() as i32, v.center.y.round() as i32];
-            self.forced.retain(|(k, _)| *k != key);
-            self.forced.push((key, ticks));
+            self.forced.retain(|(k, _, _)| *k != key);
+            self.forced.push((key, ticks, kind));
             at = Some(Vec3::new(v.center.x, world.worldgen.height(v.center.x + v.crater_radius, v.center.y), v.center.y));
         }
         for v in near.iter().filter(|v| v.kind == VolcanoKind::Super) {
@@ -278,6 +472,16 @@ impl Volcanism {
         let mut events = Events::default();
         let mut report = Report::default();
         let mut throws = Vec::new();
+        let clocks: Vec<Option<(u64, u64, Kind)>> = self.tracked.iter().map(|t| self.clock(t, ticks)).collect();
+        for (i, clock) in clocks.into_iter().enumerate() {
+            if let Some((into, cycle, kind)) = clock
+                && (RUMBLE_TICKS..RUMBLE_TICKS + ERUPT_TICKS).contains(&into)
+                && Vec2::new(self.tracked[i].summit.x, self.tracked[i].summit.z).distance(p) < FOLLOW
+            {
+                self.begin(i, into, cycle, kind, ticks, world, &mut events);
+            }
+        }
+        self.run_flows_and_blasts(world, player, ticks, &mut events, &mut report);
         let phases: Vec<(Phase, f32)> = self.tracked.iter().map(|t| self.phase(t, ticks)).collect();
         for (i, (phase, strength)) in phases.into_iter().enumerate() {
             let t = &mut self.tracked[i];
@@ -352,12 +556,62 @@ impl Volcanism {
         report.bombs = self.bombs.iter().map(|b| (b.at, b.size)).collect();
         // Forced eruptions and geysers that are over are forgotten.
         let span = RUMBLE_TICKS + ERUPT_TICKS + WANE_TICKS;
-        self.forced.retain(|(_, s)| ticks < s + span);
+        self.forced.retain(|(_, s, _)| ticks < s + span);
         self.forced_geysers.retain(|(_, s)| ticks < s + GEYSER_BLOW);
-        let busy = !(report.active.is_empty() && report.bombs.is_empty() && report.geysers.is_empty());
+        let busy = !(report.active.is_empty()
+            && report.bombs.is_empty()
+            && report.geysers.is_empty()
+            && report.flows.is_empty()
+            && report.blasts.is_empty());
         let send = busy || self.reported;
         self.reported = busy;
         (events, send.then_some(report))
+    }
+}
+
+fn t_key(v: &Volcano) -> [i32; 2] {
+    [v.center.x.round() as i32, v.center.y.round() as i32]
+}
+
+impl Volcanism {
+    /// Flows race down and slow; the shockwave races out. Either kills a player it catches.
+    fn run_flows_and_blasts(&mut self, world: &World, player: Vec3, ticks: u64, events: &mut Events, report: &mut Report) {
+        let p = Vec2::new(player.x, player.z);
+        let ground = world.worldgen.height(player.x, player.z);
+        for (start, flow) in &mut self.flows {
+            let s = (ticks - *start) as f32 / 20.0;
+            // Fast at first, slowing as it spreads out (it never quite reaches `length`).
+            flow.front = flow.length * (1.0 - (-FLOW_SPEED * s / flow.length).exp());
+            let rel = p - Vec2::new(flow.origin.x, flow.origin.z);
+            let along = rel.dot(flow.dir);
+            let in_cloud = along <= flow.front
+                && along > flow.front - FLOW_FRONT
+                && rel.perp_dot(flow.dir).abs() < flow_half_width(along, flow.length, flow.width)
+                && player.y < ground + FLOW_HEIGHT;
+            if in_cloud {
+                events.hurt.push((LETHAL, crate::vitals::Cause::Eruption));
+            }
+            report.flows.push(*flow);
+        }
+        // A flow's done once it's all but stopped and its cloud has had time to settle.
+        self.flows.retain(|(start, f)| (ticks - start) as f32 / 20.0 < f.length / FLOW_SPEED * 3.0 + 30.0);
+        for (start, blast) in &mut self.blasts {
+            let before = blast.radius;
+            blast.radius = SHOCK_SPEED * (ticks - *start) as f32 / 20.0;
+            let rel = p - Vec2::new(blast.center.x, blast.center.z);
+            let d = rel.length();
+            if d > before && d <= blast.radius {
+                // The shockwave passes the player.
+                let reach = blast_reach(rel, blast.dir);
+                if d < reach {
+                    events.hurt.push((LETHAL, crate::vitals::Cause::Eruption));
+                } else if d < reach * 1.5 {
+                    events.hurt.push((400, crate::vitals::Cause::Eruption));
+                }
+            }
+            report.blasts.push(*blast);
+        }
+        self.blasts.retain(|(_, b)| b.radius < BLAST_REACH * 1.6);
     }
 }
 
@@ -375,6 +629,62 @@ mod tests {
         assert!(mid > 0.9, "full strength mid-eruption: {mid}");
     }
 
+    /// The world, an active cone, and a forced eruption of `kind` run (from its start to `ticks`)
+    /// with the player at `player`: what killed or hurt them, the edits and scars, and the flows.
+    fn run(kind: Kind, player: impl Fn(&Volcano) -> Vec3, ticks: u64) -> (Vec<i32>, Events, Vec<Flow>) {
+        let world = World::new(1256132528);
+        let v = world.worldgen.volcanoes_near(Vec2::ZERO, 16_000.0).into_iter().find(|v| v.kind == VolcanoKind::Active).unwrap();
+        let at = player(&v);
+        let mut volcanism = Volcanism::new(world.worldgen.seed());
+        let mut fluids = FluidSim::new();
+        volcanism.force(&world, at, 0, kind);
+        let (mut hurt, mut all, mut flows) = (Vec::new(), Events::default(), Vec::new());
+        for t in 0..ticks {
+            let (events, report) = volcanism.tick(&world, &mut fluids, at, t);
+            hurt.extend(events.hurt.iter().map(|(a, _)| *a));
+            all.edits.extend(events.edits);
+            all.scars.extend(events.scars);
+            if let Some(r) = report
+                && flows.is_empty()
+            {
+                flows = r.flows.clone();
+            }
+        }
+        (hurt, all, flows)
+    }
+
+    #[test]
+    fn a_lateral_blast_cuts_the_flank_away_and_its_shockwave_kills_in_front() {
+        let front = |d: f32| move |v: &Volcano| {
+            let p = v.center + v.tilt * d;
+            Vec3::new(p.x, 200.0, p.y)
+        };
+        // 1.5 km out in front: dead when the shockwave (at 340 m/s) gets there.
+        let (hurt, events, _) = run(Kind::Blast, front(1500.0), RUMBLE_TICKS + 200);
+        assert!(hurt.contains(&LETHAL), "survived the blast 1.5 km in front: {hurt:?}");
+        assert!(events.edits.len() >= 3, "the flank didn't collapse");
+        assert!(events.scars.iter().any(|s| matches!(s, Scar::Blast { .. })));
+        // 5 km out: it passes.
+        let (hurt, _, _) = run(Kind::Blast, front(5000.0), RUMBLE_TICKS + 400);
+        assert!(!hurt.contains(&LETHAL), "killed 5 km away");
+    }
+
+    #[test]
+    fn a_pyroclastic_flow_kills_whats_in_its_path_and_spares_the_side() {
+        // Where the first flow goes (watched from high over the summit, out of its reach).
+        let far = |v: &Volcano| Vec3::new(v.center.x, 5000.0, v.center.y);
+        let (_, events, _) = run(Kind::Flows, far, RUMBLE_TICKS + 300);
+        let Some(Scar::Flow { origin, dir, length, .. }) = events.scars.first().copied() else { panic!("no flow") };
+        let world = World::new(1256132528);
+        let on = origin + dir * length * 0.4;
+        let ground = |p: Vec2| Vec3::new(p.x, world.worldgen.height(p.x, p.y) + 1.0, p.y);
+        let (hurt, _, _) = run(Kind::Flows, move |_| ground(on), RUMBLE_TICKS + 1600);
+        assert!(hurt.contains(&LETHAL), "survived standing in the flow's path");
+        let side = origin + dir.perp() * length * 0.4;
+        let (hurt, _, _) = run(Kind::Flows, move |_| ground(side), RUMBLE_TICKS + 1600);
+        assert!(!hurt.contains(&LETHAL) || events.scars.len() > 1, "killed off to the side of a single flow");
+    }
+
     #[test]
     fn a_forced_eruption_pours_lava_and_throws_bombs() {
         let world = World::new(1256132528);
@@ -385,7 +695,7 @@ mod tests {
         let player = Vec3::new(x, wg.height(x, z) + 1.0, z);
         let mut volcanism = Volcanism::new(wg.seed());
         let mut fluids = FluidSim::new();
-        volcanism.force(&world, player, 0);
+        volcanism.force(&world, player, 0, Kind::Natural);
         let mut notices = Vec::new();
         let mut bombs_seen = 0;
         for ticks in 0..(RUMBLE_TICKS + 400) {

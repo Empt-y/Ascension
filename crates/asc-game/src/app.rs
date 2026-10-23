@@ -51,8 +51,8 @@ pub struct Options {
     pub fall_test: bool,
     /// Dig a trench from the nearest shore inland below sea level and watch the sea fill it.
     pub fluid_test: bool,
-    /// Start the nearest active volcano's eruption (and geysers) soon after starting.
-    pub erupt: bool,
+    /// Start the nearest active volcano's eruption (doing this), and geysers, soon after starting.
+    pub erupt: Option<asc_sim::volcanism::Kind>,
     /// Render the scene at this fraction of the window's resolution and upscale it (`--render-scale`).
     pub render_scale: Option<f32>,
     /// Run a stand-in factory on the server every tick (light: mostly waiting machines; heavy:
@@ -177,7 +177,9 @@ impl Options {
                 "--exit-after" => opts.exit_after = Some(value("--exit-after")?.parse()?),
                 "--fall-test" => opts.fall_test = true,
                 "--fluid-test" => opts.fluid_test = true,
-                "--erupt" => opts.erupt = true,
+                "--erupt" => opts.erupt = Some(asc_sim::volcanism::Kind::Natural),
+                "--erupt-flow" => opts.erupt = Some(asc_sim::volcanism::Kind::Flows),
+                "--erupt-blast" => opts.erupt = Some(asc_sim::volcanism::Kind::Blast),
                 "--tick-stress" => {
                     opts.tick_stress = Some(match value("--tick-stress")?.as_str() {
                         "light" => asc_sim::stress::StressConfig::LIGHT,
@@ -357,6 +359,9 @@ impl State {
         );
         scatter.set_removed_nodes(welcome.mined.iter().copied());
         scatter.set_fire(&welcome.fire);
+        for scar in &welcome.scars {
+            scatter.add_scar(*scar);
+        }
         let lattice = asc_build::Lattice::new(&parts.spec);
         let structures = asc_build::Structures::from_pieces(lattice, welcome.pieces.iter().copied());
         log::info!("structures: {} pieces", structures.len());
@@ -559,9 +564,12 @@ impl State {
         if self.options.fluid_test {
             self.fluid_test_step();
         }
-        if self.options.erupt && !self.erupt_sent && self.started.elapsed().as_secs_f32() > 2.0 {
+        if let Some(kind) = self.options.erupt
+            && !self.erupt_sent
+            && self.started.elapsed().as_secs_f32() > 2.0
+        {
             self.erupt_sent = true;
-            self.send(ClientMsg::Erupt);
+            self.send(ClientMsg::Erupt(kind));
         }
         if self.build_tool.is_some() {
             self.mining.reset();
@@ -688,6 +696,12 @@ impl State {
             lights: {
                 let mut lights = self.fluids.lava_lights(self.camera.position);
                 lights.extend(self.streamer.lava_lights(&self.fluids, self.camera.position, 160.0));
+                // A blast's flash, fading as its shockwave spreads.
+                lights.extend(self.volcanism.blasts.iter().filter(|b| b.radius < 1200.0).map(|b| asc_render::PointLight {
+                    position: b.center + Vec3::Y * 200.0,
+                    radius: 600.0 + b.radius,
+                    color: Vec3::new(1.0, 0.6, 0.3) * 40.0 * (1.0 - b.radius / 1200.0),
+                }));
                 // Burning ground, near by.
                 lights.extend(self.effects.fire_lights(&self.world.worldgen, self.camera.position, 6));
                 // Volcanic bombs glow as they fly.
@@ -1089,6 +1103,7 @@ impl State {
             }
             ServerMsg::Fluid { coord, data } => self.fluids.apply(coord, &data),
             ServerMsg::Volcanism(report) => self.volcanism = report,
+            ServerMsg::Scar(scar) => self.scatter.add_scar(scar),
             ServerMsg::Fire(changed) => {
                 self.scatter.set_fire(&changed);
                 self.effects.set_fire(&changed);
@@ -1176,6 +1191,16 @@ impl State {
                 Phase::Quiet => 0.0,
             };
             quake = quake.max(shaking * (1.0 - smoothstep(a.radius * 0.5, a.radius * 4.0, d)));
+        }
+        // A blast's shockwave: a hard jolt as it passes.
+        for b in &self.volcanism.blasts {
+            let d = Vec2::new(b.center.x - at.x, b.center.z - at.z).length();
+            quake = quake.max(6.0 * (1.0 - ((d - b.radius).abs() / 400.0).min(1.0)));
+        }
+        // A flow's thundering front.
+        for f in &self.volcanism.flows {
+            let front = Vec2::new(f.origin.x, f.origin.z) + f.dir * f.front;
+            quake = quake.max(1.5 * (1.0 - smoothstep(100.0, 1500.0, front.distance(Vec2::new(at.x, at.z)))));
         }
         let t = self.started.elapsed().as_secs_f32();
         let shake = Vec3::new((t * 37.0).sin() + (t * 23.0).sin() * 0.5, (t * 41.0).sin() * 0.6, (t * 29.0).cos()) * 0.06 * quake;

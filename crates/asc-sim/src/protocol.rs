@@ -37,8 +37,9 @@ pub enum ClientMsg {
     Inventory { seq: u32, op: InventoryOp },
     /// Set the time of day (development).
     SetTime(f32),
-    /// Start the nearest active volcano's eruption, and the nearest geysers, now (development).
-    Erupt,
+    /// Start the nearest active volcano's eruption (doing this), and the nearest geysers, now
+    /// (development).
+    Erupt(crate::volcanism::Kind),
     /// Save now.
     Save,
     /// Answered with `Pong` once everything sent before it has been handled (so scripted clients
@@ -68,6 +69,8 @@ pub struct Welcome {
     pub fluids: Vec<(glam::IVec3, asc_world::fluid::PackedFluid)>,
     /// Ground that's burning or burnt: fire cell and stage (see `fire`).
     pub fire: Vec<([i32; 2], crate::fire::Stage)>,
+    /// Where pyroclastic flows and blasts have passed.
+    pub scars: Vec<crate::volcanism::Scar>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -102,4 +105,6 @@ pub enum ServerMsg {
     Volcanism(crate::volcanism::Report),
     /// Fire cells whose stage changed (caught, burning hard, burnt out).
     Fire(Vec<([i32; 2], crate::fire::Stage)>),
+    /// A pyroclastic flow or blast has scarred the land.
+    Scar(crate::volcanism::Scar),
 }

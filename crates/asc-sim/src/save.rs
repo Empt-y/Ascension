@@ -98,12 +98,16 @@ pub struct SaveGame {
     pub fluids: Vec<(glam::IVec3, Vec<u8>, Vec<u16>)>,
     /// Burnt ground (fire cells; any still burning is saved as burnt).
     pub burnt: Vec<[i32; 2]>,
+    /// Where pyroclastic flows and blasts have passed.
+    pub scars: Vec<crate::volcanism::Scar>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct FireFile {
     format_version: u32,
     burnt: Vec<[i32; 2]>,
+    #[serde(default)]
+    scars: Vec<crate::volcanism::Scar>,
 }
 
 /// One fluid chunk as runs of (count, kind, amount).
@@ -214,7 +218,7 @@ pub fn save(dir: &Path, game: &SaveGame) -> Result<()> {
         chunks: game.fluids.iter().map(|(c, k, a)| (c.to_array(), pack_fluid(k, a))).collect(),
     };
     write_atomic(&dir.join("fluids.bin"), &postcard::to_stdvec(&fluids)?)?;
-    let fire = FireFile { format_version: FORMAT_VERSION, burnt: game.burnt.clone() };
+    let fire = FireFile { format_version: FORMAT_VERSION, burnt: game.burnt.clone(), scars: game.scars.clone() };
     write_atomic(&dir.join("fire.bin"), &postcard::to_stdvec(&fire)?)?;
     Ok(())
 }
@@ -296,13 +300,13 @@ pub fn load(dir: &Path) -> Result<Option<SaveGame>> {
             .collect()
     };
     let fire_path = dir.join("fire.bin");
-    let burnt = if !fire_path.exists() && !with_suffix(&fire_path, ".bak").exists() {
-        Vec::new()
+    let (burnt, scars) = if !fire_path.exists() && !with_suffix(&fire_path, ".bak").exists() {
+        (Vec::new(), Vec::new())
     } else {
         let file: FireFile = read_with_backup(&fire_path, |b| Ok(postcard::from_bytes(b)?))?;
-        file.burnt
+        (file.burnt, file.scars)
     };
-    Ok(Some(SaveGame { meta, players, ops: edits.ops, structures, nodes, stashes, fluids, burnt }))
+    Ok(Some(SaveGame { meta, players, ops: edits.ops, structures, nodes, stashes, fluids, burnt, scars }))
 }
 
 #[cfg(test)]
@@ -369,6 +373,12 @@ mod tests {
             }],
             fluids: vec![(glam::IVec3::new(1, -1, 2), vec![1; 32768], vec![700; 32768])],
             burnt: vec![[4, -7], [5, -7]],
+            scars: vec![crate::volcanism::Scar::Flow {
+                origin: glam::Vec2::new(10.0, 20.0),
+                dir: glam::Vec2::X,
+                length: 3000.0,
+                width: 250.0,
+            }],
         }
     }
 
