@@ -62,24 +62,31 @@ pub struct FarStreamer {
     digs_version: u32,
 }
 
-/// Where a dug sphere has lowered the ground at `(x, z)` from `height`, the new height.
+/// Where dug spheres have lowered the ground at `(x, z)` from `height`, the new height. A sphere
+/// cuts the surface when the surface is inside it, so one under the ground can be reached through
+/// another's hole: it goes round again until nothing cuts deeper (in any order of digs).
 fn dug(digs: &[asc_world::EditOp], x: f32, z: f32, height: f32) -> Option<f32> {
     let mut lowest: Option<f32> = None;
-    for op in digs {
-        let d2 = (x - op.center.x).powi(2) + (z - op.center.z).powi(2);
-        let r2 = op.radius * op.radius;
-        if d2 >= r2 {
-            continue;
+    loop {
+        let mut deeper = false;
+        for op in digs {
+            let d2 = (x - op.center.x).powi(2) + (z - op.center.z).powi(2);
+            let r2 = op.radius * op.radius;
+            if d2 >= r2 {
+                continue;
+            }
+            let half = (r2 - d2).sqrt();
+            let (bottom, top) = (op.center.y - half, op.center.y + half);
+            let h = lowest.unwrap_or(height);
+            if h > bottom && h <= top {
+                lowest = Some(bottom);
+                deeper = true;
+            }
         }
-        let half = (r2 - d2).sqrt();
-        // The surface was inside the sphere (or it reaches up into the open): down to its bottom.
-        let (bottom, top) = (op.center.y - half, op.center.y + half);
-        let h = lowest.unwrap_or(height);
-        if h > bottom && h <= top {
-            lowest = Some(bottom);
+        if !deeper {
+            return lowest;
         }
     }
-    lowest
 }
 
 /// Heights and surface materials for every sample of `rect` on `level`, row-major. Heights are
@@ -261,5 +268,10 @@ mod tests {
         let data = compute(&wg, &[big], level, rect);
         let i = (5 * rect.size().x + 5) as usize;
         assert!((data.heights[i] - (ground - 200.0)).abs() < 0.01, "{} vs {}", data.heights[i], ground - 200.0);
+        // A sphere wholly under the ground is reached through the big one's hole, listed either way.
+        let under = asc_world::EditOp { center: glam::Vec3::new(x, ground - 260.0, z), ..dig(100.0) };
+        for digs in [[under, big], [big, under]] {
+            assert_eq!(dug(&digs, x, z, ground), Some(ground - 360.0));
+        }
     }
 }

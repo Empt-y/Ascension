@@ -43,6 +43,8 @@ pub struct Fire {
     cells: BTreeMap<[i32; 2], Cell>,
     /// Cells whose stage changed since the last `take_changed`.
     changed: BTreeMap<[i32; 2], Stage>,
+    /// How many of `cells` are burning (the rest are burnt out).
+    burning: usize,
     seed: u64,
 }
 
@@ -106,7 +108,7 @@ impl Fire {
     }
 
     pub fn burning(&self) -> usize {
-        self.cells.values().filter(|c| c.since.is_some()).count()
+        self.burning
     }
 
     /// Set the ground at (x, z) alight, if it'll burn and isn't already burning or burnt.
@@ -122,6 +124,7 @@ impl Fire {
             return;
         }
         self.cells.insert(key, Cell { since: Some(ticks), fuel });
+        self.burning += 1;
         self.changed.insert(key, 1);
     }
 
@@ -144,6 +147,7 @@ impl Fire {
             let age = ticks.saturating_sub(since);
             if age >= duration {
                 self.cells.insert(*key, Cell { since: None, fuel: c.fuel });
+                self.burning -= 1;
                 self.changed.insert(*key, 3);
                 continue;
             }
@@ -171,13 +175,14 @@ impl Fire {
             }
         }
         for (n, f) in lit {
-            if self.burning() >= MAX_BURNING {
+            if self.burning >= MAX_BURNING {
                 break;
             }
-            self.cells.entry(n).or_insert_with(|| {
+            if let std::collections::btree_map::Entry::Vacant(e) = self.cells.entry(n) {
+                e.insert(Cell { since: Some(ticks), fuel: f });
+                self.burning += 1;
                 self.changed.insert(n, 1);
-                Cell { since: Some(ticks), fuel: f }
-            });
+            }
         }
         // Standing in fire.
         let here = cell_of(player.x, player.z).to_array();

@@ -159,6 +159,9 @@ pub struct FluidSim {
     resting: ahash::AHashSet<ChunkCoord>,
 }
 
+/// Edits reaching further than this (m) don't look for natural water to bring to life.
+const PROBE_REACH: f32 = 40.0;
+
 const FACES: [IVec3; 6] =
     [IVec3::NEG_X, IVec3::X, IVec3::NEG_Y, IVec3::Y, IVec3::NEG_Z, IVec3::Z];
 
@@ -188,7 +191,10 @@ impl FluidSim {
     pub fn lava_on_ground(&self) -> Vec<IVec3> {
         let mut out = Vec::new();
         let n = N as usize;
-        for coord in self.still.keys() {
+        // In coordinate order (the map's own order changes from run to run).
+        let mut coords: Vec<&ChunkCoord> = self.still.keys().collect();
+        coords.sort_by_key(|c| c.to_array());
+        for coord in coords {
             let Some(ch) = self.fluids.chunks.get(coord) else { continue };
             for z in 0..n {
                 for x in 0..n {
@@ -236,7 +242,9 @@ impl FluidSim {
     /// ticks after they turned up in a chunk.
     fn cool(&mut self) {
         let now = self.ticks;
-        let keys: Vec<ChunkCoord> = self.still.keys().copied().collect();
+        // In coordinate order, so the rock it sets comes out the same every run.
+        let mut keys: Vec<ChunkCoord> = self.still.keys().copied().collect();
+        keys.sort_by_key(|c| c.to_array());
         for coord in keys {
             let key = coord.to_array();
             // Columns whose bottom cell sits on a volcano's own lava in the chunk below: spilled
@@ -430,11 +438,17 @@ impl FluidSim {
 
     /// The terrain changed: refresh the solid cells of the chunks the edit touched (waking them),
     /// and bring water to life around it if there is any near. Water in cells that became solid is
-    /// pushed up into the cell above where there's room.
+    /// pushed up into the cell above where there's room. An edit wider than `PROBE_REACH` (a
+    /// volcano blowing its flank away touches thousands of chunks) only refreshes the chunks
+    /// already alive: looking for water near every one would stall the tick.
     pub fn disturb(&mut self, world: &World, op: &EditOp) {
+        let probe = op.reach() <= PROBE_REACH;
         let touched: Vec<ChunkCoord> = op.touched_chunks().collect();
         for &coord in &touched {
-            if !self.fluids.chunks.contains_key(&coord) && Self::near_water(world, coord) {
+            if !self.fluids.chunks.contains_key(&coord) && !self.ghosts.contains_key(&coord) && !probe {
+                continue;
+            }
+            if probe && !self.fluids.chunks.contains_key(&coord) && Self::near_water(world, coord) {
                 self.materialise(world, coord);
             }
             if self.ghosts.contains_key(&coord) {

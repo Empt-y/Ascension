@@ -331,8 +331,8 @@ impl Server {
         }
         // A blast's collapsed flank: the terrain cut away for good.
         for op in events.edits {
-            let dirty = self.world.edits.push(op);
-            let _ = dirty;
+            self.world.edits.push(op);
+            self.fluid_sim.disturb(&self.world, &op);
             self.outbox.push(ServerMsg::Edited(op));
         }
         for scar in events.scars {

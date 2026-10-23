@@ -1204,6 +1204,7 @@ impl State {
             quake = quake.max(1.5 * (1.0 - smoothstep(100.0, 1500.0, front.distance(Vec2::new(at.x, at.z)))));
         }
         let t = self.started.elapsed().as_secs_f32();
+        let quake = if self.options.reduce_motion { 0.0 } else { quake };
         let shake = Vec3::new((t * 37.0).sin() + (t * 23.0).sin() * 0.5, (t * 41.0).sin() * 0.6, (t * 29.0).cos()) * 0.06 * quake;
         (ash, shake)
     }

@@ -381,8 +381,7 @@ impl Volcanism {
     }
 
     /// Start what eruption plans call for at `into` ticks into tracked volcano `i`'s cycle.
-    #[allow(clippy::too_many_arguments)]
-    fn begin(&mut self, i: usize, into: u64, cycle: u64, kind: Kind, ticks: u64, world: &World, events: &mut Events) {
+    fn begin(&mut self, i: usize, into: u64, cycle: u64, kind: Kind, ticks: u64, events: &mut Events) {
         let t = &self.tracked[i];
         let plan = self.plan(t, cycle, kind);
         let (v, summit) = (t.volcano.clone(), t.summit);
@@ -390,11 +389,13 @@ impl Volcanism {
         if let Some(dir) = plan.blast
             && into == RUMBLE_TICKS
         {
-            // The flank collapses: a horseshoe cut out of the summit and the side facing `dir`.
-            events.edits.extend(blast_digs(&v, summit, dir));
+            // The flank collapses: a horseshoe cut out of the summit and the side facing `dir`
+            // (from the summit as it was before any blast: a second one cuts the same crater).
             let drop = blown_drop(&v);
+            let unblown = summit + Vec3::Y * self.blown.get(&t.key).copied().unwrap_or(0.0);
+            events.edits.extend(blast_digs(&v, unblown, dir));
             self.blown.insert(t_key(&v), drop);
-            self.tracked[i].summit.y -= drop;
+            self.tracked[i].summit.y = unblown.y - drop;
             self.blasts.push((ticks, Blast { center: summit, dir, radius: 0.0 }));
             events.scars.push(Scar::Blast { center: c, dir });
             events.notices.push("The volcano explodes!".into());
@@ -408,7 +409,6 @@ impl Volcanism {
             self.flows.push((ticks, Flow { origin: summit, dir, front: 0.0, length, width }));
             events.scars.push(Scar::Flow { origin: c, dir, length, width });
             events.notices.push("A pyroclastic flow is racing down the mountain!".into());
-            let _ = world;
         }
     }
 
@@ -511,7 +511,7 @@ impl Volcanism {
                 && (RUMBLE_TICKS..RUMBLE_TICKS + ERUPT_TICKS).contains(&into)
                 && Vec2::new(self.tracked[i].summit.x, self.tracked[i].summit.z).distance(p) < FOLLOW
             {
-                self.begin(i, into, cycle, kind, ticks, world, &mut events);
+                self.begin(i, into, cycle, kind, ticks, &mut events);
             }
         }
         self.run_flows_and_blasts(world, player, ticks, &mut events, &mut report);
@@ -567,16 +567,17 @@ impl Volcanism {
             let size = (self.random().powf(2.2) * BOMB_SIZES as f32).min(BOMB_SIZES as f32 - 1.0) as u8;
             self.bombs.push(Bomb { at: start, vel: Vec3::new(a.cos() * out, up, a.sin() * out), size });
         }
-        // Bombs fly, and burst where they land.
+        // Bombs fly, and burst where they land (on the ground as edited: a blast's crater too).
         let mut landed = Vec::new();
-        for b in &mut self.bombs {
+        self.bombs.retain_mut(|b| {
             b.vel.y -= GRAVITY * DT;
             b.at += b.vel * DT;
-            if b.vel.y < 0.0 && b.at.y <= world.worldgen.height(b.at.x, b.at.z) {
+            let down = b.vel.y < 0.0 && world.density_at(b.at) < 0.0;
+            if down {
                 landed.push((b.at, b.size));
             }
-        }
-        self.bombs.retain(|b| !(b.vel.y < 0.0 && b.at.y <= world.worldgen.height(b.at.x, b.at.z)) && b.at.y > -500.0);
+            !down && b.at.y > -500.0
+        });
         for (at, size) in landed {
             events.landed.push(at);
             let d = at.distance(player);
@@ -610,7 +611,8 @@ impl Volcanism {
     /// Flows race down and slow; the shockwave races out. Either kills a player it catches.
     fn run_flows_and_blasts(&mut self, world: &World, player: Vec3, ticks: u64, events: &mut Events, report: &mut Report) {
         let p = Vec2::new(player.x, player.z);
-        let ground = world.worldgen.height(player.x, player.z);
+        // Low enough for a flow's cloud: ground (as edited) within its height under the player.
+        let low = || world.density_at(player - Vec3::Y * FLOW_HEIGHT) < 0.0;
         for (start, flow) in &mut self.flows {
             let s = (ticks - *start) as f32 / 20.0;
             // Fast at first, slowing as it spreads out (it never quite reaches `length`).
@@ -620,7 +622,7 @@ impl Volcanism {
             let in_cloud = along <= flow.front
                 && along > flow.front - FLOW_FRONT
                 && rel.perp_dot(flow.dir).abs() < flow_half_width(along, flow.length, flow.width)
-                && player.y < ground + FLOW_HEIGHT;
+                && low();
             if in_cloud {
                 events.hurt.push((LETHAL, crate::vitals::Cause::Eruption));
             }
@@ -713,9 +715,14 @@ mod tests {
         let ground = |p: Vec2| Vec3::new(p.x, world.worldgen.height(p.x, p.y) + 1.0, p.y);
         let (hurt, _, _) = run(Kind::Flows, move |_| ground(on), RUMBLE_TICKS + 1600);
         assert!(hurt.contains(&LETHAL), "survived standing in the flow's path");
-        let side = origin + dir.perp() * length * 0.4;
+        // Off to the side, clear of every flow this eruption makes.
+        let side = [1.0f32, -1.0, 2.0, -2.0]
+            .into_iter()
+            .map(|k| origin + dir.perp() * length * 0.4 * k + dir * length * 0.4)
+            .find(|&s| !events.scars.iter().any(|scar| scar.contains(s)))
+            .expect("somewhere off every flow's path");
         let (hurt, _, _) = run(Kind::Flows, move |_| ground(side), RUMBLE_TICKS + 1600);
-        assert!(!hurt.contains(&LETHAL) || events.scars.len() > 1, "killed off to the side of a single flow");
+        assert!(!hurt.contains(&LETHAL), "killed off to the side of the flows");
     }
 
     #[test]

@@ -144,7 +144,9 @@ impl Effects {
 
     /// Pyroclastic flows: a churning dark cloud boiling along the ground behind each front.
     fn flows(&mut self, dt: f32, report: &Report, worldgen: &asc_world::WorldGen) {
-        let flows: Vec<_> = report.flows.iter().filter(|f| f.front < f.length).copied().collect();
+        // While it's still moving: it slows as its front nears its length (with the last 5% to go
+        // it has all but stopped, though the server keeps it a while longer).
+        let flows: Vec<_> = report.flows.iter().filter(|f| f.front < f.length * 0.95).copied().collect();
         if flows.is_empty() {
             self.owed_flow = 0.0;
             return;
