@@ -40,6 +40,8 @@ pub struct PrimitiveData {
     pub texture: Option<Arc<TextureData>>,
     /// Texels with alpha below this are cut away (glTF alphaMode MASK).
     pub alpha_cutoff: Option<f32>,
+    /// Light it gives off (linear RGB): glowing lava cracks.
+    pub emissive: [f32; 3],
 }
 
 #[derive(Clone, Debug)]
@@ -121,6 +123,7 @@ pub fn load_glb(bytes: &[u8]) -> Result<ModelData> {
                     gltf::material::AlphaMode::Mask => Some(material.alpha_cutoff().unwrap_or(0.5)),
                     _ => None,
                 };
+                let emissive = material.emissive_factor();
                 primitives.push(PrimitiveData {
                     vertices,
                     indices,
@@ -129,6 +132,7 @@ pub fn load_glb(bytes: &[u8]) -> Result<ModelData> {
                     metallic: pbr.metallic_factor(),
                     texture,
                     alpha_cutoff,
+                    emissive,
                 });
             }
         }

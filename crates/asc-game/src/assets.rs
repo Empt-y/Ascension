@@ -208,6 +208,25 @@ impl OreModels {
     }
 }
 
+/// The volcanic bombs, smallest first (tools/build_volcanic.py).
+pub struct VolcanicModels {
+    pub bombs: Vec<asc_render::ModelId>,
+}
+
+impl VolcanicModels {
+    pub fn load(renderer: &mut Renderer) -> Result<Self> {
+        let dir = root()?.join("models").join("volcanic");
+        let mut bombs = Vec::new();
+        for n in 0..asc_sim::volcanism::BOMB_SIZES {
+            let path = dir.join(format!("bomb_{n}.glb"));
+            let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            let data = asc_render::models::load_glb(&bytes).with_context(|| format!("loading {}", path.display()))?;
+            bombs.push(renderer.add_model(&data));
+        }
+        Ok(Self { bombs })
+    }
+}
+
 /// Decode the Blender preview renders into egui textures, `[tier][kind]`.
 pub fn load_previews(ctx: &egui::Context, spec: &BuildingSpec) -> Result<Vec<[egui::TextureHandle; 3]>> {
     let dir = root()?.join("models").join("previews");

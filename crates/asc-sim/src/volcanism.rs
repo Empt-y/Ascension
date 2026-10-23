@@ -68,7 +68,8 @@ pub struct Activity {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Report {
     pub active: Vec<Activity>,
-    pub bombs: Vec<Vec3>,
+    /// Bombs in the air: where, and how big (0 smallest .. `BOMB_SIZES` - 1).
+    pub bombs: Vec<(Vec3, u8)>,
     /// Blowing geysers: vent and strength.
     pub geysers: Vec<(Vec3, f32)>,
 }
@@ -88,7 +89,12 @@ struct Tracked {
 struct Bomb {
     at: Vec3,
     vel: Vec3,
+    size: u8,
 }
+
+/// Bomb sizes (the client has a model for each): small ones are far commoner, and big ones hit
+/// harder and wider.
+pub const BOMB_SIZES: u8 = 5;
 
 /// Something that happened this tick, for the server to apply.
 #[derive(Debug, Default)]
@@ -318,7 +324,9 @@ impl Volcanism {
             let out = 12.0 + 30.0 * self.random() * strength;
             let up = 28.0 + 22.0 * self.random();
             let start = summit + Vec3::new(a.cos(), 0.0, a.sin()) * crater * 0.3 + Vec3::Y * 8.0;
-            self.bombs.push(Bomb { at: start, vel: Vec3::new(a.cos() * out, up, a.sin() * out) });
+            // Mostly small: the chance of each size up halves.
+            let size = (self.random().powf(2.2) * BOMB_SIZES as f32).min(BOMB_SIZES as f32 - 1.0) as u8;
+            self.bombs.push(Bomb { at: start, vel: Vec3::new(a.cos() * out, up, a.sin() * out), size });
         }
         // Bombs fly, and burst where they land.
         let mut landed = Vec::new();
@@ -326,17 +334,19 @@ impl Volcanism {
             b.vel.y -= GRAVITY * DT;
             b.at += b.vel * DT;
             if b.vel.y < 0.0 && b.at.y <= world.worldgen.height(b.at.x, b.at.z) {
-                landed.push(b.at);
+                landed.push((b.at, b.size));
             }
         }
         self.bombs.retain(|b| !(b.vel.y < 0.0 && b.at.y <= world.worldgen.height(b.at.x, b.at.z)) && b.at.y > -500.0);
-        for at in landed {
+        for (at, size) in landed {
             let d = at.distance(player);
-            if d < BOMB_REACH {
-                events.hurt.push(((BOMB_DAMAGE as f32 * (1.0 - d / BOMB_REACH * 0.7)) as i32, crate::vitals::Cause::Eruption));
+            let scale = 0.4 + 0.3 * size as f32;
+            let reach = BOMB_REACH * scale;
+            if d < reach {
+                events.hurt.push(((BOMB_DAMAGE as f32 * scale * (1.0 - d / reach * 0.7)) as i32, crate::vitals::Cause::Eruption));
             }
         }
-        report.bombs = self.bombs.iter().map(|b| b.at).collect();
+        report.bombs = self.bombs.iter().map(|b| (b.at, b.size)).collect();
         // Forced eruptions and geysers that are over are forgotten.
         let span = RUMBLE_TICKS + ERUPT_TICKS + WANE_TICKS;
         self.forced.retain(|(_, s)| ticks < s + span);

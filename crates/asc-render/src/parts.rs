@@ -90,6 +90,8 @@ struct MaterialUniform {
     base: [f32; 4],
     /// x = metallic, y = texture layer (-1 for none), z = alpha cutoff, w = 1 for foliage.
     extra: [f32; 4],
+    /// rgb = emitted light.
+    emissive: [f32; 4],
 }
 
 #[repr(C)]
@@ -263,6 +265,7 @@ impl Parts {
                     if foliage { cutoff } else { 0.0 },
                     f32::from(u8::from(foliage)),
                 ],
+                emissive: [p.emissive[0], p.emissive[1], p.emissive[2], 0.0],
             };
             let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("part material"),

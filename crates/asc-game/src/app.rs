@@ -266,6 +266,7 @@ struct State {
     /// Smoke, lava spray and glowing bombs from the volcanoes near by, and when they last moved.
     effects: crate::effects::Effects,
     effects_at: std::time::Instant,
+    volcanic: crate::assets::VolcanicModels,
     /// Where things left at death lie.
     stashes: std::collections::BTreeMap<u32, Vec3>,
     /// The simulated water, as the server sends it.
@@ -349,6 +350,7 @@ impl State {
         let far = FarStreamer::new(world.worldgen.clone());
         let nature = crate::assets::NatureModels::load(&mut renderer)?;
         let ores = crate::assets::OreModels::load(&mut renderer)?;
+        let volcanic = crate::assets::VolcanicModels::load(&mut renderer)?;
         let mut scatter = crate::scatter::Scatter::new(
             crate::scatter::Config::new(seed, &nature, Some(&ores)),
             world.worldgen.clone(),
@@ -443,6 +445,7 @@ impl State {
             erupt_sent: false,
             effects: Default::default(),
             effects_at: std::time::Instant::now(),
+            volcanic,
             fluids,
             stashes,
             pending_ops: Vec::new(),
@@ -667,6 +670,8 @@ impl State {
         let dt = now.duration_since(self.effects_at).as_secs_f32().min(0.25);
         self.effects_at = now;
         self.effects.update(dt, &self.volcanism);
+        let bombs = self.effects.bombs(&self.volcanism, &self.volcanic.bombs, self.started.elapsed().as_secs_f32());
+        self.building.set_moving(bombs);
         let (ash, shake) = self.volcanic_air();
         let params = FrameParams {
             camera: Camera { position: self.camera.position + shake, ..self.camera },
@@ -679,7 +684,7 @@ impl State {
                 let mut lights = self.fluids.lava_lights(self.camera.position);
                 lights.extend(self.streamer.lava_lights(&self.fluids, self.camera.position, 160.0));
                 // Volcanic bombs glow as they fly.
-                lights.extend(self.volcanism.bombs.iter().map(|&position| asc_render::PointLight {
+                lights.extend(self.volcanism.bombs.iter().map(|&(position, _)| asc_render::PointLight {
                     position,
                     radius: 30.0,
                     color: Vec3::new(1.0, 0.4, 0.1) * 6.0,

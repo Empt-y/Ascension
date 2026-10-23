@@ -19,7 +19,9 @@ def game_to_blender(x, y, z):
 MATERIALS = {}
 
 
-def material(name, color, roughness, metallic=0.0):
+def material(name, color, roughness, metallic=0.0, emission=None):
+    """A Principled material; `emission` = (colour, strength) makes it glow (exported as the
+    glTF emissive factor)."""
     if name in MATERIALS:
         return MATERIALS[name]
     mat = bpy.data.materials.new(name)
@@ -28,6 +30,9 @@ def material(name, color, roughness, metallic=0.0):
     bsdf.inputs["Base Color"].default_value = (*color, 1.0)
     bsdf.inputs["Roughness"].default_value = roughness
     bsdf.inputs["Metallic"].default_value = metallic
+    if emission is not None:
+        bsdf.inputs["Emission Color"].default_value = (*emission[0], 1.0)
+        bsdf.inputs["Emission Strength"].default_value = emission[1]
     MATERIALS[name] = mat
     return mat
 

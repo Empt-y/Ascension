@@ -10,6 +10,8 @@ struct Material {
     base: vec4<f32>,
     // x = metallic, y = texture layer (-1 = untextured), z = alpha cutoff, w = 1 for foliage.
     extra: vec4<f32>,
+    // rgb = light given off (glowing lava cracks: HDR, it blooms).
+    emissive: vec4<f32>,
 }
 
 @group(1) @binding(0) var<uniform> material: Material;
@@ -230,7 +232,8 @@ fn fs_main(in: VsOut) -> SceneOut {
             shadow = shadow_factor(in.rel, geometric);
         }
         let roughness = aa_roughness(material.base.a, detail.widen);
-        color = apply_fog(shade_pbr(albedo, roughness, material.extra.x, n, in.rel, occlusion, shadow), in.rel);
+        let lit = shade_pbr(albedo, roughness, material.extra.x, n, in.rel, occlusion, shadow) + material.emissive.rgb * 4.0;
+        color = apply_fog(lit, in.rel);
     }
     // Distance and LOD fades. With MSAA they go through coverage, which blends smoothly over the
     // samples; a screen-space dither pattern stays put while things move across it and fizzes.

@@ -26,12 +26,13 @@ pub struct Building {
     pub preview: Option<(Snap, Result<(), Invalid>)>,
     /// Other rigid things drawn with the pieces (stashes left at death).
     extras: Vec<PartInstance>,
+    moving: Vec<PartInstance>,
     dirty: bool,
 }
 
 impl Building {
     pub fn new(structures: Structures) -> Self {
-        Self { structures, selection: None, menu_open: false, preview: None, extras: Vec::new(), dirty: true }
+        Self { structures, selection: None, menu_open: false, preview: None, extras: Vec::new(), moving: Vec::new(), dirty: true }
     }
 
     /// Signed distance to the nearest piece, for collision and raycasts.
@@ -79,6 +80,15 @@ impl Building {
         self.dirty = true;
     }
 
+    /// Replace the moving instances (volcanic bombs in flight), redrawn every frame they change.
+    pub fn set_moving(&mut self, moving: Vec<PartInstance>) {
+        if moving.is_empty() && self.moving.is_empty() {
+            return;
+        }
+        self.moving = moving;
+        self.dirty = true;
+    }
+
     /// The server placed a piece.
     pub fn placed(&mut self, piece: Piece) {
         self.structures.insert(piece);
@@ -105,6 +115,7 @@ impl Building {
                 .collect();
             let mut instances = instances;
             instances.extend(self.extras.iter().copied());
+            instances.extend(self.moving.iter().copied());
             renderer.set_parts(&instances);
             self.dirty = false;
         }

@@ -150,15 +150,30 @@ impl Effects {
                 params: [PARTICLE_GLOW, 0.0, 0.0, s.age * 13.0],
             });
         }
-        for &b in &report.bombs {
+        // A hot glow round each bomb (the rock itself is a model: see `bombs`).
+        for &(b, size) in &report.bombs {
             out.push(Particle {
                 position: b.into(),
-                size: 2.5,
-                color: [3.0, 0.8, 0.12, 3.0],
+                size: 1.2 + 0.7 * size as f32,
+                color: [3.0, 0.8, 0.12, 1.2],
                 params: [PARTICLE_GLOW, 0.0, 0.0, b.x * 0.1],
             });
         }
         out
+    }
+
+    /// The bombs in the air as tumbling models (`models`: one per size, smallest first).
+    pub fn bombs(&self, report: &Report, models: &[asc_render::ModelId], time: f32) -> Vec<asc_render::PartInstance> {
+        report
+            .bombs
+            .iter()
+            .filter_map(|&(at, size)| {
+                let model = *models.get(size as usize)?;
+                // Each spins at its own rate (seeded by where it is, which is smooth in time).
+                let spin = 1.5 + (at.x * 0.37 + at.z * 0.23).sin().abs() * 3.0;
+                Some(asc_render::PartInstance { model, position: at, yaw: time * spin + at.x, scale: 1.0, sway: 0.0 })
+            })
+            .collect()
     }
 
     /// How deep in the smoke `at` is (0..1): ash in the air only there.
