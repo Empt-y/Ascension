@@ -114,16 +114,30 @@ fn ripple_normal(xz_in: vec2<f32>, t: f32, fade: f32, flow: vec2<f32>) -> vec3<f
         let along = flow / speed;
         let across = vec2(-along.y, along.x);
         // Into flow-aligned coordinates, squashed along the flow (streaks), drifting with it.
+        // Only the downstream drift: the idle drift of still water has a sideways part, which on a
+        // slow river outran the flow and slid the ripples from bank to bank.
         xz = vec2(dot(xz_in, along) * 0.45 - t * speed * 1.6, dot(xz_in, across));
+        let q1 = vec3(xz * 0.35, t * 0.3);
+        let q2 = vec3(xz * 1.1 - vec2(t * speed * 0.8, 0.0), t * 0.5);
+        // The slopes come out along and across the flow: back into x and z.
+        let g = ripple_slope(q1, q2);
+        let w = along * g.x + across * g.y;
+        return normalize(vec3(-w.x * 0.9 * fade, 1.0, -w.y * 0.9 * fade));
     }
     let p1 = vec3(xz * 0.35 + vec2(t * 0.4, t * 0.25), t * 0.3);
     let p2 = vec3(xz * 1.1 - vec2(t * 0.6, -t * 0.2), t * 0.5);
+    let g = ripple_slope(p1, p2);
+    return normalize(vec3(-g.x * 0.9 * fade, 1.0, -g.y * 0.9 * fade));
+}
+
+// The ripple field's slope (along its first and second coordinates).
+fn ripple_slope(p1: vec3<f32>, p2: vec3<f32>) -> vec2<f32> {
     let e = 0.15;
     let n1 = value_noise(p1);
     let n2 = value_noise(p2);
     let dx = (value_noise(p1 + vec3(e, 0.0, 0.0)) - n1) + (value_noise(p2 + vec3(e, 0.0, 0.0)) - n2) * 0.5;
     let dz = (value_noise(p1 + vec3(0.0, e, 0.0)) - n1) + (value_noise(p2 + vec3(0.0, e, 0.0)) - n2) * 0.5;
-    return normalize(vec3(-dx * 0.9 * fade, 1.0, -dz * 0.9 * fade));
+    return vec2(dx, dz);
 }
 
 @fragment

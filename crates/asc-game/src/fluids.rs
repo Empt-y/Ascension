@@ -251,9 +251,18 @@ impl ClientFluids {
             self.columns_changed = false;
             // Only where the chunk at the sea's surface is materialised (one deep under the sea
             // floor must not punch a hole in it).
-            let sea = (asc_world::SEA_LEVEL / CHUNK as f32).floor() as i32;
-            let mut columns: Vec<[i32; 2]> =
-                self.fluids.chunks.keys().filter(|c| c.y == sea).map(|c| [c.x, c.z]).collect();
+            // Only where the chunk at the natural water's surface (at the column's middle) is
+            // materialised: one deep under a lake must not punch a hole in it.
+            let mut columns: Vec<[i32; 2]> = self
+                .fluids
+                .chunks
+                .keys()
+                .filter(|c| {
+                    let mid = (c.as_vec3() + Vec3::splat(0.5)) * CHUNK as f32;
+                    world.worldgen.water_level(mid.x, mid.z).is_some_and(|l| (l / CHUNK as f32).floor() as i32 == c.y)
+                })
+                .map(|c| [c.x, c.z])
+                .collect();
             columns.sort_unstable();
             columns.dedup();
             renderer.set_fluid_columns(&columns);

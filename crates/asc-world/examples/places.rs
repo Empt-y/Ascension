@@ -20,10 +20,11 @@ fn main() {
             // A waterfall: water here, water 3 m lower within 6 m.
             if fall.is_none() {
                 for d in [(6.0, 0.0), (-6.0, 0.0), (0.0, 6.0), (0.0, -6.0)] {
-                    if let Some(l2) = wg.water_level(x + d.0, z + d.1) {
-                        if l - l2 > 2.5 && l2 != SEA_LEVEL {
-                            fall = Some((x, z, l));
-                        }
+                    if let Some(l2) = wg.water_level(x + d.0, z + d.1)
+                        && l - l2 > 2.5
+                        && l2 != SEA_LEVEL
+                    {
+                        fall = Some((x, z, l));
                     }
                 }
             }

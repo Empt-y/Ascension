@@ -192,15 +192,19 @@ impl FluidSim {
     }
 
     /// Whether any natural water lies in or right next to `coord` (a coarse look at its columns).
+    /// Whether natural water (sea, lake or river) lies in or right next to `coord`: a coarse look at
+    /// its columns, for a surface within the chunk's height (or a little above it, so digging up to
+    /// a bank from below counts too).
     fn near_water(world: &World, coord: ChunkCoord) -> bool {
         let base = (coord * N).as_vec3();
-        if base.y > asc_world::SEA_LEVEL + 2.0 || base.y + (N as f32) < -60.0 {
+        let (bottom, top) = (base.y - 2.0, base.y + N as f32 + 2.0);
+        if top < fluid::LAVA_LEVEL - 40.0 {
             return false;
         }
         (0..=8).any(|j| {
             (0..=8).any(|i| {
                 let (x, z) = (base.x - 2.0 + i as f32 * 4.5, base.z - 2.0 + j as f32 * 4.5);
-                fluid::water_level(&world.worldgen, x, z).is_some()
+                fluid::water_level(&world.worldgen, x, z).is_some_and(|l| l >= bottom && l - 40.0 <= top)
             })
         })
     }
@@ -602,5 +606,42 @@ mod tests {
         });
         assert!(found.is_some(), "no open cell found below the lava level");
         assert_ne!(fluid::pristine(&wg, IVec3::new(0, -100, 0)).0, FluidKind::Lava);
+    }
+
+    #[test]
+    fn digging_beside_a_river_lets_it_in() {
+        let mut world = World::new(1337);
+        let wg = world.worldgen.clone();
+        // A river bank above sea level: river water here, dry ground 3 m across.
+        let (x, z, level) = (0..60000)
+            .map(|i| ((i % 300) as f32 * 2.0 - 300.0, (i / 300) as f32 * 2.0 - 200.0))
+            .find_map(|(x, z)| {
+                let l = wg.water_level(x, z)?;
+                (l > asc_world::SEA_LEVEL + 4.0 && wg.water_level(x + 4.0, z).is_none()).then_some((x, z, l))
+            })
+            .expect("a river bank");
+        let mut sim = FluidSim::new();
+        // Dig a pit into the bank, its floor below the river's surface.
+        for k in 0..4 {
+            let op = EditOp {
+                center: Vec3::new(x + 2.0 + k as f32 * 1.2, level - 1.0, z),
+                radius: 1.5,
+                kind: EditKind::Dig,
+                material: asc_world::Material::Air,
+            };
+            world.edits.push(op);
+            sim.disturb(&world, &op);
+        }
+        assert!(!sim.fluids.chunks.is_empty(), "digging next to the river woke its water");
+        for _ in 0..600 {
+            sim.tick(&world);
+        }
+        // The pit's bottom layer has water in it. (The disturbed stretch of river settles into a slope
+        // between the untouched river upstream and downstream, so here it sits a little below its
+        // untouched level.)
+        let pit = Vec3::new(x + 4.0, level - 2.0, z);
+        let (k, frac) = sim.fraction_at(&world, pit);
+        assert_eq!(k, FluidKind::Water, "the pit at {pit} filled from the river at {level}");
+        assert!(frac > 0.1, "only {frac}");
     }
 }
