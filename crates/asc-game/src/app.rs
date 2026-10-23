@@ -356,6 +356,7 @@ impl State {
             world.worldgen.clone(),
         );
         scatter.set_removed_nodes(welcome.mined.iter().copied());
+        scatter.set_fire(&welcome.fire);
         let lattice = asc_build::Lattice::new(&parts.spec);
         let structures = asc_build::Structures::from_pieces(lattice, welcome.pieces.iter().copied());
         log::info!("structures: {} pieces", structures.len());
@@ -443,7 +444,11 @@ impl State {
             fluid_test_end: Vec3::ZERO,
             volcanism: Default::default(),
             erupt_sent: false,
-            effects: Default::default(),
+            effects: {
+                let mut effects = crate::effects::Effects::default();
+                effects.set_fire(&welcome.fire);
+                effects
+            },
             effects_at: std::time::Instant::now(),
             volcanic,
             fluids,
@@ -669,7 +674,7 @@ impl State {
         let now = std::time::Instant::now();
         let dt = now.duration_since(self.effects_at).as_secs_f32().min(0.25);
         self.effects_at = now;
-        self.effects.update(dt, &self.volcanism);
+        self.effects.update(dt, &self.volcanism, &self.world.worldgen, self.camera.position);
         let bombs = self.effects.bombs(&self.volcanism, &self.volcanic.bombs, self.started.elapsed().as_secs_f32());
         self.building.set_moving(bombs);
         let (ash, shake) = self.volcanic_air();
@@ -683,6 +688,8 @@ impl State {
             lights: {
                 let mut lights = self.fluids.lava_lights(self.camera.position);
                 lights.extend(self.streamer.lava_lights(&self.fluids, self.camera.position, 160.0));
+                // Burning ground, near by.
+                lights.extend(self.effects.fire_lights(&self.world.worldgen, self.camera.position, 6));
                 // Volcanic bombs glow as they fly.
                 lights.extend(self.volcanism.bombs.iter().map(|&(position, _)| asc_render::PointLight {
                     position,
@@ -1082,6 +1089,10 @@ impl State {
             }
             ServerMsg::Fluid { coord, data } => self.fluids.apply(coord, &data),
             ServerMsg::Volcanism(report) => self.volcanism = report,
+            ServerMsg::Fire(changed) => {
+                self.scatter.set_fire(&changed);
+                self.effects.set_fire(&changed);
+            }
             ServerMsg::StashTaken { id } => {
                 self.stashes.remove(&id);
                 self.sync_stashes();

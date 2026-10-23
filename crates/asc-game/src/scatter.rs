@@ -70,6 +70,8 @@ fn rock_collider(min: Vec3, max: Vec3) -> (f32, f32) {
 pub struct Config {
     seed: u64,
     kinds: Vec<Kind>,
+    /// Each nature model's burnt stages.
+    burnt: HashMap<ModelId, [ModelId; 3]>,
 }
 
 impl Config {
@@ -153,7 +155,7 @@ impl Config {
                 kinds.push(node_kind("ore_deep", NodeKind::Deep, 80.0, 0.0));
             }
         }
-        Self { seed: crate::ore_nodes::seed_of(seed), kinds }
+        Self { seed: crate::ore_nodes::seed_of(seed), kinds, burnt: nature.burnt.clone() }
     }
 
     /// Index of the kind called `name`.
@@ -346,6 +348,8 @@ pub struct Scatter {
     colliders: HashMap<IVec2, Vec<Collider>>,
     /// Ore nodes that have been mined away.
     removed: HashSet<NodeId>,
+    /// Burning or burnt ground: fire cell and stage (1 scorched .. 3 burnt out).
+    fire: HashMap<IVec2, u8>,
     last_center: Option<IVec2>,
     stats: ScatterStats,
 }
@@ -397,6 +401,7 @@ impl Scatter {
             dirty: HashSet::new(),
             colliders: HashMap::new(),
             removed: HashSet::new(),
+            fire: HashMap::new(),
             last_center: None,
             stats: ScatterStats::default(),
         }
@@ -476,10 +481,18 @@ impl Scatter {
         let k = &self.config.kinds[key.1];
         let removed = &self.removed;
         let kept: Vec<&Placed> = raw.iter().filter(|p| keep(world, structures, removed, p)).collect();
+        // Plants on burning or burnt ground show their burnt stage.
+        let model = |p: &Placed| {
+            let cell = asc_sim::fire::cell_of(p.position.x, p.position.z);
+            match (self.fire.get(&cell), self.config.burnt.get(&p.model)) {
+                (Some(&stage), Some(stages)) if (1..=3).contains(&stage) => stages[stage as usize - 1],
+                _ => p.model,
+            }
+        };
         let instances = kept
             .iter()
             .map(|p| PartInstance {
-                model: p.model,
+                model: model(p),
                 position: p.position,
                 yaw: p.yaw,
                 scale: p.scale,
@@ -558,6 +571,16 @@ impl Scatter {
         best.map(|(_, n)| n)
     }
 
+    /// Fire cells whose stage changed: plants there are redrawn at their burnt stage.
+    pub fn set_fire(&mut self, changed: &[([i32; 2], u8)]) {
+        for &(c, stage) in changed {
+            let cell = IVec2::from_array(c);
+            self.fire.insert(cell, stage);
+            let centre = (cell.as_vec2() + 0.5) * asc_sim::fire::CELL;
+            self.invalidate(Vec3::new(centre.x, 0.0, centre.y), asc_sim::fire::CELL);
+        }
+    }
+
     /// Take a node out of the world (it has been mined).
     pub fn remove_node(&mut self, id: NodeId) {
         self.removed.insert(id);
@@ -633,6 +656,7 @@ mod tests {
         let all: Vec<&str> = Biome::ALL.iter().map(|b| b.name()).collect();
         let nature = NatureModels {
             models: vec![model(0, "tree", &all), model(1, "grass", &all)],
+            burnt: Default::default(),
             kinds: [
                 ("tree".to_string(), kind(600.0, Collide::Trunk)),
                 ("grass".to_string(), kind(45.0, Collide::None)),

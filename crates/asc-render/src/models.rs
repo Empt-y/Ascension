@@ -189,6 +189,14 @@ mod tests {
                 let s = s.to_string_lossy();
                 s.ends_with("_far") || s.ends_with("_mid")
             });
+            let burnt = path.file_stem().is_some_and(|s| s.to_string_lossy().contains("_burnt"));
+            if path.extension().is_some_and(|e| e == "glb") && burnt {
+                // A burnt stage: loads, and keeps something (burnt-out grass is mere stubble).
+                let model = load_glb(&std::fs::read(&path).unwrap())
+                    .unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+                assert!(model.triangles() > 0, "{}", path.display());
+                continue;
+            }
             if path.extension().is_some_and(|e| e == "glb") && !lod {
                 let model = load_glb(&std::fs::read(&path).unwrap())
                     .unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));

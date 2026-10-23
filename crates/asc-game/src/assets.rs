@@ -120,6 +120,8 @@ pub struct NatureModel {
 /// The natural scatter models (trees, plants, rocks...) plus how each kind is scattered.
 pub struct NatureModels {
     pub models: Vec<NatureModel>,
+    /// Each model's burnt stages (scorched, charred, burnt out), where it has them.
+    pub burnt: std::collections::HashMap<ModelId, [ModelId; 3]>,
     pub kinds: std::collections::BTreeMap<String, KindSpec>,
     /// Instances per square metre, `density[biome][kind]`.
     pub density: std::collections::BTreeMap<String, std::collections::BTreeMap<String, f32>>,
@@ -135,6 +137,7 @@ impl NatureModels {
         )
         .with_context(|| format!("parsing {}", spec_path.display()))?;
         let mut models = Vec::new();
+        let mut burnt = std::collections::HashMap::new();
         let mut triangles = 0;
         for spec in file.model {
             anyhow::ensure!(file.kinds.contains_key(&spec.kind), "{}: unknown kind {}", spec.id, spec.kind);
@@ -164,13 +167,28 @@ impl NatureModels {
             if !levels.is_empty() {
                 renderer.set_lods(id, levels);
             }
+            // Its burnt stages, if built (tools/blender/nature.py burnt): drawn at every distance
+            // (they have no lighter versions of their own).
+            let mut stages = Vec::new();
+            for stage in 1..=3 {
+                let path = root.join("models").join("nature").join(format!("{}_burnt{stage}.glb", spec.id));
+                if !path.is_file() {
+                    break;
+                }
+                let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+                let data = asc_render::models::load_glb(&bytes).with_context(|| format!("loading {}", path.display()))?;
+                stages.push(renderer.add_model(&data));
+            }
+            if let Ok(stages) = <[ModelId; 3]>::try_from(stages) {
+                burnt.insert(id, stages);
+            }
             models.push(NatureModel { spec, id, min: data.min, max: data.max });
         }
         for biome in file.density.keys() {
             anyhow::ensure!(asc_world::Biome::from_name(biome).is_some(), "density: unknown biome {biome}");
         }
         log::info!("loaded {} nature models ({triangles} triangles)", models.len());
-        Ok(Self { models, kinds: file.kinds, density: file.density })
+        Ok(Self { models, burnt, kinds: file.kinds, density: file.density })
     }
 }
 

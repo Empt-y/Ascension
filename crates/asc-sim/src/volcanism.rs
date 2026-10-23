@@ -102,6 +102,8 @@ pub struct Events {
     /// Damage to the player and why.
     pub hurt: Vec<(i32, crate::vitals::Cause)>,
     pub notices: Vec<String>,
+    /// Where bombs landed (they set what grows there alight).
+    pub landed: Vec<Vec3>,
 }
 
 pub struct Volcanism {
@@ -339,6 +341,7 @@ impl Volcanism {
         }
         self.bombs.retain(|b| !(b.vel.y < 0.0 && b.at.y <= world.worldgen.height(b.at.x, b.at.z)) && b.at.y > -500.0);
         for (at, size) in landed {
+            events.landed.push(at);
             let d = at.distance(player);
             let scale = 0.4 + 0.3 * size as f32;
             let reach = BOMB_REACH * scale;

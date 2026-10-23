@@ -151,6 +151,7 @@ pub struct Server {
     /// Water (and later lava) where something has disturbed it.
     pub fluid_sim: crate::fluids::FluidSim,
     volcanism: crate::volcanism::Volcanism,
+    fire: crate::fire::Fire,
     next_stash: u32,
     seed: i32,
     save_dir: PathBuf,
@@ -182,8 +183,10 @@ impl Server {
         let mut mined = BTreeSet::new();
         let stashes = loaded.as_ref().map_or_else(Vec::new, |g| g.stashes.clone());
         let mut fluid_sim = crate::fluids::FluidSim::new();
+        let mut fire = crate::fire::Fire::new(seed);
         if let Some(game) = &loaded {
             fluid_sim.restore(&world, game.fluids.clone());
+            fire.restore(game.burnt.iter().copied());
         }
         let next_stash = stashes.iter().map(|s| s.id + 1).max().unwrap_or(0);
         match &loaded {
@@ -235,6 +238,7 @@ impl Server {
             stashes,
             fluid_sim,
             volcanism: crate::volcanism::Volcanism::new(seed),
+            fire,
             next_stash,
             seed,
             save_dir,
@@ -268,6 +272,7 @@ impl Server {
             inventory: p.inventory.snapshot(p.held, p.seq),
             vitals: p.vitals,
             stashes: self.stashes.iter().map(|s| (s.id, Vec3::from(s.at))).collect(),
+            fire: self.fire.stages(self.sim.ticks),
             fluids: {
                 // In coordinate order: the same state always makes the same message.
                 let mut f: Vec<_> = self
@@ -315,6 +320,25 @@ impl Server {
         for (amount, cause) in events.hurt {
             let outcome = self.player.vitals.hurt(amount, cause);
             self.apply(outcome);
+        }
+        // Fire: bombs and spilled lava set what grows where they land alight; it spreads.
+        let ticks = self.sim.ticks;
+        for at in events.landed {
+            self.fire.ignite(&self.world.worldgen, at.x, at.z, ticks);
+        }
+        if ticks.is_multiple_of(20) {
+            for c in self.fluid_sim.lava_on_ground() {
+                self.fire.ignite(&self.world.worldgen, c.x as f32, c.z as f32, ticks);
+            }
+        }
+        let burn = self.fire.tick(&self.world.worldgen, ticks, self.player.feet);
+        if burn > 0 {
+            let outcome = self.player.vitals.hurt(burn, Cause::Heat);
+            self.apply(outcome);
+        }
+        let changed = self.fire.take_changed();
+        if !changed.is_empty() {
+            self.outbox.push(ServerMsg::Fire(changed));
         }
         self.fluid_sim.tick(&self.world);
         for (cell, height, material) in self.fluid_sim.take_solidified() {
@@ -716,7 +740,13 @@ impl Server {
                 f.sort_by_key(|(c, _, _)| c.to_array());
                 f
             },
+            burnt: self.fire.stages(self.sim.ticks).into_iter().map(|(c, _)| c).collect(),
         }
+    }
+
+    /// Set the ground at a world point alight (development: the fire cheat).
+    pub fn ignite(&mut self, at: Vec3) {
+        self.fire.ignite(&self.world.worldgen, at.x, at.z, self.sim.ticks);
     }
 
     /// Save now; `what` names it in the log ("saved", "autosaved").

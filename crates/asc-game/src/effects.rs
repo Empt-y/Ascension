@@ -1,10 +1,10 @@
 //! Particle effects the client makes from what the server says: a volcano's smoke billowing out of
 //! its crater (pale steam while it rumbles, dark ash clouds while it erupts), lava spraying up in
-//! the crater, and bombs glowing as they fly.
+//! the crater, bombs glowing as they fly, and flames and smoke over burning ground.
 
 use asc_render::{PARTICLE_GLOW, PARTICLE_SMOKE, Particle};
 use asc_sim::volcanism::{Phase, Report};
-use glam::{Vec2, Vec3};
+use glam::{IVec2, Vec2, Vec3};
 
 /// Smoke puffs a second from an erupting crater (at full strength), and lava sparks.
 const SMOKE_PER_SECOND: f32 = 22.0;
@@ -42,10 +42,18 @@ struct Spark {
     size: f32,
 }
 
+/// Fire: flames a second per burning cell (catching, then burning hard), drawn within `FIRE_REACH`.
+const FLAMES_PER_SECOND: [f32; 2] = [2.0, 5.0];
+const FIRE_SMOKE_PER_SECOND: f32 = 0.35;
+const FIRE_REACH: f32 = 300.0;
+
 #[derive(Default)]
 pub struct Effects {
     puffs: Vec<Puff>,
     sparks: Vec<Spark>,
+    /// Burning ground: fire cell and stage (1 catching, 2 burning hard), and fractions of a flame
+    /// and a smoke puff still owed to it.
+    burning: std::collections::HashMap<IVec2, (u8, f32, f32)>,
     /// Fractions of a puff or spark still owed to each volcano (by index) at its rate.
     owed: Vec<(f32, f32)>,
     rng: u64,
@@ -57,8 +65,93 @@ impl Effects {
         (self.rng >> 40) as f32 / (1u64 << 24) as f32
     }
 
+    /// Fire cells whose stage changed (burnt-out ones stop burning).
+    pub fn set_fire(&mut self, changed: &[([i32; 2], u8)]) {
+        for &(c, stage) in changed {
+            let cell = IVec2::from_array(c);
+            if (1..=2).contains(&stage) {
+                self.burning.entry(cell).or_insert((stage, 0.0, 0.0)).0 = stage;
+            } else {
+                self.burning.remove(&cell);
+            }
+        }
+    }
+
+    /// Lights for the burning ground nearest `camera` (at most `count`).
+    pub fn fire_lights(&self, worldgen: &asc_world::WorldGen, camera: Vec3, count: usize) -> Vec<asc_render::PointLight> {
+        let mut near: Vec<(f32, IVec2, u8)> = self
+            .burning
+            .iter()
+            .map(|(c, (stage, _, _))| {
+                let centre = (c.as_vec2() + 0.5) * asc_sim::fire::CELL;
+                (centre.distance_squared(Vec2::new(camera.x, camera.z)), *c, *stage)
+            })
+            .filter(|(d, _, _)| *d < FIRE_REACH * FIRE_REACH)
+            .collect();
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        near.truncate(count);
+        near.into_iter()
+            .map(|(_, c, stage)| {
+                let centre = (c.as_vec2() + 0.5) * asc_sim::fire::CELL;
+                let y = worldgen.height(centre.x, centre.y) + 1.5;
+                asc_render::PointLight {
+                    position: Vec3::new(centre.x, y, centre.y),
+                    radius: 10.0 + 6.0 * stage as f32,
+                    color: Vec3::new(1.0, 0.45, 0.12) * (1.5 + 1.5 * stage as f32),
+                }
+            })
+            .collect()
+    }
+
+    /// Flames and smoke over the burning ground near `camera`.
+    fn fire(&mut self, dt: f32, worldgen: &asc_world::WorldGen, camera: Vec3) {
+        let cells: Vec<IVec2> = self.burning.keys().copied().collect();
+        for cell in cells {
+            let centre = (cell.as_vec2() + 0.5) * asc_sim::fire::CELL;
+            if centre.distance_squared(Vec2::new(camera.x, camera.z)) > FIRE_REACH * FIRE_REACH {
+                continue;
+            }
+            let (stage, owed_flame, owed_smoke) = self.burning[&cell];
+            let mut flames = owed_flame + FLAMES_PER_SECOND[stage as usize - 1] * dt;
+            let mut smoke = owed_smoke + FIRE_SMOKE_PER_SECOND * stage as f32 * dt;
+            while flames >= 1.0 {
+                flames -= 1.0;
+                let at = centre + Vec2::new(self.random() - 0.5, self.random() - 0.5) * asc_sim::fire::CELL;
+                let ground = worldgen.height(at.x, at.y);
+                // Flames lick up to a few metres (higher through burning trees).
+                let spark = Spark {
+                    at: Vec3::new(at.x, ground + self.random() * 1.5 * stage as f32, at.y),
+                    vel: Vec3::new(self.random() - 0.5, 2.5 + 2.5 * self.random() * stage as f32, self.random() - 0.5),
+                    age: 0.0,
+                    life: 0.6 + 0.7 * self.random(),
+                    size: 0.5 + 0.6 * self.random() * stage as f32,
+                };
+                self.sparks.push(spark);
+            }
+            while smoke >= 1.0 {
+                smoke -= 1.0;
+                let at = centre + Vec2::new(self.random() - 0.5, self.random() - 0.5) * asc_sim::fire::CELL;
+                let ground = worldgen.height(at.x, at.y) + 2.0 * stage as f32;
+                let puff = Puff {
+                    at: Vec3::new(at.x, ground, at.y),
+                    from: ground,
+                    vel: Vec3::new(0.0, 2.0 + 2.0 * self.random(), 0.0),
+                    size: 2.0 + 2.0 * self.random(),
+                    age: 0.0,
+                    dark: 0.55 + 0.25 * self.random(),
+                    opacity: 0.2 + 0.1 * self.random(),
+                    seed: self.random() * 100.0,
+                    spin: self.random() * std::f32::consts::TAU,
+                };
+                self.puffs.push(puff);
+            }
+            self.burning.insert(cell, (stage, flames, smoke));
+        }
+    }
+
     /// Step `dt` seconds on from what the server last reported.
-    pub fn update(&mut self, dt: f32, report: &Report) {
+    pub fn update(&mut self, dt: f32, report: &Report, worldgen: &asc_world::WorldGen, camera: Vec3) {
+        self.fire(dt, worldgen, camera);
         self.owed.resize(report.active.len(), (0.0, 0.0));
         for (i, a) in report.active.iter().enumerate() {
             let (smoke, dark, sparks) = match a.phase {

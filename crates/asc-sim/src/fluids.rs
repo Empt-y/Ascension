@@ -183,6 +183,28 @@ impl FluidSim {
         std::mem::take(&mut self.solidified)
     }
 
+    /// Where spilled lava lies on the ground (the top of each column of it with ground or a cell
+    /// below it that isn't lava), for setting what grows there alight.
+    pub fn lava_on_ground(&self) -> Vec<IVec3> {
+        let mut out = Vec::new();
+        let n = N as usize;
+        for coord in self.still.keys() {
+            let Some(ch) = self.fluids.chunks.get(coord) else { continue };
+            for z in 0..n {
+                for x in 0..n {
+                    for y in (0..n).rev() {
+                        let i = cell_index(x, y, z);
+                        if ch.kind[i] == FluidKind::Lava as u8 && ch.source[i] == 0 && ch.amount[i] > 0 {
+                            out.push(*coord * N + IVec3::new(x as i32, y as i32, z as i32));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Add fluid to a cell (a vent or a geyser), bringing its chunk to life.
     pub fn pour(&mut self, world: &World, cell: IVec3, kind: FluidKind, amount: u16) {
         let (coord, local) = fluid::split(cell);

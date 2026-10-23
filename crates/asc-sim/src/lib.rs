@@ -3,6 +3,7 @@
 //! thread inside the game or, one day, headless as a server.
 
 pub mod content;
+pub mod fire;
 pub mod fluids;
 pub mod inventory;
 pub mod islands;

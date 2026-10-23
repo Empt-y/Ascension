@@ -96,6 +96,14 @@ pub struct SaveGame {
     pub stashes: Vec<StashSave>,
     /// Materialised fluid chunks: coordinate, kinds and amounts (`fluid::CELLS` each).
     pub fluids: Vec<(glam::IVec3, Vec<u8>, Vec<u16>)>,
+    /// Burnt ground (fire cells; any still burning is saved as burnt).
+    pub burnt: Vec<[i32; 2]>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FireFile {
+    format_version: u32,
+    burnt: Vec<[i32; 2]>,
 }
 
 /// One fluid chunk as runs of (count, kind, amount).
@@ -206,6 +214,8 @@ pub fn save(dir: &Path, game: &SaveGame) -> Result<()> {
         chunks: game.fluids.iter().map(|(c, k, a)| (c.to_array(), pack_fluid(k, a))).collect(),
     };
     write_atomic(&dir.join("fluids.bin"), &postcard::to_stdvec(&fluids)?)?;
+    let fire = FireFile { format_version: FORMAT_VERSION, burnt: game.burnt.clone() };
+    write_atomic(&dir.join("fire.bin"), &postcard::to_stdvec(&fire)?)?;
     Ok(())
 }
 
@@ -285,7 +295,14 @@ pub fn load(dir: &Path) -> Result<Option<SaveGame>> {
             })
             .collect()
     };
-    Ok(Some(SaveGame { meta, players, ops: edits.ops, structures, nodes, stashes, fluids }))
+    let fire_path = dir.join("fire.bin");
+    let burnt = if !fire_path.exists() && !with_suffix(&fire_path, ".bak").exists() {
+        Vec::new()
+    } else {
+        let file: FireFile = read_with_backup(&fire_path, |b| Ok(postcard::from_bytes(b)?))?;
+        file.burnt
+    };
+    Ok(Some(SaveGame { meta, players, ops: edits.ops, structures, nodes, stashes, fluids, burnt }))
 }
 
 #[cfg(test)]
@@ -351,6 +368,7 @@ mod tests {
                 remainders: Default::default(),
             }],
             fluids: vec![(glam::IVec3::new(1, -1, 2), vec![1; 32768], vec![700; 32768])],
+            burnt: vec![[4, -7], [5, -7]],
         }
     }
 

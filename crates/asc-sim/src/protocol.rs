@@ -66,6 +66,8 @@ pub struct Welcome {
     pub stashes: Vec<(u32, Vec3)>,
     /// Every materialised fluid chunk (everything else is pristine).
     pub fluids: Vec<(glam::IVec3, asc_world::fluid::PackedFluid)>,
+    /// Ground that's burning or burnt: fire cell and stage (see `fire`).
+    pub fire: Vec<([i32; 2], crate::fire::Stage)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -98,4 +100,6 @@ pub enum ServerMsg {
     /// Volcanoes near the player that aren't quiet, bombs in the air and blowing geysers (each tick
     /// while there's any; one empty report when it's all over).
     Volcanism(crate::volcanism::Report),
+    /// Fire cells whose stage changed (caught, burning hard, burnt out).
+    Fire(Vec<([i32; 2], crate::fire::Stage)>),
 }
