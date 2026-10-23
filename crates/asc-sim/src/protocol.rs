@@ -37,6 +37,8 @@ pub enum ClientMsg {
     Inventory { seq: u32, op: InventoryOp },
     /// Set the time of day (development).
     SetTime(f32),
+    /// Start the nearest active volcano's eruption, and the nearest geysers, now (development).
+    Erupt,
     /// Save now.
     Save,
     /// Answered with `Pong` once everything sent before it has been handled (so scripted clients
@@ -93,4 +95,7 @@ pub enum ServerMsg {
     StashTaken { id: u32 },
     /// A fluid chunk changed (or came to life).
     Fluid { coord: glam::IVec3, data: asc_world::fluid::PackedFluid },
+    /// Volcanoes near the player that aren't quiet, bombs in the air and blowing geysers (each tick
+    /// while there's any; one empty report when it's all over).
+    Volcanism(crate::volcanism::Report),
 }

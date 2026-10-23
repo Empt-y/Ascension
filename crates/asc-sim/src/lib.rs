@@ -16,6 +16,7 @@ pub mod server;
 pub mod sim;
 pub mod stress;
 pub mod vitals;
+pub mod volcanism;
 
 use serde::{Deserialize, Serialize};
 

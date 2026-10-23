@@ -150,6 +150,7 @@ pub struct Server {
     pub stashes: Vec<save::StashSave>,
     /// Water (and later lava) where something has disturbed it.
     pub fluid_sim: crate::fluids::FluidSim,
+    volcanism: crate::volcanism::Volcanism,
     next_stash: u32,
     seed: i32,
     save_dir: PathBuf,
@@ -233,6 +234,7 @@ impl Server {
             spawn,
             stashes,
             fluid_sim,
+            volcanism: crate::volcanism::Volcanism::new(seed),
             next_stash,
             seed,
             save_dir,
@@ -302,12 +304,25 @@ impl Server {
     /// One fixed step of the simulation.
     pub fn tick(&mut self) {
         self.sim.tick();
+        let (events, report) =
+            self.volcanism.tick(&self.world, &mut self.fluid_sim, self.player.feet, self.sim.ticks);
+        if let Some(report) = report {
+            self.outbox.push(ServerMsg::Volcanism(report));
+        }
+        for notice in events.notices {
+            self.outbox.push(ServerMsg::Notice(notice));
+        }
+        for (amount, cause) in events.hurt {
+            let outcome = self.player.vitals.hurt(amount, cause);
+            self.apply(outcome);
+        }
         self.fluid_sim.tick(&self.world);
-        for (cell, material) in self.fluid_sim.take_solidified() {
+        for (cell, height, material) in self.fluid_sim.take_solidified() {
+            // A run `height` metres up from the bottom of `cell`, as one box.
             let op = asc_world::EditOp {
-                center: cell.as_vec3(),
+                center: cell.as_vec3() + Vec3::Y * (height * 0.5 - 0.5),
                 radius: 0.55,
-                kind: asc_world::EditKind::FillBox { half_height: 0.55 },
+                kind: asc_world::EditKind::FillBox { half_height: height * 0.5 + 0.05 },
                 material,
             };
             self.world.edits.push(op);
@@ -451,6 +466,18 @@ impl Server {
                 }
                 self.sim.time_of_day = t.rem_euclid(1.0);
                 self.outbox.push(ServerMsg::Time { ticks: self.sim.ticks, time_of_day: self.sim.time_of_day });
+            }
+            ClientMsg::Erupt => {
+                if !self.player.cheats && self.validate {
+                    return;
+                }
+                match self.volcanism.force(&self.world, self.player.feet, self.sim.ticks) {
+                    Some(at) => {
+                        log::info!("forced an eruption at {at}");
+                        self.outbox.push(ServerMsg::Notice(format!("Eruption started at ({:.0}, {:.0}, {:.0})", at.x, at.y, at.z)));
+                    }
+                    None => self.outbox.push(ServerMsg::Notice("No active volcano near".into())),
+                }
             }
             ClientMsg::Save => self.save("saved"),
             ClientMsg::Ping(n) => self.outbox.push(ServerMsg::Pong(n)),

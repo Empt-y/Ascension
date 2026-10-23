@@ -125,10 +125,17 @@ fn sun_light() -> vec3<f32> {
     // A low sun shines through far more air, so it dims well before it sets (atmospheric
     // extinction); otherwise walls facing a sunset blow out to white.
     let extinction = mix(0.3, 1.0, smoothstep(0.0, 0.5, y));
-    return c * 3.2 * extinction * smoothstep(-0.05, 0.12, y);
+    // Volcanic ash in the air dims it.
+    return c * 3.2 * extinction * smoothstep(-0.05, 0.12, y) * (1.0 - 0.75 * ash());
+}
+
+// 0..1 volcanic ash in the air round the camera.
+fn ash() -> f32 {
+    return globals.env.z;
 }
 
 // Stylised sky: gradient from horizon to zenith, warm glow around the sun at dusk, no sun disk.
+// Ash in the air turns it a dark grey-brown, lit dull red from below.
 fn sky_base(dir: vec3<f32>) -> vec3<f32> {
     let day = daylight();
     let dusk = sunset_amount();
@@ -142,6 +149,11 @@ fn sky_base(dir: vec3<f32>) -> vec3<f32> {
     let mu = max(dot(dir, sun_dir()), 0.0);
     let glow_col = mix(vec3(1.0, 0.85, 0.6), vec3(1.0, 0.4, 0.15), dusk);
     col += glow_col * (pow(mu, 8.0) * 0.35 + pow(mu, 64.0) * 0.8) * (day * 0.6 + dusk);
+    let a = ash();
+    if a > 0.0 {
+        let cloud = vec3(0.12, 0.10, 0.085) * (0.15 + 0.85 * day) + vec3(0.25, 0.06, 0.02) * (1.0 - smoothstep(-0.3, 0.3, dir.y)) * 0.5;
+        col = mix(col, cloud, a * 0.9);
+    }
     return col;
 }
 
@@ -182,7 +194,8 @@ fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
     }
     let dir = normalize(rel);
     let fog_col = sky_base(dir);
-    let f = fog_amount(rel);
+    // Ash thickens the air: a few hundred metres at its worst.
+    let f = max(fog_amount(rel), 1.0 - exp(-length(rel) * 0.006 * ash()));
     let horizontal = length(rel.xz);
     let edge = smoothstep(globals.far.x * 0.75, globals.far.x * 0.97, horizontal);
     return mix(color, fog_col, max(f, edge));

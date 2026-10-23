@@ -80,7 +80,7 @@ struct Globals {
     output: [f32; 4],
     /// x = render scale, y = RCAS sharpness.
     upscale: [f32; 4],
-    /// x = 1 when the camera is underwater, y = point light count.
+    /// x = 1 when the camera is underwater, y = point light count, z = volcanic ash (0..1).
     env: [f32; 4],
     light_pos: [[f32; 4]; MAX_LIGHTS],
     light_color: [[f32; 4]; MAX_LIGHTS],
@@ -173,6 +173,8 @@ pub struct FrameParams {
     pub underwater: bool,
     /// Point lights near the camera (the nearest `MAX_LIGHTS` are used).
     pub lights: Vec<PointLight>,
+    /// 0..1 volcanic ash in the air round the camera: darker sky, thicker fog, dimmer sun.
+    pub ash: f32,
 }
 
 /// egui output for this frame.
@@ -1008,7 +1010,7 @@ impl Renderer {
                 f32::from(u8::from(self.taa_debug.is_some())),
                 self.sun_disc,
             ],
-            env: [f32::from(u8::from(frame.underwater)), lights.len() as f32, 0.0, 0.0],
+            env: [f32::from(u8::from(frame.underwater)), lights.len() as f32, frame.ash, 0.0],
             light_pos: std::array::from_fn(|i| {
                 lights.get(i).map_or([0.0; 4], |l| (l.position - cam.position).extend(l.radius).into())
             }),

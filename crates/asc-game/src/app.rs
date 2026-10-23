@@ -51,6 +51,8 @@ pub struct Options {
     pub fall_test: bool,
     /// Dig a trench from the nearest shore inland below sea level and watch the sea fill it.
     pub fluid_test: bool,
+    /// Start the nearest active volcano's eruption (and geysers) soon after starting.
+    pub erupt: bool,
     /// Render the scene at this fraction of the window's resolution and upscale it (`--render-scale`).
     pub render_scale: Option<f32>,
     /// Run a stand-in factory on the server every tick (light: mostly waiting machines; heavy:
@@ -175,6 +177,7 @@ impl Options {
                 "--exit-after" => opts.exit_after = Some(value("--exit-after")?.parse()?),
                 "--fall-test" => opts.fall_test = true,
                 "--fluid-test" => opts.fluid_test = true,
+                "--erupt" => opts.erupt = true,
                 "--tick-stress" => {
                     opts.tick_stress = Some(match value("--tick-stress")?.as_str() {
                         "light" => asc_sim::stress::StressConfig::LIGHT,
@@ -257,6 +260,9 @@ struct State {
     fall_test_stage: u8,
     fluid_test_stage: u8,
     fluid_test_end: Vec3,
+    /// What the server last said about volcanoes near by.
+    volcanism: asc_sim::volcanism::Report,
+    erupt_sent: bool,
     /// Where things left at death lie.
     stashes: std::collections::BTreeMap<u32, Vec3>,
     /// The simulated water, as the server sends it.
@@ -430,6 +436,8 @@ impl State {
             fall_test_stage: 0,
             fluid_test_stage: 0,
             fluid_test_end: Vec3::ZERO,
+            volcanism: Default::default(),
+            erupt_sent: false,
             fluids,
             stashes,
             pending_ops: Vec::new(),
@@ -537,6 +545,10 @@ impl State {
         }
         if self.options.fluid_test {
             self.fluid_test_step();
+        }
+        if self.options.erupt && !self.erupt_sent && self.started.elapsed().as_secs_f32() > 2.0 {
+            self.erupt_sent = true;
+            self.send(ClientMsg::Erupt);
         }
         if self.build_tool.is_some() {
             self.mining.reset();
@@ -646,14 +658,22 @@ impl State {
         self.egui_state.handle_platform_output(&self.window, output.platform_output);
         let primitives = self.egui_ctx.tessellate(output.shapes, output.pixels_per_point);
 
+        let (ash, shake) = self.volcanic_air();
         let params = FrameParams {
-            camera: self.camera,
+            camera: Camera { position: self.camera.position + shake, ..self.camera },
+            ash,
             sun_dir: self.sim.sun_dir(),
             view_distance: self.streamer.view_radius as f32 * 32.0,
             underwater: self.fluids.fraction_at(&self.world, self.camera.position) > 0.5,
             lights: {
                 let mut lights = self.fluids.lava_lights(self.camera.position);
                 lights.extend(self.streamer.lava_lights(&self.fluids, self.camera.position, 160.0));
+                // Volcanic bombs glow as they fly.
+                lights.extend(self.volcanism.bombs.iter().map(|&position| asc_render::PointLight {
+                    position,
+                    radius: 30.0,
+                    color: Vec3::new(1.0, 0.4, 0.1) * 6.0,
+                }));
                 lights
             },
             brush: self
@@ -1046,6 +1066,7 @@ impl State {
                 self.sync_stashes();
             }
             ServerMsg::Fluid { coord, data } => self.fluids.apply(coord, &data),
+            ServerMsg::Volcanism(report) => self.volcanism = report,
             ServerMsg::StashTaken { id } => {
                 self.stashes.remove(&id);
                 self.sync_stashes();
@@ -1111,6 +1132,33 @@ impl State {
             let fill = self.fluids.fraction_at(&self.world, self.fluid_test_end);
             log::info!("fluid test t={t:.1}: trench end {:.2} full, {} fluid chunks here", fill, self.fluids.fluids.chunks.len());
         }
+    }
+
+    /// Ash in the air round the camera (0..1) from erupting volcanoes near by, and how far to
+    /// shake the camera (rumbling and erupting ones).
+    fn volcanic_air(&self) -> (f32, Vec3) {
+        use asc_sim::volcanism::Phase;
+        let at = self.camera.position;
+        let (mut ash, mut quake) = (0.0f32, 0.0f32);
+        for a in &self.volcanism.active {
+            let d = Vec2::new(a.summit.x - at.x, a.summit.z - at.z).length();
+            let plume = match a.phase {
+                Phase::Erupting => a.strength,
+                Phase::Waning => a.strength * 0.8,
+                _ => 0.0,
+            };
+            ash = ash.max(plume * (1.0 - smoothstep(a.radius, a.radius * 5.0, d)));
+            let shaking = match a.phase {
+                Phase::Rumbling => a.strength * 0.5,
+                Phase::Erupting => a.strength,
+                Phase::Waning => a.strength * 0.3,
+                Phase::Quiet => 0.0,
+            };
+            quake = quake.max(shaking * (1.0 - smoothstep(a.radius * 0.5, a.radius * 4.0, d)));
+        }
+        let t = self.started.elapsed().as_secs_f32();
+        let shake = Vec3::new((t * 37.0).sin() + (t * 23.0).sin() * 0.5, (t * 41.0).sin() * 0.6, (t * 29.0).cos()) * 0.06 * quake;
+        (ash, shake)
     }
 
     /// Draw a small crate where each stash lies.
@@ -1724,4 +1772,9 @@ impl ApplicationHandler for App {
             state.window.request_redraw();
         }
     }
+}
+
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }

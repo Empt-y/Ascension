@@ -142,6 +142,13 @@ pub fn pristine_chunk(worldgen: &WorldGen, terrain: &ChunkData) -> FluidChunk {
     let mut out = FluidChunk::empty();
     let n = CHUNK as usize;
     let base = terrain.coord * CHUNK;
+    // Whether a cell was naturally open: from the unedited chunk, generated once if needed (much
+    // cheaper than sampling the worldgen cell by cell).
+    let mut natural: Option<ChunkData> = None;
+    let mut natural_air = |x: usize, y: usize, z: usize| {
+        let ch = natural.get_or_insert_with(|| worldgen.generate(terrain.coord));
+        ch.density[ChunkData::index(x + 1, y + 1, z + 1)] > 0.0
+    };
     for z in 0..n {
         for x in 0..n {
             let (wx, wz) = ((base.x + x as i32) as f32, (base.z + z as i32) as f32);
@@ -172,8 +179,7 @@ pub fn pristine_chunk(worldgen: &WorldGen, terrain: &ChunkData) -> FluidChunk {
                 if let Some(lava) = lava {
                     // A volcano's lava: as the water below, from its surface down into the ground.
                     let a = fill(wy, lava);
-                    let natural_air = worldgen.sample(Vec3::new(wx, wy as f32, wz)).0 > 0.0;
-                    if a > 0 && wy as f32 + 0.5 >= surface - NATURAL_DEPTH && natural_air {
+                    if a > 0 && wy as f32 + 0.5 >= surface - NATURAL_DEPTH && natural_air(x, y, z) {
                         out.kind[i] = FluidKind::Lava as u8;
                         out.amount[i] = a;
                         out.source[i] = a;
@@ -184,8 +190,7 @@ pub fn pristine_chunk(worldgen: &WorldGen, terrain: &ChunkData) -> FluidChunk {
                     let a = fill(wy, level);
                     // Natural water only down to the natural ground, and only where the ground was
                     // naturally open (a pit dug below sea level stays dry: nothing has let water in).
-                    let natural_air = worldgen.sample(Vec3::new(wx, wy as f32, wz)).0 > 0.0;
-                    if a > 0 && wy as f32 + 0.5 >= surface - NATURAL_DEPTH && natural_air {
+                    if a > 0 && wy as f32 + 0.5 >= surface - NATURAL_DEPTH && natural_air(x, y, z) {
                         out.kind[i] = FluidKind::Water as u8;
                         out.amount[i] = a;
                         out.source[i] = a;

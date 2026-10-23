@@ -37,6 +37,12 @@ const STILL_LAVA: u16 = 900;
 const STEAM: u16 = 250;
 /// A chunk with no change for this many ticks falls asleep.
 const SLEEP_AFTER: u32 = 3;
+/// This long after spilled lava (not a volcano's own) turns up in a chunk, it sets into basalt, and
+/// thin spilled water there evaporates.
+const COOL_AFTER: u32 = 600;
+/// Spilled water this thin (with nothing over it) evaporates; spilled lava this thin just goes.
+const PUDDLE: u16 = 150;
+const LAVA_CRUST: u16 = 40;
 const N: i32 = CHUNK;
 
 /// One chunk's pass: its new kinds and amounts, whether anything changed, and the ghost chunks
@@ -129,8 +135,14 @@ pub struct FluidSim {
     awake: BTreeMap<[i32; 3], u32>,
     /// Chunks changed since the last `take_changed`, to send to clients.
     changed: BTreeSet<[i32; 3]>,
-    /// Lava cells that met water and set into rock since the last `take_solidified`.
-    solidified: Vec<(IVec3, asc_world::Material)>,
+    /// Rock set from lava since the last `take_solidified`: runs up a column (the lowest cell, the
+    /// height in metres from that cell's bottom: whole cells, then the top one's fill) and the rock.
+    solidified: Vec<(IVec3, f32, asc_world::Material)>,
+    /// Chunks holding spilled lava or puddles, and how long since it turned up (or was last
+    /// poured into).
+    cooling: BTreeMap<[i32; 3], u32>,
+    /// Whether spilled lava cools and puddles dry up (off for tests of the flow rules alone).
+    pub settle_spills: bool,
 }
 
 const FACES: [IVec3; 6] =
@@ -144,12 +156,99 @@ impl FluidSim {
             awake: BTreeMap::new(),
             changed: BTreeSet::new(),
             solidified: Vec::new(),
+            cooling: BTreeMap::new(),
+            settle_spills: true,
         }
     }
 
-    /// Cells where lava met water and became rock, for the server to turn into terrain.
-    pub fn take_solidified(&mut self) -> Vec<(IVec3, asc_world::Material)> {
+    /// Rock set from lava (met water, or cooled), for the server to turn into terrain: runs of
+    /// cells up a column, from the lowest.
+    pub fn take_solidified(&mut self) -> Vec<(IVec3, f32, asc_world::Material)> {
         std::mem::take(&mut self.solidified)
+    }
+
+    /// Add fluid to a cell (a vent or a geyser), bringing its chunk to life.
+    pub fn pour(&mut self, world: &World, cell: IVec3, kind: FluidKind, amount: u16) {
+        let (coord, local) = fluid::split(cell);
+        self.materialise(world, coord);
+        let Some(ch) = self.fluids.chunks.get_mut(&coord) else { return };
+        let i = cell_index(local.x as usize, local.y as usize, local.z as usize);
+        if ch.solid[i] || (ch.kind[i] != 0 && ch.kind[i] != kind as u8) {
+            return;
+        }
+        ch.kind[i] = kind as u8;
+        ch.amount[i] = ch.amount[i].saturating_add(amount);
+        self.awake.insert(coord.to_array(), 0);
+        self.changed.insert(coord.to_array());
+        self.cooling.insert(coord.to_array(), 0);
+    }
+
+    /// Whether a chunk holds lava or puddles that aren't natural (they cool or dry up in time).
+    fn has_spill(ch: &FluidChunk) -> bool {
+        (0..CELLS).any(|i| ch.amount[i] > 0 && ch.source[i] == 0)
+    }
+
+    /// Spilled lava sets into basalt (in runs up each column) and thin puddles dry up, `COOL_AFTER`
+    /// ticks after they turned up in a chunk.
+    fn cool(&mut self) {
+        let mut done = Vec::new();
+        for (key, slept) in self.cooling.iter_mut() {
+            *slept += 1;
+            if *slept >= COOL_AFTER {
+                done.push(*key);
+            }
+        }
+        for key in done {
+            self.cooling.remove(&key);
+            let coord = IVec3::from_array(key);
+            let Some(ch) = self.fluids.chunks.get_mut(&coord) else { continue };
+            let n = N as usize;
+            let mut changed = false;
+            for z in 0..n {
+                for x in 0..n {
+                    // (lowest cell, cells, the top cell's fill)
+                    let mut run: Option<(usize, usize, u16)> = None;
+                    for y in 0..=n {
+                        let i = if y < n { Some(cell_index(x, y, z)) } else { None };
+                        let spilled_lava = i.filter(|&i| {
+                            ch.kind[i] == FluidKind::Lava as u8 && ch.source[i] == 0 && ch.amount[i] >= LAVA_CRUST
+                        });
+                        if let Some(i) = spilled_lava {
+                            let a = ch.amount[i].min(FULL);
+                            run = Some(run.map_or((y, 1, a), |(lo, len, _)| (lo, len + 1, a)));
+                            continue;
+                        }
+                        if let Some((lo, len, top)) = run.take() {
+                            // As thick as the lava was: the whole cells under the top one, and the
+                            // top one's fill.
+                            let height = (len - 1) as f32 + top as f32 / FULL as f32;
+                            self.solidified.push((coord * N + IVec3::new(x as i32, lo as i32, z as i32), height, asc_world::Material::Basalt));
+                            for yy in lo..lo + len {
+                                let j = cell_index(x, yy, z);
+                                ch.amount[j] = 0;
+                                ch.kind[j] = 0;
+                                ch.solid[j] = true;
+                            }
+                            changed = true;
+                        }
+                        let Some(i) = i else { continue };
+                        if ch.source[i] != 0 || ch.amount[i] == 0 {
+                            continue;
+                        }
+                        let above_dry = y + 1 >= n || ch.amount[cell_index(x, y + 1, z)] == 0;
+                        let thin_lava = ch.kind[i] == FluidKind::Lava as u8;
+                        if thin_lava || (ch.amount[i] <= PUDDLE && above_dry) {
+                            ch.amount[i] = 0;
+                            ch.kind[i] = 0;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if changed {
+                self.changed.insert(key);
+            }
+        }
     }
 
     /// Where lava touches water, the lava sets into rock (obsidian where it was still, basalt where
@@ -180,7 +279,7 @@ impl FluidSim {
             for (p, amount, water) in hits {
                 let material = if amount >= STILL_LAVA { asc_world::Material::Obsidian } else { asc_world::Material::Basalt };
                 let cell = coord * N + p;
-                self.solidified.push((cell, material));
+                self.solidified.push((cell, 1.0, material));
                 let ch = self.fluids.chunks.get_mut(&coord).expect("still there");
                 let i = cell_index(p.x as usize, p.y as usize, p.z as usize);
                 ch.amount[i] = 0;
@@ -228,7 +327,9 @@ impl FluidSim {
         (0..=8).any(|j| {
             (0..=8).any(|i| {
                 let (x, z) = (base.x - 2.0 + i as f32 * 4.5, base.z - 2.0 + j as f32 * 4.5);
-                fluid::water_level(&world.worldgen, x, z).is_some_and(|l| l >= bottom && l - 40.0 <= top)
+                let near = |l: f32| l >= bottom && l - 40.0 <= top;
+                fluid::water_level(&world.worldgen, x, z).is_some_and(near)
+                    || world.worldgen.lava_level(x, z).is_some_and(near)
             })
         })
     }
@@ -331,9 +432,30 @@ impl FluidSim {
         let mut amount = ch.amount.clone();
         let mut changed = false;
         let mut wanted = Vec::new();
-        for z in 0..N {
-            for y in 0..N {
-                for x in 0..N {
+        // Only cells that hold fluid or could receive some change: the box round this chunk's
+        // fluid, one cell bigger, and the face cells across from fluid in the neighbours.
+        let Some((lo, hi)) = self.active_box(coord, ch) else {
+            return (kind, amount, false, wanted);
+        };
+        // A neighbour: read straight from this chunk when it's inside, else through `peek`.
+        let neighbour = |p: IVec3| -> Cell {
+            if p.cmpge(IVec3::ZERO).all() && p.cmplt(IVec3::splat(N)).all() {
+                let i = cell_index(p.x as usize, p.y as usize, p.z as usize);
+                Cell {
+                    kind: ch.kind[i],
+                    amount: ch.amount[i] as i32,
+                    solid: ch.solid[i],
+                    ghost: false,
+                    source: ch.source[i] as i32,
+                    cap: ch.cap[i],
+                }
+            } else {
+                self.peek(coord, p)
+            }
+        };
+        for z in lo.z..=hi.z {
+            for y in lo.y..=hi.y {
+                for x in lo.x..=hi.x {
                     let i = cell_index(x as usize, y as usize, z as usize);
                     if ch.solid[i] {
                         continue;
@@ -355,7 +477,7 @@ impl FluidSim {
                         &[(IVec3::NEG_X, false), (IVec3::X, false), (IVec3::NEG_Z, false), (IVec3::Z, false)]
                     };
                     for &(d, below) in neighbours {
-                        let other = self.peek(coord, p + d);
+                        let other = neighbour(p + d);
                         // Flow out of `here` into `other` (positive) or in (negative).
                         let out = if vertical_pass {
                             if below { vertical(other, here) } else { -vertical(here, other) }
@@ -400,9 +522,59 @@ impl FluidSim {
         (kind, amount, changed, wanted)
     }
 
+    /// The box of a chunk's cells a pass needs to visit (inclusive), or `None` if nothing in it can
+    /// change: its fluid's cells and their neighbours, and the face cells across from fluid in the
+    /// next chunk.
+    fn active_box(&self, coord: ChunkCoord, ch: &FluidChunk) -> Option<(IVec3, IVec3)> {
+        let n = N as usize;
+        let (mut lo, mut hi) = (IVec3::splat(N), IVec3::splat(-1));
+        let mut grow = |p: IVec3| {
+            lo = lo.min(p);
+            hi = hi.max(p);
+        };
+        for i in 0..CELLS {
+            if ch.amount[i] > 0 {
+                let p = IVec3::new((i % n) as i32, ((i / n) % n) as i32, (i / (n * n)) as i32);
+                grow(p - IVec3::ONE);
+                grow(p + IVec3::ONE);
+            }
+        }
+        for axis in 0..3 {
+            for side in [-1, 1] {
+                let mut d = IVec3::ZERO;
+                d[axis] = side;
+                let other = coord + d;
+                let Some(o) = self.fluids.chunks.get(&other).or_else(|| self.ghosts.get(&other)) else { continue };
+                // The neighbour's layer touching this chunk, and this chunk's face layer.
+                let (theirs, ours) = if side < 0 { (N - 1, 0) } else { (0, N - 1) };
+                for b in 0..N {
+                    for a in 0..N {
+                        let mut q = IVec3::ZERO;
+                        let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+                        q[axis] = theirs;
+                        q[u] = a;
+                        q[v] = b;
+                        if o.amount[cell_index(q.x as usize, q.y as usize, q.z as usize)] > 0 {
+                            q[axis] = ours;
+                            grow(q);
+                        }
+                    }
+                }
+            }
+        }
+        if hi.x < 0 {
+            return None;
+        }
+        Some((lo.max(IVec3::ZERO), hi.min(IVec3::splat(N - 1))))
+    }
+
     /// One tick: a vertical pass then a horizontal one over every awake chunk, in parallel.
     pub fn tick(&mut self, world: &World) {
         if self.awake.is_empty() {
+            // Settled spills still cool and dry up.
+            if self.settle_spills && !self.cooling.is_empty() {
+                self.cool();
+            }
             return;
         }
         let mut any_changed: BTreeSet<[i32; 3]> = BTreeSet::new();
@@ -439,6 +611,16 @@ impl FluidSim {
             }
         }
         self.awake.retain(|_, quiet| *quiet < SLEEP_AFTER);
+        // Spilled fluid starts cooling (or drying) where it first turns up; only pouring more in
+        // (a vent) keeps a chunk molten.
+        for key in &any_changed {
+            if !self.cooling.contains_key(key) && self.fluids.chunks.get(&IVec3::from_array(*key)).is_some_and(Self::has_spill) {
+                self.cooling.insert(*key, 0);
+            }
+        }
+        if self.settle_spills {
+            self.cool();
+        }
         for c in wake {
             if self.fluids.chunks.contains_key(&c) {
                 self.awake.entry(c.to_array()).or_insert(0);
@@ -513,6 +695,8 @@ mod tests {
     /// A small pool scene: a closed stone box (all chunks materialised by hand, no ghosts).
     fn boxed(world: &World) -> FluidSim {
         let mut sim = FluidSim::new();
+        // The flow rules alone: nothing cools or dries up.
+        sim.settle_spills = false;
         let mut ch = FluidChunk::empty();
         let n = N as usize;
         for z in 0..n {
@@ -654,7 +838,7 @@ mod tests {
         }
         let rock = sim.take_solidified();
         assert!(!rock.is_empty(), "nothing set");
-        assert!(rock.iter().all(|(_, m)| matches!(m, asc_world::Material::Obsidian | asc_world::Material::Basalt)));
+        assert!(rock.iter().all(|(_, _, m)| matches!(m, asc_world::Material::Obsidian | asc_world::Material::Basalt)));
     }
 
     #[test]
@@ -670,6 +854,41 @@ mod tests {
         });
         assert!(found.is_some(), "no open cell found below the lava level");
         assert_ne!(fluid::pristine(&wg, IVec3::new(0, -100, 0)).0, FluidKind::Lava);
+    }
+
+    #[test]
+    fn spilled_lava_sets_into_basalt_and_puddles_dry_up() {
+        let world = World::new(1337);
+        let wg = world.worldgen.clone();
+        // Dry, gentle ground.
+        let (x, z) = (0..4000)
+            .map(|i| ((i % 64) as f32 * 9.0 - 300.0, (i / 64) as f32 * 9.0 - 300.0))
+            .find(|&(x, z)| wg.water_level(x, z).is_none() && wg.ground(x, z).slope < 0.2 && wg.water_level(x + 20.0, z).is_none())
+            .expect("dry ground");
+        let ground = wg.height(x, z);
+        let mut sim = FluidSim::new();
+        let lava_at = IVec3::new(x as i32, (ground + 1.5).ceil() as i32, z as i32);
+        let water_at = lava_at + IVec3::new(12, 0, 0);
+        for _ in 0..40 {
+            sim.pour(&world, lava_at, FluidKind::Lava, 1000);
+            sim.pour(&world, water_at, FluidKind::Water, 120);
+            sim.tick(&world);
+        }
+        let mut rock = Vec::new();
+        for _ in 0..(COOL_AFTER + 600) {
+            sim.tick(&world);
+            rock.extend(sim.take_solidified());
+        }
+        let metres: f32 = rock.iter().map(|(_, h, _)| h).sum();
+        assert!(metres > 10.0, "only {metres} m of lava set into rock");
+        assert!(rock.iter().all(|(_, _, m)| *m == asc_world::Material::Basalt));
+        let left: u64 = sim
+            .fluids
+            .chunks
+            .values()
+            .flat_map(|ch| (0..CELLS).filter(move |&i| ch.source[i] == 0).map(move |i| ch.amount[i] as u64))
+            .sum();
+        assert!(left < 2000, "{left} of spilled fluid left (puddles and lava should be gone)");
     }
 
     #[test]
