@@ -106,8 +106,25 @@ pub struct SaveGame {
 struct FireFile {
     format_version: u32,
     burnt: Vec<[i32; 2]>,
-    #[serde(default)]
     scars: Vec<crate::volcanism::Scar>,
+}
+
+/// `fire.bin` from before scars were kept (postcard can't leave a field out, so it's read whole).
+#[derive(Deserialize)]
+struct FireFileNoScars {
+    #[allow(dead_code)]
+    format_version: u32,
+    burnt: Vec<[i32; 2]>,
+}
+
+fn decode_fire(bytes: &[u8]) -> Result<FireFile> {
+    match postcard::from_bytes::<FireFile>(bytes) {
+        Ok(file) => Ok(file),
+        Err(_) => {
+            let old: FireFileNoScars = postcard::from_bytes(bytes)?;
+            Ok(FireFile { format_version: old.format_version, burnt: old.burnt, scars: Vec::new() })
+        }
+    }
 }
 
 /// One fluid chunk as runs of (count, kind, amount).
@@ -303,7 +320,7 @@ pub fn load(dir: &Path) -> Result<Option<SaveGame>> {
     let (burnt, scars) = if !fire_path.exists() && !with_suffix(&fire_path, ".bak").exists() {
         (Vec::new(), Vec::new())
     } else {
-        let file: FireFile = read_with_backup(&fire_path, |b| Ok(postcard::from_bytes(b)?))?;
+        let file = read_with_backup(&fire_path, decode_fire)?;
         (file.burnt, file.scars)
     };
     Ok(Some(SaveGame { meta, players, ops: edits.ops, structures, nodes, stashes, fluids, burnt, scars }))

@@ -59,6 +59,8 @@ struct Slot {
     shown: Option<u32>,
     /// Jobs for this chunk currently with workers.
     in_flight: u32,
+    /// Out of range now: kept only until its jobs come back, then dropped (not drawn).
+    unwanted: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -286,6 +288,7 @@ impl Streamer {
         let mut queued = AHashSet::new();
         for (_, coord) in wanted {
             let slot = self.slots.entry(coord).or_default();
+            slot.unwanted = false;
             if slot.shown.is_none() && slot.in_flight == 0 {
                 self.queue.push_back(coord);
                 queued.insert(coord);
@@ -306,12 +309,15 @@ impl Streamer {
                 .get(&IVec2::new(coord.x, coord.z))
                 .is_some_and(|(lo, hi)| (lo - 1..=hi + 1).contains(&coord.y));
             let inside = d.x * d.x + d.z * d.z <= keep * keep && (d.y.abs() <= keep || in_band);
-            if !inside && slot.in_flight == 0 {
+            if !inside {
+                // Whatever it had on screen goes now; a job still out is dropped when it's back.
                 renderer.remove_chunk(*coord);
                 self.lights.remove(coord);
                 if !fluids.owns(*coord) {
                     renderer.remove_fluid(*coord);
                 }
+                slot.unwanted = true;
+                slot.shown = None;
             }
             inside || slot.in_flight > 0
         });
@@ -365,6 +371,12 @@ impl Streamer {
             let Some(built) = self.uploads.pop_front() else { break };
             let Some(slot) = self.slots.get_mut(&built.coord) else { continue };
             slot.in_flight -= 1;
+            if slot.unwanted {
+                if slot.in_flight == 0 {
+                    self.slots.remove(&built.coord);
+                }
+                continue;
+            }
             if slot.shown.is_some_and(|v| v > built.version) {
                 continue;
             }

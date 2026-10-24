@@ -190,10 +190,6 @@ impl Server {
         if let Some(game) = &loaded {
             volcanism.restore(&world, &game.scars);
         }
-        if let Some(game) = &loaded {
-            fluid_sim.restore(&world, game.fluids.clone());
-            fire.restore(game.burnt.iter().copied());
-        }
         let next_stash = stashes.iter().map(|s| s.id + 1).max().unwrap_or(0);
         match &loaded {
             Some(game) => {
@@ -211,6 +207,11 @@ impl Server {
                 );
             }
             None => log::info!("new world {} (seed {seed})", save_dir.display()),
+        }
+        // After the edits: the fluid chunks' solid cells come from the terrain as edited.
+        if let Some(game) = &loaded {
+            fluid_sim.restore(&world, game.fluids.clone());
+            fire.restore(game.burnt.iter().copied());
         }
         let spawn = rules::spawn_point(&world);
         let mut player = PlayerState {
@@ -327,7 +328,12 @@ impl Server {
         }
         for (amount, cause) in events.hurt {
             let outcome = self.player.vitals.hurt(amount, cause);
+            let died = matches!(outcome, Outcome::Died(_));
             self.apply(outcome);
+            if died {
+                // The rest was aimed where they fell, not at spawn.
+                break;
+            }
         }
         // A blast's collapsed flank: the terrain cut away for good.
         for op in events.edits {

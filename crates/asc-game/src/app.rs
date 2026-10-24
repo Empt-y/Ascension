@@ -1076,6 +1076,7 @@ impl State {
             ServerMsg::Edited(op) => {
                 let dirty = self.world.edits.push(op);
                 self.streamer.invalidate(&dirty);
+                self.fluids.edited(&dirty);
                 self.far.edited(&op);
             }
             ServerMsg::PiecePlaced(piece) => self.building.placed(piece),

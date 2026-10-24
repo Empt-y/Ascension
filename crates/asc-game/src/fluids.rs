@@ -70,6 +70,27 @@ impl ClientFluids {
         }
     }
 
+    /// Terrain edited in these chunks: their pristine water is worked out again, and the meshes
+    /// drawn here round them are redone.
+    pub fn edited(&mut self, chunks: &[ChunkCoord]) {
+        for &c in chunks {
+            let ghost = self.ghosts.remove(&c).is_some();
+            if !ghost && !self.owns(c) {
+                continue;
+            }
+            for dz in -1..=1 {
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        let n = c + IVec3::new(dx, dy, dz);
+                        if self.owns(n) {
+                            self.dirty.entry(n.to_array()).or_insert(None);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// How much water is at a point, 0..1 (for swimming).
     pub fn fraction_at(&self, world: &World, p: Vec3) -> f32 {
         match self.fluids.fraction_at(&world.worldgen, p) {
@@ -127,9 +148,9 @@ impl ClientFluids {
         })
     }
 
-    /// The chunk's built terrain, kept until the world's edits change.
+    /// The chunk's built terrain, kept until an edit touches it.
     fn terrain(&mut self, world: &World, coord: ChunkCoord) -> &ChunkData {
-        let edits = world.edits.len();
+        let edits = world.edits.ops_for(coord).count();
         let entry = self.terrain.entry(coord).or_insert_with(|| (usize::MAX, None));
         if entry.0 != edits || entry.1.is_none() {
             *entry = (edits, Some(world.build_chunk(coord)));
@@ -237,8 +258,6 @@ impl ClientFluids {
         }
         if self.columns_changed {
             self.columns_changed = false;
-            // Only where the chunk at the sea's surface is materialised (one deep under the sea
-            // floor must not punch a hole in it).
             // Only where the chunk at the natural water's surface (at the column's middle) is
             // materialised: one deep under a lake must not punch a hole in it.
             let mut columns: Vec<[i32; 2]> = self

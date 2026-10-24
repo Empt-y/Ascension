@@ -393,7 +393,6 @@ impl FluidSim {
         self.fluids.chunks.values().map(FluidChunk::total).sum()
     }
 
-    /// Whether any natural water lies in or right next to `coord` (a coarse look at its columns).
     /// Whether natural water (sea, lake or river) lies in or right next to `coord`: a coarse look at
     /// its columns, for a surface within the chunk's height (or a little above it, so digging up to
     /// a bank from below counts too).
@@ -702,7 +701,7 @@ impl FluidSim {
                 wanted.extend(want.into_iter().map(|c| c.to_array()));
             }
         }
-        self.refill(&mut any_changed);
+        self.refill(world, &mut any_changed);
         self.react(&mut any_changed);
         for coord in wanted {
             self.materialise(world, IVec3::from_array(coord));
@@ -736,8 +735,10 @@ impl FluidSim {
         self.changed.extend(any_changed);
     }
 
-    /// Top natural cells of awake chunks back up to their natural amount (sources).
-    fn refill(&mut self, any_changed: &mut BTreeSet<[i32; 3]>) {
+    /// Top natural cells of awake chunks back up to their natural amount (sources), with their own
+    /// fluid: lava under the deep lava sea's level and in a volcano's lake, water elsewhere (as
+    /// `fluid::pristine_chunk` fills them).
+    fn refill(&mut self, world: &World, any_changed: &mut BTreeSet<[i32; 3]>) {
         for key in self.awake.keys() {
             let coord = IVec3::from_array(*key);
             let Some(ch) = self.fluids.chunks.get_mut(&coord) else { continue };
@@ -747,8 +748,11 @@ impl FluidSim {
                 if source == 0 || ch.solid[i] || ch.amount[i] >= source {
                     continue;
                 }
-                let y = coord.y * N + ((i / N as usize) % N as usize) as i32;
-                let kind = if (y as f32) < fluid::LAVA_LEVEL + 0.5 { FluidKind::Lava } else { FluidKind::Water } as u8;
+                let n = N as usize;
+                let p = coord * N + IVec3::new((i % n) as i32, ((i / n) % n) as i32, (i / (n * n)) as i32);
+                let volcano = || world.worldgen.lava_level(p.x as f32, p.z as f32).is_some_and(|l| p.y as f32 <= l);
+                let lava = (p.y as f32) < fluid::LAVA_LEVEL + 0.5 || volcano();
+                let kind = if lava { FluidKind::Lava } else { FluidKind::Water } as u8;
                 if ch.kind[i] != 0 && ch.kind[i] != kind {
                     continue;
                 }
@@ -776,6 +780,10 @@ impl FluidSim {
             let mut ch = fluid::pristine_chunk(&world.worldgen, &world.build_chunk(coord));
             ch.kind = kind;
             ch.amount = amount;
+            // Spilled fluid in it cools or dries up as if it had just come to rest.
+            if (0..CELLS).any(|i| ch.source[i] == 0 && ch.amount[i] > 0) {
+                self.still.insert(coord, vec![self.ticks; CELLS]);
+            }
             self.fluids.chunks.insert(coord, ch);
             self.awake.insert(coord.to_array(), 0);
         }
