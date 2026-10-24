@@ -15,7 +15,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "assets", "models", "volcanic")
 DEFAULT_BLENDER = r"C:\Users\theas\tools\blender-5.2.2\blender.exe"
-BUDGET = (200, 12000)
+BUDGET = (200, 20000)
 
 
 def main():
