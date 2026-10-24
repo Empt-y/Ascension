@@ -10,6 +10,7 @@ mod edit;
 pub mod fluid;
 mod material;
 mod mesh;
+pub mod nature;
 pub mod ores;
 mod raycast;
 pub mod volcano;

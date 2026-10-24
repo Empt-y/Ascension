@@ -94,13 +94,7 @@ pub struct KindSpec {
     pub mid_lod: Option<f32>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Collide {
-    Trunk,
-    Rock,
-    None,
-}
+pub use asc_world::nature::Collide;
 
 #[derive(serde::Deserialize)]
 struct NatureFile {
@@ -223,6 +217,53 @@ impl OreModels {
         }
         log::info!("loaded {} ore node models", surface.len() + deep.len());
         Ok(Self { surface, deep })
+    }
+}
+
+/// `assets/data/colliders.toml`: the collider of every rock and ore node model at unit scale, from
+/// its bounds, for the server (which places them to keep animals out, but doesn't load models).
+/// `ASC_WRITE_COLLIDERS=1 cargo test -p asc-game colliders` rewrites it; the test fails when it's
+/// out of date.
+#[cfg(test)]
+mod colliders {
+    use std::fmt::Write;
+
+    use super::*;
+
+    fn bounds(path: &std::path::Path) -> (glam::Vec3, glam::Vec3) {
+        let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let data = asc_render::models::load_glb(&bytes).unwrap();
+        (data.min, data.max)
+    }
+
+    #[test]
+    fn colliders_file_matches_the_models() {
+        let root = root().unwrap();
+        let nature: NatureFile =
+            toml::from_str(&std::fs::read_to_string(root.join("data/nature.toml")).unwrap()).unwrap();
+        let mut out = String::from(
+            "# Generated from the models' bounds by `ASC_WRITE_COLLIDERS=1 cargo test -p asc-game colliders`:\n\
+             # each rock and ore node model's collider sphere at unit scale, [radius, centre height].\n\n[rocks]\n",
+        );
+        for m in nature.model.iter().filter(|m| nature.kinds[&m.kind].collide == Collide::Rock) {
+            let (min, max) = bounds(&root.join("models/nature").join(format!("{}.glb", m.id)));
+            let (r, c) = crate::scatter::rock_collider(min, max);
+            writeln!(out, "{} = [{r:.3}, {c:.3}]", m.id).unwrap();
+        }
+        for kind in ["surface", "deep"] {
+            writeln!(out, "\n[ore_{kind}]").unwrap();
+            for ore in &asc_world::ores::builtin().ores {
+                let (min, max) = bounds(&root.join("models/ores").join(format!("{}_{kind}.glb", ore.id)));
+                let (r, c) = crate::scatter::rock_collider(min, max);
+                writeln!(out, "{} = [{r:.3}, {c:.3}]", ore.id).unwrap();
+            }
+        }
+        let path = root.join("data/colliders.toml");
+        if std::env::var("ASC_WRITE_COLLIDERS").is_ok() {
+            std::fs::write(&path, &out).unwrap();
+        }
+        let have = std::fs::read_to_string(&path).unwrap_or_default().replace("\r\n", "\n");
+        assert_eq!(have, out, "{} is out of date: run with ASC_WRITE_COLLIDERS=1", path.display());
     }
 }
 

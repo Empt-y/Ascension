@@ -29,10 +29,6 @@ pub use crate::ore_nodes::COLUMN;
 /// Keep generated columns this much beyond a kind's draw distance before dropping them.
 const KEEP_MARGIN: f32 = 2.0 * COLUMN;
 
-fn biome_index(b: Biome) -> usize {
-    Biome::ALL.iter().position(|x| *x == b).unwrap_or(0)
-}
-
 #[derive(Clone, Copy, Debug)]
 struct Model {
     id: ModelId,
@@ -48,20 +44,20 @@ struct Kind {
     name: String,
     distance: f32,
     fade: f32,
-    scale: [f32; 2],
     sway: f32,
-    max_slope: f32,
     shadow_distance: f32,
     collide: Collide,
-    /// Side of a candidate cell: one candidate per cell at the kind's highest density.
-    cell: f32,
-    density: [f32; Biome::ALL.len()],
-    models: [Vec<Model>; Biome::ALL.len()],
+    /// Plants and rocks: its index in `Config::nature` (where it grows).
+    grows: Option<usize>,
     /// Ore node kinds: which nodes, and each ore's model.
     nodes: Option<(NodeKind, Vec<Model>)>,
 }
 
-fn rock_collider(min: Vec3, max: Vec3) -> (f32, f32) {
+/// Trunk collider radius at unit scale.
+pub const TRUNK_RADIUS: f32 = 0.3;
+
+/// A rock's collider sphere at unit scale, from its model's bounds: radius and centre height.
+pub fn rock_collider(min: Vec3, max: Vec3) -> (f32, f32) {
     let half = (max - min) * 0.5;
     (0.85 * half.x.min(half.z).min(half.y * 1.3), (max.y + min.y) * 0.5)
 }
@@ -70,6 +66,9 @@ fn rock_collider(min: Vec3, max: Vec3) -> (f32, f32) {
 pub struct Config {
     seed: u64,
     kinds: Vec<Kind>,
+    nature: asc_world::nature::Nature,
+    /// By `nature` model index: its renderer model and collider.
+    models: Vec<Model>,
     /// Each nature model's burnt stages.
     burnt: HashMap<ModelId, [ModelId; 3]>,
 }
@@ -79,42 +78,46 @@ impl Config {
         // Debugging aid: ASC_SCATTER_ONLY=tree,rock scatters only those kinds.
         let only: Option<Vec<String>> =
             std::env::var("ASC_SCATTER_ONLY").ok().map(|v| v.split(',').map(str::to_owned).collect());
+        let placement = asc_world::nature::Nature::from_parts(
+            nature.kinds.iter().map(|(name, k)| (name.as_str(), k.scale, k.max_slope, k.collide)),
+            &nature.density,
+            nature
+                .models
+                .iter()
+                .map(|m| asc_world::nature::ModelSpec {
+                    id: m.spec.id.clone(),
+                    kind: m.spec.kind.clone(),
+                    biomes: m.spec.biomes.clone(),
+                })
+                .collect(),
+        )
+        .expect("nature.toml was checked as it loaded");
+        let models = nature
+            .models
+            .iter()
+            .map(|m| {
+                let (radius, center_y) = match nature.kinds[&m.spec.kind].collide {
+                    Collide::Trunk => (TRUNK_RADIUS, 0.0),
+                    Collide::Rock => rock_collider(m.min, m.max),
+                    Collide::None => (0.0, 0.0),
+                };
+                Model { id: m.id, radius, center_y }
+            })
+            .collect();
         let kinds = nature
             .kinds
             .iter()
-            .filter(|(name, _)| only.as_ref().is_none_or(|o| o.contains(name)))
-            .map(|(name, spec)| {
-                let mut density = [0.0; Biome::ALL.len()];
-                let mut models: [Vec<Model>; Biome::ALL.len()] = Default::default();
-                for (i, biome) in Biome::ALL.into_iter().enumerate() {
-                    density[i] =
-                        nature.density.get(biome.name()).and_then(|d| d.get(name)).copied().unwrap_or(0.0);
-                    for m in &nature.models {
-                        if m.spec.kind == *name && m.spec.biomes.iter().any(|b| b == biome.name()) {
-                            let (radius, center_y) = match spec.collide {
-                                Collide::Trunk => (0.3, 0.0),
-                                Collide::Rock => rock_collider(m.min, m.max),
-                                Collide::None => (0.0, 0.0),
-                            };
-                            models[i].push(Model { id: m.id, radius, center_y });
-                        }
-                    }
-                }
-                let max = density.iter().copied().fold(0.0f32, f32::max);
-                Kind {
-                    name: name.clone(),
-                    distance: spec.distance,
-                    fade: spec.fade,
-                    scale: spec.scale,
-                    sway: spec.sway,
-                    max_slope: spec.max_slope,
-                    shadow_distance: spec.shadow_distance,
-                    collide: spec.collide,
-                    cell: if max > 0.0 { 1.0 / max.sqrt() } else { 0.0 },
-                    density,
-                    models,
-                    nodes: None,
-                }
+            .enumerate()
+            .filter(|(_, (name, _))| only.as_ref().is_none_or(|o| o.contains(name)))
+            .map(|(index, (name, spec))| Kind {
+                name: name.clone(),
+                distance: spec.distance,
+                fade: spec.fade,
+                sway: spec.sway,
+                shadow_distance: spec.shadow_distance,
+                collide: spec.collide,
+                grows: (placement.kinds[index].cell > 0.0).then_some(index),
+                nodes: None,
             })
             .collect::<Vec<_>>();
         let mut kinds = kinds;
@@ -135,14 +138,10 @@ impl Config {
                     name: name.into(),
                     distance,
                     fade: distance * 0.2,
-                    scale: [1.0, 1.0],
                     sway: 0.0,
-                    max_slope: f32::MAX,
                     shadow_distance: shadow,
                     collide: Collide::Rock,
-                    cell: 1.0,
-                    density: [0.0; Biome::ALL.len()],
-                    models: Default::default(),
+                    grows: None,
                     nodes: Some((node, models)),
                 }
             };
@@ -155,7 +154,7 @@ impl Config {
                 kinds.push(node_kind("ore_deep", NodeKind::Deep, 80.0, 0.0));
             }
         }
-        Self { seed: crate::ore_nodes::seed_of(seed), kinds, burnt: nature.burnt.clone() }
+        Self { seed: crate::ore_nodes::seed_of(seed), kinds, nature: placement, models, burnt: nature.burnt.clone() }
     }
 
     /// Index of the kind called `name`.
@@ -188,22 +187,6 @@ pub struct NodeHit {
     pub kind: NodeKind,
 }
 
-fn splitmix(mut x: u64) -> u64 {
-    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    x ^ (x >> 31)
-}
-
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> f32 {
-        self.0 = splitmix(self.0);
-        (self.0 >> 40) as f32 / (1u64 << 24) as f32
-    }
-}
-
 /// The instances of `kind` in `column`. Pure: the same inputs always give the same instances.
 pub fn generate(config: &Config, worldgen: &WorldGen, column: IVec2, kind: usize) -> Vec<Placed> {
     let k = &config.kinds[kind];
@@ -228,67 +211,22 @@ pub fn generate(config: &Config, worldgen: &WorldGen, column: IVec2, kind: usize
             })
             .collect();
     }
-    let mut out = Vec::new();
-    if k.cell <= 0.0 {
-        return out;
-    }
-    let n = (COLUMN / k.cell).ceil().max(1.0) as i32;
-    let cell = COLUMN / n as f32;
-    let origin = column.as_vec2() * COLUMN;
-    let woodland = |b: Biome| matches!(b, Biome::Forest | Biome::Taiga | Biome::Jungle | Biome::Swamp);
-    for j in 0..n {
-        for i in 0..n {
-            let gx = (column.x * n + i) as i64 as u64;
-            let gz = (column.y * n + j) as i64 as u64;
-            let mut r = Rng(splitmix(config.seed ^ splitmix(gx ^ splitmix(gz ^ ((kind as u64) << 56)))));
-            let x = origin.x + (i as f32 + r.next()) * cell;
-            let z = origin.y + (j as f32 + r.next()) * cell;
-            let roll = r.next();
-            let pick = r.next();
-            let yaw = r.next() * std::f32::consts::TAU;
-            let scale = k.scale[0] + (k.scale[1] - k.scale[0]) * r.next();
-            let g = worldgen.ground(x, z);
-            if g.underwater || g.slope > k.max_slope {
-                continue;
-            }
-            let b = biome_index(g.biome);
-            let mut density = k.density[b];
-            if k.name == "tree" && woodland(g.biome) {
-                density *= 0.15 + 0.85 * g.forest;
-            } else if k.name == "grass" && woodland(g.biome) {
-                // Less grass in the shade of woods.
-                density *= 1.0 - 0.6 * g.forest;
-            }
-            // Bare volcanic ground (ash, fresh rock) grows little.
-            density *= 1.0 - g.barren;
-            if roll >= density * cell * cell {
-                continue;
-            }
-            let models = &k.models[b];
-            if models.is_empty() {
-                continue;
-            }
-            let m = models[((pick * models.len() as f32) as usize).min(models.len() - 1)];
-            // The height field is the surface except where caves break through it (cave mouths):
-            // check the real density, and leave out anything that would float or be buried.
-            let base = Vec3::new(x, g.height, z);
-            if worldgen.sample(base + Vec3::Y * 0.25).0 <= 0.0
-                || worldgen.sample(base - Vec3::Y * 0.25).0 >= 0.0
-            {
-                continue;
-            }
-            out.push(Placed {
+    let Some(index) = k.grows else { return Vec::new() };
+    asc_world::nature::grow(&config.nature, config.seed, worldgen, column, index)
+        .into_iter()
+        .map(|g| {
+            let m = config.models[g.model as usize];
+            Placed {
                 model: m.id,
-                position: Vec3::new(x, g.height, z),
-                yaw,
-                scale,
-                collider_radius: m.radius * scale,
-                collider_center: m.center_y * scale,
+                position: g.position,
+                yaw: g.yaw,
+                scale: g.scale,
+                collider_radius: m.radius * g.scale,
+                collider_center: m.center_y * g.scale,
                 ore: None,
-            });
-        }
-    }
-    out
+            }
+        })
+        .collect()
 }
 
 type Key = (IVec2, usize);
@@ -423,7 +361,7 @@ impl Scatter {
             self.last_center = Some(center);
             let mut wanted: Vec<(f32, Key)> = Vec::new();
             for (kind, k) in self.config.kinds.iter().enumerate() {
-                if k.cell <= 0.0 {
+                if k.grows.is_none() && k.nodes.is_none() {
                     continue;
                 }
                 let reach = (k.distance / COLUMN).ceil() as i32 + 1;
@@ -757,5 +695,73 @@ mod tests {
         assert!((c.distance(Vec3::new(1.0, 2.0, 0.0)) - 0.7).abs() < 1e-5);
         assert!((c.distance(Vec3::new(0.0, 5.0, 0.0)) - 0.7).abs() < 1e-5);
         assert!(c.distance(Vec3::new(0.1, 1.0, 0.0)) < 0.0);
+    }
+}
+
+#[cfg(test)]
+mod fingerprint {
+    use super::*;
+
+    fn rich() -> Config {
+        let model = |id: u16, kind: &str, biomes: &[&str], h: f32| crate::assets::NatureModel {
+            spec: crate::assets::NatureSpec { id: format!("m{id}"), kind: kind.into(), biomes: biomes.iter().map(|b| b.to_string()).collect() },
+            id: ModelId(id),
+            min: Vec3::new(-1.0, -0.3, -0.7),
+            max: Vec3::new(1.0, h, 1.0),
+        };
+        let kind = |distance: f32, collide: Collide, slope: f32| crate::assets::KindSpec {
+            distance, fade: 10.0, scale: [0.7, 1.3], sway: 1.0, max_slope: slope, shadow_distance: 100.0, collide, lod: None, mid_lod: None,
+        };
+        let all: Vec<&str> = Biome::ALL.iter().map(|b| b.name()).collect();
+        let nature = NatureModels {
+            models: vec![
+                model(0, "tree", &["forest", "meadow", "taiga"], 8.0),
+                model(1, "tree", &["forest", "jungle"], 9.0),
+                model(2, "rock", &all, 1.5),
+                model(3, "tree", &["savanna", "forest"], 7.0),
+                model(4, "grass", &all, 0.5),
+                model(5, "rock", &["tundra", "arctic"], 2.5),
+            ],
+            burnt: Default::default(),
+            kinds: [
+                ("tree".to_string(), kind(600.0, Collide::Trunk, 0.7)),
+                ("rock".to_string(), kind(200.0, Collide::Rock, 1.2)),
+                ("grass".to_string(), kind(45.0, Collide::None, 0.9)),
+            ]
+            .into_iter()
+            .collect(),
+            density: Biome::ALL
+                .iter()
+                .enumerate()
+                .map(|(i, b)| {
+                    (
+                        b.name().to_string(),
+                        [("tree".to_string(), 0.01 * i as f32), ("rock".to_string(), 0.02), ("grass".to_string(), 0.5 + 0.05 * i as f32)].into_iter().collect(),
+                    )
+                })
+                .collect(),
+        };
+        Config::new(1337, &nature, None)
+    }
+    /// What a mix of kinds and models places hasn't changed since placement moved to
+    /// `asc_world::nature` (the server places trees from there too, so they must agree).
+    #[test]
+    fn placement_is_unchanged() {
+        let config = rich();
+        let worldgen = WorldGen::new(1337);
+        let mut h: u64 = 0;
+        let mut n = 0;
+        for c in 0..30 {
+            let column = IVec2::new(c * 7 - 100, (c * 13) % 50 - 25);
+            for kind in 0..config.kinds.len() {
+                for p in generate(&config, &worldgen, column, kind) {
+                    for v in [p.position.x, p.position.y, p.position.z, p.yaw, p.scale, p.collider_radius] {
+                        h = h.rotate_left(7) ^ v.to_bits() as u64 ^ (p.model.0 as u64) << 40;
+                    }
+                    n += 1;
+                }
+            }
+        }
+        assert_eq!((n, h), (9988, 0xda3f_08d0_8925_8ab8));
     }
 }
