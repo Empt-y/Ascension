@@ -945,13 +945,8 @@ impl State {
         if self.input.pressed(KeyCode::F8)
             && let Some(audio) = &mut self.audio
         {
-            if self.input.held(KeyCode::ShiftLeft) || self.input.held(KeyCode::ShiftRight) {
-                let set = audio.next_step_set();
-                self.show_notice(format!("Footsteps: {set}"));
-            } else {
-                let library = audio.toggle_library();
-                self.show_notice(if library { "Sounds: library recordings".into() } else { "Sounds: generated".into() });
-            }
+            let library = audio.toggle_library();
+            self.show_notice(if library { "Sounds: library recordings".into() } else { "Sounds: generated".into() });
         }
         if self.input.pressed(KeyCode::F9) {
             self.send(ClientMsg::Save);
@@ -1293,7 +1288,9 @@ impl State {
                     } else {
                         format!("step_{}", crate::audio::surface(self.world.sample_at(under).1))
                     };
-                    let volume = 0.18 + 0.025 * speed;
+                    // (Steps on soft ground, the commonest, a quarter as loud: picked by ear.)
+                    let soft = if name == "step_grass" { 0.25 } else { 1.0 };
+                    let volume = (0.18 + 0.025 * speed) * soft;
                     audio.play_at(&name, feet, crate::audio::Range(2.0, 30.0), volume);
                     // The body's weight under it, softer when wading.
                     let weight = if wading { 0.25 } else { 0.55 };
