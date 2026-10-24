@@ -1251,7 +1251,7 @@ impl State {
                     } else {
                         format!("step_{}", crate::audio::surface(self.world.sample_at(under).1))
                     };
-                    audio.play_at(&name, feet, crate::audio::Range(2.0, 30.0), 0.35 + 0.05 * speed);
+                    audio.play_at(&name, feet, crate::audio::Range(2.0, 30.0), 0.18 + 0.025 * speed);
                 }
             }
             if p.grounded && !self.was_grounded && self.falling < -5.0 {
@@ -1330,16 +1330,16 @@ impl State {
         let exposure = if outside { 0.35 + 0.65 * smoothstep(0.0, 40.0, at.y - ground) } else { 0.0 };
         let weather = self.weather.at(wg, at.x, at.z, ground, self.sim.ticks, self.sim.time_of_day);
         let wind = weather.wind.length();
-        scene.levels.insert(Ambience::Wind, (None, (0.15 + wind / 14.0).min(1.0) * exposure * 0.8));
+        scene.levels.insert(Ambience::Wind, (None, (0.15 + wind / 14.0).min(1.0) * exposure * 0.4));
         if weather.fall == asc_world::weather::Fall::Rain && outside {
             scene.levels.insert(Ambience::Rain, (None, weather.precipitation * 0.9));
         }
         let (river, lake) = crate::audio::water_near(wg, at, 48.0);
         if let Some((p, strength)) = river {
-            scene.levels.insert(Ambience::River, (Some(p), 0.4 + 0.5 * strength));
+            scene.levels.insert(Ambience::River, (Some(p), 0.2 + 0.25 * strength));
         }
         if let Some((p, _)) = lake {
-            scene.levels.insert(Ambience::Lake, (Some(p), 0.6));
+            scene.levels.insert(Ambience::Lake, (Some(p), 0.3));
         }
         let mut lava = self.fluids.lava_lights(at);
         lava.extend(self.streamer.lava_lights(&self.fluids, at, 120.0));

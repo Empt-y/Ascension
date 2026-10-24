@@ -192,6 +192,8 @@ impl Audio {
             library.gain.insert(name, gain);
         }
         log::info!("audio: {} generated sounds, {} from libraries", generated.sounds.len(), library.sounds.len());
+        // The library recordings where there are any (preferred over the generated ones).
+        let use_library = !library.sounds.is_empty();
         let mut audio = Self {
             manager,
             listener,
@@ -200,7 +202,7 @@ impl Audio {
             underwater: false,
             generated,
             library,
-            use_library: false,
+            use_library,
             loops: HashMap::new(),
             travelling: Vec::new(),
             at: Vec3::ZERO,
