@@ -1,9 +1,11 @@
-# Wild creatures: where they live, in what numbers, and how they're drawn.
+# Wild creatures: where they live, in what numbers, how they're drawn, and how they behave.
 #
 # Herds are placed by asc_sim::creatures, deterministically from the seed: the world is split into
 # 96 m cells, and each cell near the player may hold one herd on land and one in its water. Its
 # biome (at the cell's middle) gives each kind's chance of being the one there.
 #
+# Where they live and how they're drawn:
+#   name       shown to the player ("Stag"), and in "was killed by a stag"
 #   model      assets/models/creatures/<model>.glb; `models` to pick among (each member at random),
 #              and `leader` for the herd's first member (a bull with the cows)
 #   habitat    "land", "fresh" (rivers and lakes) or "sea"
@@ -13,13 +15,37 @@
 #   scale      model scale: the models are authored two to five times life size, so each is
 #              scaled to its animal's real height to the top of its head (or length, for swimmers)
 #   idle       clips a land animal cycles through while it has nothing to do
-#   swim       a swimmer's clip; it circles its spot at `speed` m/s
+#   sleep, eat its sleeping and eating (and drinking) clips (default Idle_Headlow, Eating)
+#   swim       a swimmer's clip
 #   depth      swimmers: the water must be at least this deep (m)
 #   min_height land: only on ground above this (m)
-#   max_slope  land: not on ground steeper than this (rise over run)
+#
+# Its body and how it moves:
+#   health     hit points (the player has 1000; bare fists do 60 a blow); a herd's leader has 30% more
+#   radius, height   life size (m): how wide (it keeps out of gaps narrower) and tall its body is
+#   walk, run  speeds (m/s); swimmers: cruising and bursting
+#   stride     the speeds its walk and run clips' feet keep up with (m/s): the clips play faster or
+#              slower to match how fast it's going
+#   turn       how fast it turns (radians a second); stamina: seconds it can run flat out
+#   max_slope  the steepest ground it climbs (rise over run); wade: the deepest water it wades (m)
+#
+# How it behaves:
+#   sight, hearing   how far it sees (m, in daylight; less at night unless it's a night animal) and
+#              how keen its ears are (1 normal)
+#   flee       it runs from the player coming nearer than this (m); further once it's wary
+#   wariness   0..1 how quickly it learns to fear the player (chased, hurt, herd-mates killed)
+#   aggression 0..1 the chance it turns on whatever hurt it rather than running
+#   guard      the herd's leader charges the player coming near a wary herd
+#   curious    comes to look at the player when calm
+#   activity   "day", "dusk" (dawn and dusk) or "night": when it's up and about (it sleeps otherwise)
+#   diet       "graze" (walks to grass and eats), "hunt" (its pack hunts `prey`, and `big_prey` only
+#              when very hungry) or "forage" (swimmers, foxes: they find their own)
+#   attack     clip, damage, reach (m), windup (seconds until the blow lands), cooldown (seconds)
+#   drops      what butchering its carcass gives: item and count range
 
 [[creature]]
 id = "stag"
+name = "Stag"
 models = ["stag"]
 # 2.6 m with its antlers (model 4.2 m)
 scale = 0.63
@@ -28,9 +54,28 @@ herd = [2, 5]
 spread = 9.0
 idle = ["Idle", "Idle_2", "Eating", "Idle_Headlow"]
 biomes = { forest = 0.12, taiga = 0.08 }
+health = 400
+radius = 0.4
+height = 1.4
+walk = 1.4
+run = 11.0
+stride = [1.4, 10.0]
+turn = 3.5
+stamina = 25.0
+max_slope = 1.0
+wade = 0.9
+sight = 70.0
+hearing = 1.3
+flee = 35.0
+wariness = 0.8
+aggression = 0.25
+activity = "dusk"
+attack = { clip = "Attack_Headbutt", damage = 150, reach = 1.8, windup = 0.45, cooldown = 1.8 }
+drops = [{ item = "raw_meat", count = [4, 6] }, { item = "hide", count = [1, 2] }]
 
 [[creature]]
 id = "wolf"
+name = "Wolf"
 models = ["wolf"]
 # 1.15 m (model 2.7 m)
 scale = 0.43
@@ -38,10 +83,33 @@ habitat = "land"
 herd = [3, 5]
 spread = 7.0
 idle = ["Idle", "Idle_2", "Idle_2_HeadLow", "Eating"]
+sleep = "Idle_2_HeadLow"
 biomes = { taiga = 0.07, tundra = 0.06, forest = 0.03, arctic = 0.02 }
+health = 300
+radius = 0.3
+height = 0.85
+walk = 1.3
+run = 12.0
+stride = [1.3, 10.0]
+turn = 4.5
+stamina = 40.0
+max_slope = 1.1
+wade = 0.6
+sight = 80.0
+hearing = 1.5
+flee = 0.0
+wariness = 0.4
+aggression = 1.0
+activity = "night"
+diet = "hunt"
+prey = ["stag", "alpaca", "donkey", "fox"]
+big_prey = ["horse", "cattle"]
+attack = { clip = "Attack", damage = 90, reach = 1.3, windup = 0.35, cooldown = 1.2 }
+drops = [{ item = "raw_meat", count = [2, 3] }, { item = "hide", count = [1, 1] }]
 
 [[creature]]
 id = "fox"
+name = "Fox"
 models = ["fox"]
 # 0.65 m (model 2.7 m)
 scale = 0.24
@@ -49,10 +117,31 @@ habitat = "land"
 herd = [1, 1]
 spread = 1.0
 idle = ["Idle", "Idle_2", "Idle_2_HeadLow", "Eating"]
+sleep = "Idle_2_HeadLow"
 biomes = { forest = 0.06, meadow = 0.05, taiga = 0.05 }
+health = 120
+radius = 0.15
+height = 0.4
+walk = 1.0
+run = 9.0
+stride = [1.0, 8.0]
+turn = 5.0
+stamina = 20.0
+max_slope = 1.2
+wade = 0.3
+sight = 45.0
+hearing = 1.6
+flee = 20.0
+wariness = 0.6
+aggression = 0.1
+activity = "dusk"
+diet = "forage"
+attack = { clip = "Attack", damage = 30, reach = 0.9, windup = 0.3, cooldown = 1.2 }
+drops = [{ item = "raw_meat", count = [1, 1] }, { item = "hide", count = [1, 1] }]
 
 [[creature]]
 id = "horse"
+name = "Horse"
 models = ["horse", "horse_white"]
 # 2.55 m (model 4.8 m)
 scale = 0.53
@@ -61,9 +150,26 @@ herd = [4, 8]
 spread = 14.0
 idle = ["Idle", "Idle_2", "Eating", "Idle_Headlow"]
 biomes = { meadow = 0.10, savanna = 0.08 }
+health = 600
+radius = 0.55
+height = 1.6
+walk = 1.6
+run = 13.0
+stride = [1.6, 11.0]
+turn = 2.5
+stamina = 35.0
+max_slope = 0.8
+wade = 1.0
+sight = 70.0
+flee = 25.0
+wariness = 0.6
+aggression = 0.15
+attack = { clip = "Attack_Kick", damage = 180, reach = 2.0, windup = 0.4, cooldown = 2.0 }
+drops = [{ item = "raw_meat", count = [6, 9] }, { item = "hide", count = [2, 2] }]
 
 [[creature]]
 id = "cattle"
+name = "Cow"
 models = ["cow"]
 leader = "bull"
 # 2 m (model 4.6 m)
@@ -73,9 +179,27 @@ herd = [3, 6]
 spread = 12.0
 idle = ["Idle", "Idle_2", "Eating", "Idle_Headlow"]
 biomes = { meadow = 0.08 }
+health = 700
+radius = 0.6
+height = 1.5
+walk = 1.1
+run = 7.0
+stride = [1.1, 6.0]
+turn = 2.0
+stamina = 15.0
+max_slope = 0.7
+wade = 0.9
+sight = 50.0
+flee = 10.0
+wariness = 0.4
+aggression = 0.1
+guard = true
+attack = { clip = "Attack_Headbutt", damage = 220, reach = 2.0, windup = 0.5, cooldown = 2.0 }
+drops = [{ item = "raw_meat", count = [6, 9] }, { item = "hide", count = [2, 3] }]
 
 [[creature]]
 id = "donkey"
+name = "Donkey"
 models = ["donkey"]
 # 1.85 m (model 4.0 m)
 scale = 0.46
@@ -84,9 +208,24 @@ herd = [2, 4]
 spread = 8.0
 idle = ["Idle", "Idle_2", "Eating", "Idle_Headlow"]
 biomes = { savanna = 0.08, desert = 0.03 }
+health = 450
+radius = 0.4
+height = 1.3
+walk = 1.2
+run = 8.0
+stride = [1.2, 7.0]
+max_slope = 1.0
+wade = 0.7
+sight = 55.0
+flee = 12.0
+wariness = 0.4
+aggression = 0.3
+attack = { clip = "Attack_Kick", damage = 140, reach = 1.8, windup = 0.4, cooldown = 2.0 }
+drops = [{ item = "raw_meat", count = [4, 6] }, { item = "hide", count = [1, 2] }]
 
 [[creature]]
 id = "alpaca"
+name = "Alpaca"
 models = ["alpaca"]
 # 2.05 m (model 5.3 m)
 scale = 0.39
@@ -96,9 +235,25 @@ spread = 10.0
 idle = ["Idle", "Idle_2", "Eating", "Idle_Headlow"]
 biomes = { tundra = 0.06, meadow = 0.08 }
 min_height = 110.0
+health = 350
+radius = 0.35
+height = 1.4
+walk = 1.2
+run = 9.0
+stride = [1.2, 8.0]
+max_slope = 1.2
+wade = 0.6
+sight = 50.0
+flee = 15.0
+wariness = 0.5
+aggression = 0.2
+curious = true
+attack = { clip = "Attack_Headbutt", damage = 60, reach = 1.5, windup = 0.4, cooldown = 1.5 }
+drops = [{ item = "raw_meat", count = [3, 5] }, { item = "hide", count = [2, 2] }]
 
 [[creature]]
 id = "fish"
+name = "Fish"
 models = ["fish", "fish_2", "fish_3"]
 # 0.4 m long (model 8 m)
 scale = 0.05
@@ -106,12 +261,24 @@ habitat = "fresh"
 herd = [3, 8]
 spread = 4.0
 swim = "Swim"
-speed = 1.2
 depth = 1.5
 chance = 0.45
+health = 30
+radius = 0.1
+height = 0.15
+walk = 1.2
+run = 4.0
+stride = [1.2, 4.0]
+turn = 6.0
+sight = 12.0
+flee = 6.0
+wariness = 0.3
+diet = "forage"
+drops = [{ item = "raw_fish", count = [1, 1] }]
 
 [[creature]]
 id = "dolphin"
+name = "Dolphin"
 models = ["dolphin"]
 # 2.5 m long (model 9.3 m)
 scale = 0.27
@@ -119,12 +286,25 @@ habitat = "sea"
 herd = [2, 4]
 spread = 12.0
 swim = "Swim"
-speed = 4.0
 depth = 6.0
 chance = 0.06
+health = 500
+radius = 0.4
+height = 0.5
+walk = 4.0
+run = 9.0
+stride = [4.0, 9.0]
+turn = 2.5
+sight = 40.0
+flee = 5.0
+wariness = 0.3
+curious = true
+diet = "forage"
+drops = [{ item = "raw_meat", count = [5, 7] }]
 
 [[creature]]
 id = "manta"
+name = "Manta Ray"
 models = ["manta"]
 # 4 m across (model 8.4 m)
 scale = 0.48
@@ -132,6 +312,17 @@ habitat = "sea"
 herd = [1, 2]
 spread = 8.0
 swim = "Swim"
-speed = 2.0
 depth = 6.0
 chance = 0.05
+health = 600
+radius = 1.0
+height = 0.4
+walk = 2.0
+run = 5.0
+stride = [2.0, 5.0]
+turn = 1.5
+sight = 25.0
+flee = 8.0
+wariness = 0.2
+diet = "forage"
+drops = [{ item = "raw_meat", count = [4, 5] }]

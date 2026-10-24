@@ -100,6 +100,14 @@ pub struct SaveGame {
     pub burnt: Vec<[i32; 2]>,
     /// Where pyroclastic flows and blasts have passed.
     pub scars: Vec<crate::volcanism::Scar>,
+    /// Animals killed from each herd: herd, how many, the tick the last was killed.
+    pub losses: Vec<(u64, u32, u64)>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CreaturesFile {
+    format_version: u32,
+    losses: Vec<(u64, u32, u64)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -237,6 +245,8 @@ pub fn save(dir: &Path, game: &SaveGame) -> Result<()> {
     write_atomic(&dir.join("fluids.bin"), &postcard::to_stdvec(&fluids)?)?;
     let fire = FireFile { format_version: FORMAT_VERSION, burnt: game.burnt.clone(), scars: game.scars.clone() };
     write_atomic(&dir.join("fire.bin"), &postcard::to_stdvec(&fire)?)?;
+    let creatures = CreaturesFile { format_version: FORMAT_VERSION, losses: game.losses.clone() };
+    write_atomic(&dir.join("creatures.bin"), &postcard::to_stdvec(&creatures)?)?;
     Ok(())
 }
 
@@ -323,7 +333,14 @@ pub fn load(dir: &Path) -> Result<Option<SaveGame>> {
         let file = read_with_backup(&fire_path, decode_fire)?;
         (file.burnt, file.scars)
     };
-    Ok(Some(SaveGame { meta, players, ops: edits.ops, structures, nodes, stashes, fluids, burnt, scars }))
+    let creatures_path = dir.join("creatures.bin");
+    let losses = if !creatures_path.exists() && !with_suffix(&creatures_path, ".bak").exists() {
+        Vec::new()
+    } else {
+        let file: CreaturesFile = read_with_backup(&creatures_path, |b| Ok(postcard::from_bytes(b)?))?;
+        file.losses
+    };
+    Ok(Some(SaveGame { meta, players, ops: edits.ops, structures, nodes, stashes, fluids, burnt, scars, losses }))
 }
 
 #[cfg(test)]
@@ -396,6 +413,7 @@ mod tests {
                 length: 3000.0,
                 width: 250.0,
             }],
+            losses: vec![(77, 2, 1234)],
         }
     }
 

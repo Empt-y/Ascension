@@ -50,8 +50,3 @@ impl Poser {
         Arc::from(self.palette.as_slice())
     }
 }
-
-/// Seconds since `since_tick` at game time `clock` (seconds).
-pub fn seconds_since(clock: f64, since_tick: u64) -> f32 {
-    (clock - since_tick as f64 / 20.0).max(0.0) as f32
-}

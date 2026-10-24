@@ -25,6 +25,10 @@ pub enum ClientMsg {
     Fill { point: Vec3, normal: Vec3, fresh: bool },
     /// Finished breaking an ore node.
     MineNode { id: NodeId },
+    /// Hit a creature (bare-handed, for now).
+    Strike { id: crate::creatures::CreatureId },
+    /// Finished butchering a carcass.
+    Butcher { id: crate::creatures::CreatureId },
     /// Place a building piece. `gap`: for foundations, how far the ground falls away under it.
     Place { piece: Piece, gap: f32 },
     Dismantle { key: PieceKey },
@@ -111,8 +115,12 @@ pub enum ServerMsg {
     Scar(crate::volcanism::Scar),
     /// Creatures that came near and ones gone (out of range).
     Creatures { spawned: Vec<crate::creatures::Creature>, gone: Vec<crate::creatures::CreatureId> },
-    /// Creatures doing something else: what (an index into their kind's clips) and since when.
-    CreatureActs(Vec<(crate::creatures::CreatureId, u8, u64)>),
+    /// Where creatures that moved have got to.
+    CreatureMoves(Vec<crate::creatures::Motion>),
+    /// Creatures doing something else: what, and since when (tick).
+    CreatureActs(Vec<(crate::creatures::CreatureId, crate::creatures::Act, u64)>),
+    /// Creatures hurt: their health now.
+    CreatureHurt(Vec<(crate::creatures::CreatureId, i32)>),
     /// Lava met water and set to rock here this tick (steam: a few spots, a cell apart at least).
     Steam(Vec<glam::Vec3>),
 }

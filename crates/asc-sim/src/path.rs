@@ -98,9 +98,14 @@ impl Search {
     fn new(nav: &NavGrid, from: Vec2, to: Vec2, profile: Profile, prefs: Prefs) -> Option<Self> {
         let max_nodes = if prefs.max_nodes == 0 { MAX_NODES } else { prefs.max_nodes };
         let mut start = cell_at(from);
-        // Standing just off a cell it fits (pushed against a trunk): start from the nearest one.
+        // Standing somewhere it doesn't fit (pushed against a trunk, wading in too deep): start from
+        // the nearest cell it does, a few metres round at most.
         if !nav.cell(start).is_some_and(|c| profile.fits(c)) {
-            start = NEIGHBOURS.iter().map(|(d, _)| start + *d).find(|c| nav.cell(*c).is_some_and(|c| profile.fits(c)))?;
+            let here = start;
+            start = (1..=4)
+                .flat_map(|r| (-r..=r).flat_map(move |dz| (-r..=r).map(move |dx| here + IVec2::new(dx, dz))))
+                .filter(|c| nav.cell(*c).is_some_and(|c| profile.fits(c)))
+                .min_by(|a, b| octile(*a, here).total_cmp(&octile(*b, here)).then(a.to_array().cmp(&b.to_array())))?;
         }
         let goal = cell_at(to);
         let goal_unfit = !nav.cell(goal).is_some_and(|c| profile.fits(c));
@@ -221,12 +226,17 @@ fn smooth(nav: &NavGrid, profile: &Profile, from: Vec2, cells: &[IVec2], to: Opt
         .collect()
 }
 
-#[derive(Default)]
 pub struct PathFinder<K> {
     searching: VecDeque<(K, Search)>,
     /// Statistics since the last `take_stats`: searches finished, cells expanded.
     finished: usize,
     expanded: usize,
+}
+
+impl<K> Default for PathFinder<K> {
+    fn default() -> Self {
+        Self { searching: VecDeque::new(), finished: 0, expanded: 0 }
+    }
 }
 
 impl<K: Copy + PartialEq> PathFinder<K> {

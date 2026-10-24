@@ -33,6 +33,8 @@ pub enum Cause {
     Eruption,
     /// Fell out of the world.
     Void,
+    /// Bitten, butted or kicked by a creature of this kind (`creatures::kinds()`).
+    Animal(u16),
 }
 
 impl Cause {
@@ -46,6 +48,7 @@ impl Cause {
             Self::Lightning => "was struck by lightning",
             Self::Eruption => "was caught in an eruption",
             Self::Void => "fell out of the world",
+            Self::Animal(k) => crate::creatures::kinds().get(k as usize).map_or("was killed by an animal", |k| k.killed.as_str()),
         }
     }
 }

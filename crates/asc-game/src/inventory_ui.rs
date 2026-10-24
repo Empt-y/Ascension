@@ -118,6 +118,19 @@ pub fn crosshair(ctx: &egui::Context, progress: f32) {
     }
 }
 
+/// The creature under the crosshair: its name, and a bar of its health.
+pub fn creature_label(ctx: &egui::Context, name: &str, health: f32) {
+    let center = ctx.content_rect().center();
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("creature")));
+    let top = center + Vec2::new(0.0, 22.0);
+    painter.text(top, egui::Align2::CENTER_TOP, name, egui::FontId::proportional(14.0), Color32::from_white_alpha(230));
+    let bar = egui::Rect::from_center_size(top + Vec2::new(0.0, 22.0), Vec2::new(80.0, 5.0));
+    painter.rect_filled(bar, 2.0, Color32::from_black_alpha(140));
+    let mut fill = bar;
+    fill.set_width(bar.width() * health.clamp(0.0, 1.0));
+    painter.rect_filled(fill, 2.0, Color32::from_rgb(200, 60, 50));
+}
+
 /// Short notice above the hotbar ("Inventory full", ...).
 pub fn notice(ctx: &egui::Context, text: &str) {
     let screen = ctx.content_rect();

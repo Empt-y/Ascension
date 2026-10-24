@@ -43,6 +43,11 @@ const FLY_REACH: f32 = 64.0;
 const WALK_REACH: f32 = 5.0;
 /// How close the crosshair must be to an ore node's collider to mine it.
 const NODE_TOLERANCE: f32 = 0.15;
+/// The crosshair finds creatures this far off (the server checks the reach of a strike).
+const CREATURE_REACH: f32 = 3.2;
+/// Strikes no faster than this (seconds), and butchering a carcass takes this long.
+const STRIKE_SECONDS: f64 = 0.45;
+const BUTCHER_SECONDS: f32 = 1.5;
 const EDIT_REPEAT: Duration = Duration::from_millis(110);
 
 #[derive(Clone, Debug, Default)]
@@ -303,6 +308,15 @@ struct State {
     third_person: bool,
     placed_at: Option<f64>,
     died_at: Option<f64>,
+    /// The creature (or carcass) under the crosshair, if it's nearer than the ground there.
+    creature_hit: Option<crate::creatures::CreatureHit>,
+    /// Butchering: which carcass, and for how long the button has been held on it (seconds).
+    butchering: Option<(asc_sim::creatures::CreatureId, f32)>,
+    /// The last strike (game seconds), how many there have been (for which hand), and when the
+    /// player was last hurt.
+    struck_at: Option<f64>,
+    strikes: u32,
+    hurt_at: Option<f64>,
     was_grounded: bool,
     falling: f32,
     was_submerged: f32,
@@ -469,8 +483,8 @@ impl State {
             let home = (Vec2::new(player.feet.x, player.feet.z) / asc_sim::creatures::CELL).floor().as_ivec2();
             let herd = (0..30).find_map(|r: i32| {
                 (-r..=r).flat_map(|dz| (-r..=r).map(move |dx| glam::IVec2::new(dx, dz))).filter(|d| d.abs().max_element() == r).find_map(|d| {
-                    let herd = asc_sim::creatures::herds_in(&world, seed, home + d);
-                    herd.iter().find(|c| c.circle.is_none()).map(|c| (c.at, c.kind().id.clone()))
+                    let herds = asc_sim::creatures::herds_in(&world, seed, home + d);
+                    herds.into_iter().find(|(_, _, m)| !m[0].kind().swims()).map(|(_, _, m)| (m[0].at, m[0].kind().id.clone()))
                 })
             });
             match herd {
@@ -567,13 +581,18 @@ impl State {
             creature_models,
             creatures: {
                 let mut c = crate::creatures::ClientCreatures::default();
-                c.spawned(&welcome.creatures);
+                c.spawned(&welcome.creatures, welcome.ticks as f64 / 20.0);
                 c
             },
             anim_clock: welcome.ticks as f64 / 20.0,
             third_person: !options.first_person && options.camera.is_none(),
             placed_at: None,
             died_at: None,
+            creature_hit: None,
+            butchering: None,
+            struck_at: None,
+            strikes: 0,
+            hurt_at: None,
             was_grounded: true,
             falling: 0.0,
             was_submerged: 0.0,
@@ -681,6 +700,15 @@ impl State {
             self.camera.forward(),
             reach,
         );
+        // A creature in front of whatever the ground ray found takes the crosshair.
+        self.creature_hit = if self.build_tool.is_none() && self.player.mode == Mode::Walk {
+            let ground = self.hit.map_or(f32::MAX, |h| h.point.distance(self.camera.position));
+            self.creatures
+                .pick(self.camera.position, self.camera.forward(), CREATURE_REACH)
+                .filter(|c| c.distance < ground)
+        } else {
+            None
+        };
         if self.options.build_test {
             self.build_test_step();
         }
@@ -755,7 +783,15 @@ impl State {
         if self.notice.as_ref().is_some_and(|(_, t)| t.elapsed() > Duration::from_secs(2)) {
             self.notice = None;
         }
-        let progress = self.mining.progress(&self.content);
+        let progress = match self.butchering {
+            Some((_, t)) => t / BUTCHER_SECONDS,
+            None => self.mining.progress(&self.content),
+        };
+        let creature = self.creature_hit.and_then(|h| self.creatures.get(h.id)).map(|c| {
+            let k = c.kind();
+            let name = if c.dead() { format!("{} (hold to butcher)", k.name) } else { k.name.clone() };
+            (name, c.health as f32 / k.health as f32)
+        });
         let walking = self.player.mode == Mode::Walk;
         if self.building.menu_open && self.previews.is_none() {
             match crate::assets::load_previews(&self.egui_ctx, &self.parts.spec) {
@@ -777,6 +813,9 @@ impl State {
             hud::draw(ctx, &info);
             if captured {
                 inventory_ui::crosshair(ctx, progress);
+                if let Some((name, health)) = &creature {
+                    inventory_ui::creature_label(ctx, name, *health);
+                }
             }
             inventory_ui::hurt_overlay(ctx, hurt);
             if walking {
@@ -1108,8 +1147,10 @@ impl State {
         let world = &self.world;
         let building = &self.building;
         let scatter = &self.scatter;
-        let steps =
-            self.player.update(dt, &input, &|p| world.density_at(p).min(building.sdf(p)).min(scatter.sdf(p)));
+        let creatures = &self.creatures;
+        let steps = self.player.update(dt, &input, &|p| {
+            world.density_at(p).min(building.sdf(p)).min(scatter.sdf(p)).min(creatures.sdf(p))
+        });
         if steps > 0 {
             self.worst_physics_ms = self.worst_physics_ms.max(t.elapsed().as_secs_f32() * 1e3 / steps as f32);
         }
@@ -1237,6 +1278,7 @@ impl State {
             ServerMsg::Vitals(v) => self.vitals = v,
             ServerMsg::Hurt { amount, .. } => {
                 self.hurt_flash = (self.hurt_flash + amount as f32 / 200.0).min(1.0);
+                self.hurt_at = Some(self.anim_clock);
                 if let Some(audio) = &mut self.audio {
                     audio.play("hurt", (0.4 + amount as f32 / 300.0).min(1.0));
                 }
@@ -1262,9 +1304,11 @@ impl State {
             ServerMsg::Scar(scar) => self.scatter.add_scar(scar),
             ServerMsg::Creatures { spawned, gone } => {
                 self.creatures.gone(&gone);
-                self.creatures.spawned(&spawned);
+                self.creatures.spawned(&spawned, self.anim_clock);
             }
-            ServerMsg::CreatureActs(acts) => self.creatures.acts(&acts, self.anim_clock),
+            ServerMsg::CreatureMoves(moves) => self.creatures.moves(&moves),
+            ServerMsg::CreatureActs(acts) => self.creatures.acts(&acts),
+            ServerMsg::CreatureHurt(hurt) => self.creatures.hurt(&hurt),
             ServerMsg::Steam(spots) => self.steam(&spots),
             ServerMsg::Fire(changed) => {
                 self.scatter.set_fire(&changed);
@@ -1371,6 +1415,9 @@ impl State {
             mining: self.captured && self.input.button_held(MouseButton::Left) && self.hit.is_some(),
             since_placed: self.placed_at.map(|t| (self.anim_clock - t) as f32),
             since_died: self.died_at.map(|t| (self.anim_clock - t) as f32),
+            since_struck: self.struck_at.map(|t| ((self.anim_clock - t) as f32, self.strikes)),
+            since_hurt: self.hurt_at.map(|t| (self.anim_clock - t) as f32),
+            butchering: self.butchering.is_some(),
         };
         let (yaw, palette) = self.avatar.update(&self.player_model, &state, dt);
         let feet = self.player.eye() - Vec3::Y * player::EYE_HEIGHT;
@@ -1389,7 +1436,7 @@ impl State {
                 shadow_only,
             });
         }
-        self.creatures.instances(&self.creature_models, self.anim_clock, self.camera.position, &mut instances);
+        self.creatures.instances(&self.creature_models, self.anim_clock, self.camera.position, feet, &mut instances);
         self.renderer.set_skinned(instances);
     }
 
@@ -1922,6 +1969,11 @@ impl State {
 
     fn mine_and_place(&mut self, dt: f32) {
         self.mining.tick_cooldown(dt);
+        if self.hunt(dt) {
+            self.mining.reset();
+            return;
+        }
+        self.butchering = None;
         // Mining edits terrain only: a crosshair on a piece mines nothing.
         if self.hit.is_some_and(|h| self.building.structures.piece_at(h.point, 0.05).is_some()) {
             self.mining.reset();
@@ -1953,6 +2005,43 @@ impl State {
                 self.send(ClientMsg::Fill { point: hit.point, normal: hit.normal, fresh });
             }
         }
+    }
+
+    /// The crosshair on a creature: a click strikes it; holding the button on a carcass butchers
+    /// it. True if a creature took the click (so nothing is mined).
+    fn hunt(&mut self, dt: f32) -> bool {
+        let Some(target) = self.creature_hit else { return false };
+        if !self.captured {
+            return true;
+        }
+        if !target.dead {
+            self.butchering = None;
+            let ready = self.struck_at.is_none_or(|t| self.anim_clock - t > STRIKE_SECONDS);
+            if self.input.button_pressed(MouseButton::Left) && ready {
+                self.struck_at = Some(self.anim_clock);
+                self.strikes += 1;
+                self.send(ClientMsg::Strike { id: target.id });
+                if let Some(audio) = &mut self.audio {
+                    audio.play("land", 0.5);
+                }
+            }
+            return true;
+        }
+        if !self.input.button_held(MouseButton::Left) {
+            self.butchering = None;
+            return true;
+        }
+        let held = match self.butchering {
+            Some((id, t)) if id == target.id => t + dt,
+            _ => dt,
+        };
+        if held >= BUTCHER_SECONDS {
+            self.send(ClientMsg::Butcher { id: target.id });
+            self.butchering = None;
+        } else {
+            self.butchering = Some((target.id, held));
+        }
+        true
     }
 
     /// Hold to break an ore node; it yields a handful of its ore.

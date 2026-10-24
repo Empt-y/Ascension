@@ -30,6 +30,11 @@ pub struct State {
     /// Seconds since last placing something, and since dying (if recent).
     pub since_placed: Option<f32>,
     pub since_died: Option<f32>,
+    /// Seconds since last striking (and how many strikes there have been: hands take turns),
+    /// since last hurt, and whether butchering a carcass.
+    pub since_struck: Option<(f32, u32)>,
+    pub since_hurt: Option<f32>,
+    pub butchering: bool,
 }
 
 #[derive(Default)]
@@ -63,6 +68,17 @@ fn choose(model: &PlayerModel, s: &State, airborne: f32, landed: f32) -> (Option
     }
     if landed < 0.25 && speed < 1.0 {
         return (clip("Jump_Land"), None);
+    }
+    if let Some((t, n)) = s.since_struck
+        && t < 0.45
+    {
+        return (clip(if n % 2 == 0 { "Punch_Cross" } else { "Punch_Jab" }), None);
+    }
+    if s.since_hurt.is_some_and(|t| t < 0.35) && speed < 2.0 {
+        return (clip("Hit_Chest"), None);
+    }
+    if s.butchering && speed < 0.5 {
+        return (clip("Farm_Harvest"), Some(1.0));
     }
     if s.since_placed.is_some_and(|t| t < 0.6) && speed < 1.0 {
         return (clip("Interact"), None);

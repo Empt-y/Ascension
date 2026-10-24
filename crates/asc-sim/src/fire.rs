@@ -85,6 +85,14 @@ impl Fire {
         Self { seed: seed as u32 as u64 ^ 0x6669_7265, ..Default::default() }
     }
 
+    /// The middles of the cells burning now.
+    pub fn burning_cells(&self) -> impl Iterator<Item = glam::Vec2> + '_ {
+        self.cells
+            .iter()
+            .filter(|(_, c)| c.since.is_some())
+            .map(|(k, _)| (glam::Vec2::new(k[0] as f32, k[1] as f32) + 0.5) * CELL)
+    }
+
     /// Restore from a save: burnt-out cells (and any still burning, as burnt).
     pub fn restore(&mut self, burnt: impl IntoIterator<Item = [i32; 2]>) {
         for c in burnt {

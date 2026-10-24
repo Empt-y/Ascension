@@ -19,7 +19,7 @@ use std::thread;
 
 use asc_build::Structures;
 use asc_render::{ModelId, PartInstance, Renderer, ScatterBatch};
-use asc_world::{Biome, World, WorldGen};
+use asc_world::{World, WorldGen};
 use crossbeam_channel::{Receiver, Sender};
 use glam::{IVec2, Vec2, Vec3};
 
@@ -41,6 +41,8 @@ pub use crate::ore_nodes::{NodeId, NodeKind, node_id};
 
 #[derive(Clone, Debug)]
 struct Kind {
+    /// (Found by in tests.)
+    #[cfg_attr(not(test), allow(dead_code))]
     name: String,
     distance: f32,
     fade: f32,
@@ -580,6 +582,7 @@ fn keep(world: &World, structures: &Structures, removed: &HashSet<NodeId>, place
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asc_world::Biome;
 
     fn config() -> Config {
         let model = |id: u16, kind: &str, biomes: &[&str]| crate::assets::NatureModel {
@@ -701,6 +704,7 @@ mod tests {
 #[cfg(test)]
 mod fingerprint {
     use super::*;
+    use asc_world::Biome;
 
     fn rich() -> Config {
         let model = |id: u16, kind: &str, biomes: &[&str], h: f32| crate::assets::NatureModel {

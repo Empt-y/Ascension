@@ -12,7 +12,7 @@ use asc_build::{Lattice, Snap, Structures};
 use asc_world::World;
 use std::time::{Duration, Instant};
 
-use glam::{IVec3, Vec3};
+use glam::{IVec3, Vec2, Vec3};
 
 use crate::content::{Content, ItemId};
 use crate::inventory::{HOTBAR, Inventory, SLOTS, Stack};
@@ -119,6 +119,13 @@ pub struct PlayerState {
     /// The highest point since last standing on something (for fall damage); None when grounded or
     /// flying.
     fall_from: Option<f32>,
+    /// Where they were a tick ago, how fast they're going (m/s), and how much noise they're making
+    /// (0..1, fading): what the animals go by.
+    last_feet: Vec3,
+    pub velocity: Vec3,
+    pub noise: f32,
+    /// When they last struck a creature.
+    last_strike: Option<Instant>,
 }
 
 impl PlayerState {
@@ -230,6 +237,10 @@ impl Server {
             budget: Budget::new(),
             vitals: Vitals::default(),
             fall_from: None,
+            last_feet: spawn,
+            velocity: Vec3::ZERO,
+            noise: 0.0,
+            last_strike: None,
         };
         if let Some(saved) = loaded.as_ref().and_then(|g| g.players.get(save::LOCAL_PLAYER)) {
             restore_player(saved, &content, &mut player);
@@ -249,7 +260,13 @@ impl Server {
             volcanism,
             fire,
             scars: loaded.as_ref().map_or_else(Vec::new, |g| g.scars.clone()),
-            creatures: crate::creatures::Creatures::new(seed),
+            creatures: {
+                let mut c = crate::creatures::Creatures::new(seed);
+                if let Some(game) = &loaded {
+                    c.restore_losses(&game.losses);
+                }
+                c
+            },
             next_stash,
             seed,
             save_dir,
@@ -324,7 +341,16 @@ impl Server {
         self.sim.tick();
         let (events, report) =
             self.volcanism.tick(&self.world, &mut self.fluid_sim, self.player.feet, self.sim.ticks);
+        let mut hazards = crate::creatures::Hazards::default();
         if let Some(report) = report {
+            hazards.flows = report.flows.clone();
+            hazards.blasts = report.blasts.clone();
+            hazards.volcanoes = report
+                .active
+                .iter()
+                .filter(|a| matches!(a.phase, crate::volcanism::Phase::Rumbling | crate::volcanism::Phase::Erupting))
+                .map(|a| (a.summit, a.radius))
+                .collect();
             self.outbox.push(ServerMsg::Volcanism(report));
         }
         for notice in events.notices {
@@ -343,6 +369,7 @@ impl Server {
         for op in events.edits {
             self.world.edits.push(op);
             self.fluid_sim.disturb(&self.world, &op);
+            self.creatures.ground_changed(op.center, op.reach());
             self.outbox.push(ServerMsg::Edited(op));
         }
         for scar in events.scars {
@@ -350,13 +377,7 @@ impl Server {
             self.outbox.push(ServerMsg::Scar(scar));
         }
         // Wild creatures come and go round the player and go about their business.
-        let changes = self.creatures.tick(&self.world, self.player.feet, self.sim.ticks);
-        if !changes.spawned.is_empty() || !changes.gone.is_empty() {
-            self.outbox.push(ServerMsg::Creatures { spawned: changes.spawned, gone: changes.gone });
-        }
-        if !changes.acts.is_empty() {
-            self.outbox.push(ServerMsg::CreatureActs(changes.acts));
-        }
+        self.creatures_tick(hazards);
         // Fire: bombs and spilled lava set what grows where they land alight; it spreads.
         let ticks = self.sim.ticks;
         for at in events.landed {
@@ -389,6 +410,7 @@ impl Server {
             self.outbox.push(ServerMsg::Steam(steam));
         }
         for (cell, height, material) in self.fluid_sim.take_solidified() {
+            self.creatures.ground_changed(cell.as_vec3(), 1.0);
             // A run `height` metres up from the bottom of `cell`, as one box.
             let op = asc_world::EditOp {
                 center: cell.as_vec3() + Vec3::Y * (height * 0.5 - 0.5),
@@ -400,6 +422,8 @@ impl Server {
             self.outbox.push(ServerMsg::Edited(op));
         }
         for coord in self.fluid_sim.take_changed() {
+            let middle = asc_world::chunk_origin(coord) + Vec3::splat(asc_world::CHUNK as f32 * 0.5);
+            self.creatures.ground_changed(middle, asc_world::CHUNK as f32 * 0.5);
             if let Some(ch) = self.fluid_sim.fluids.chunks.get(&coord) {
                 self.outbox.push(ServerMsg::Fluid { coord, data: asc_world::fluid::PackedFluid::pack(ch) });
             }
@@ -447,6 +471,8 @@ impl Server {
                     return;
                 }
                 let bite = rules::bite(&mut self.world, &self.content, &mut self.player.inventory, point, normal);
+                self.player.noise = self.player.noise.max(0.6);
+                self.creatures.ground_changed(bite.op.center, bite.op.reach());
                 log::debug!("bite at {} removed {:.2} m3", bite.op.center, bite.removed.total_solid());
                 self.fluid_sim.disturb(&self.world, &bite.op);
                 self.outbox.push(ServerMsg::Edited(bite.op));
@@ -465,6 +491,7 @@ impl Server {
                 match rules::fill(&mut self.world, &self.content, &mut self.player.inventory, point, normal, feet) {
                     FillOutcome::Placed(op) => {
                         self.fluid_sim.disturb(&self.world, &op);
+                        self.creatures.ground_changed(op.center, op.reach());
                         self.outbox.push(ServerMsg::Edited(op));
                         self.send_inventory();
                     }
@@ -482,6 +509,8 @@ impl Server {
                 }
             }
             ClientMsg::MineNode { id } => self.mine_node(id),
+            ClientMsg::Strike { id } => self.strike(id),
+            ClientMsg::Butcher { id } => self.butcher(id),
             ClientMsg::Place { piece, gap } => {
                 let (position, _) = self.structures.lattice.placement(&piece.key);
                 if !self.within(position, BUILD_REACH) {
@@ -489,7 +518,10 @@ impl Server {
                 }
                 let snap = Snap { key: piece.key, grounded: piece.grounded, gap };
                 match self.structures.check_snap(&snap).and_then(|()| self.structures.place(piece)) {
-                    Ok(()) => self.outbox.push(ServerMsg::PiecePlaced(piece)),
+                    Ok(()) => {
+                        self.creatures.ground_changed(position, 4.0);
+                        self.outbox.push(ServerMsg::PiecePlaced(piece));
+                    }
                     Err(why) => self.notice(format!("Can't place: {why}")),
                 }
             }
@@ -499,7 +531,10 @@ impl Server {
                     return;
                 }
                 match self.structures.dismantle(&key) {
-                    Ok(_) => self.outbox.push(ServerMsg::PieceRemoved(key)),
+                    Ok(_) => {
+                        self.creatures.ground_changed(position, 4.0);
+                        self.outbox.push(ServerMsg::PieceRemoved(key));
+                    }
                     Err(why) => self.notice(format!("Can't dismantle: {why}")),
                 }
             }
@@ -511,6 +546,7 @@ impl Server {
                 for op in rules::flatten_ops(center, self.structures.lattice.cell / 2.0, height) {
                     self.world.edits.push(op);
                     self.fluid_sim.disturb(&self.world, &op);
+                    self.creatures.ground_changed(op.center, op.reach());
                     self.outbox.push(ServerMsg::Edited(op));
                 }
             }
@@ -519,6 +555,7 @@ impl Server {
                 if self.player.cheats || !self.validate {
                     self.world.edits.push(op);
                     self.fluid_sim.disturb(&self.world, &op);
+                    self.creatures.ground_changed(op.center, op.reach());
                     self.outbox.push(ServerMsg::Edited(op));
                 }
             }
@@ -725,6 +762,7 @@ impl Server {
             return;
         }
         self.mined.insert(id.to_array());
+        self.creatures.ground_changed(node.position, 1.5);
         self.outbox.push(ServerMsg::NodeMined(id));
         let count = match kind {
             NodeKind::Surface => rules::SURFACE_NODE_YIELD,
@@ -738,6 +776,112 @@ impl Server {
             }
         }
         log::debug!("mined a {kind:?} {} node", asc_world::ores::builtin().ores[node.ore].name);
+    }
+
+    /// The creatures' tick: they see the player (and their noise) and the danger about, and what
+    /// they do goes out to the client; their blows land on the player.
+    fn creatures_tick(&mut self, mut hazards: crate::creatures::Hazards) {
+        let p = &mut self.player;
+        p.velocity = (p.feet - p.last_feet) * crate::creatures::TICKS_PER_SECOND;
+        p.last_feet = p.feet;
+        if p.velocity.length() > 30.0 {
+            // A teleport (respawn, correction), not a run.
+            p.velocity = Vec3::ZERO;
+        }
+        let speed = Vec2::new(p.velocity.x, p.velocity.z).length();
+        // Running is heard; walking a little; standing still not at all.
+        let footfall = ((speed - 2.0) / 5.0).clamp(0.0, 0.7);
+        p.noise = (p.noise * 0.97).max(footfall);
+        let feet = p.feet;
+        let in_water = self.fluid_sim.fraction_at(&self.world, feet + Vec3::Y * 0.9).1 > 0.5;
+        let view = crate::creatures::PlayerView {
+            feet,
+            velocity: p.velocity,
+            noise: p.noise,
+            alive: p.vitals.alive(),
+            in_water,
+            health: p.vitals.health as f32 / crate::vitals::MAX_HEALTH as f32,
+        };
+        let here = Vec2::new(feet.x, feet.z);
+        hazards.fires = self.fire.burning_cells().filter(|c| c.distance(here) < 300.0).collect();
+        let ground = crate::nav::Ground {
+            world: &self.world,
+            structures: &self.structures,
+            fluids: &self.fluid_sim.fluids,
+            mined: &self.mined,
+        };
+        let changes = self.creatures.tick(&ground, &view, &hazards, self.sim.ticks, self.sim.time_of_day);
+        if !changes.spawned.is_empty() || !changes.gone.is_empty() {
+            self.outbox.push(ServerMsg::Creatures { spawned: changes.spawned, gone: changes.gone });
+        }
+        if !changes.moves.is_empty() {
+            self.outbox.push(ServerMsg::CreatureMoves(changes.moves));
+        }
+        if !changes.acts.is_empty() {
+            self.outbox.push(ServerMsg::CreatureActs(changes.acts));
+        }
+        if !changes.hurt.is_empty() {
+            self.outbox.push(ServerMsg::CreatureHurt(changes.hurt));
+        }
+        for (amount, cause) in changes.player {
+            let outcome = self.player.vitals.hurt(amount, cause);
+            let died = matches!(outcome, Outcome::Died(_));
+            self.apply(outcome);
+            if died {
+                break;
+            }
+        }
+    }
+
+    /// The player hits a creature.
+    fn strike(&mut self, id: crate::creatures::CreatureId) {
+        if !self.player.vitals.alive() || (self.validate && !PlayerState::ready(&mut self.player.last_strike, 0.4)) {
+            return;
+        }
+        let eye = self.player.eye();
+        self.player.noise = self.player.noise.max(0.8);
+        match self.creatures.strike(id, eye, crate::creatures::FIST_DAMAGE, self.sim.ticks) {
+            Ok(true) => {
+                if let Some(c) = self.creatures.get(id) {
+                    let name = c.kind().name.to_lowercase();
+                    self.notice(format!("You killed the {name}"));
+                }
+            }
+            Ok(false) => {}
+            Err(why) => log::debug!("strike on {id:?} missed: {why:?}"),
+        }
+    }
+
+    /// The player butchers a carcass: its meat and hide into the inventory (what doesn't fit is
+    /// left lying there).
+    fn butcher(&mut self, id: crate::creatures::CreatureId) {
+        let feet = self.player.feet;
+        let Some(at) = self.creatures.get(id).map(|c| c.at) else { return };
+        let Some(drops) = self.creatures.butcher(id, feet, self.sim.ticks) else { return };
+        let mut lost = Vec::new();
+        let mut got = Vec::new();
+        for (item, count) in drops {
+            let Some(item_id) = self.content.item_id(item) else {
+                log::warn!("a carcass drops {item}, which isn't an item");
+                continue;
+            };
+            let over = self.player.inventory.add(&self.content, item_id, count);
+            got.push(format!("{} {}", count - over, self.content.item(item_id).name));
+            if over > 0 {
+                lost.push(SlotSave { index: lost.len(), item: item.to_owned(), count: over });
+            }
+        }
+        self.send_inventory();
+        if !got.is_empty() {
+            self.notice(format!("Butchered: {}", got.join(", ")));
+        }
+        if !lost.is_empty() {
+            let id = self.next_stash;
+            self.next_stash += 1;
+            self.stashes.push(save::StashSave { id, at: at.into(), slots: lost, remainders: Default::default() });
+            self.outbox.push(ServerMsg::StashPlaced { id, at });
+            self.notice("Inventory full: the rest is left lying".into());
+        }
     }
 
     fn snapshot(&self) -> SaveGame {
@@ -789,6 +933,7 @@ impl Server {
             },
             burnt: self.fire.stages(self.sim.ticks).into_iter().map(|(c, _)| c).collect(),
             scars: self.scars.clone(),
+            losses: self.creatures.losses(),
         }
     }
 

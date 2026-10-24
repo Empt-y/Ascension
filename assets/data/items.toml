@@ -75,3 +75,18 @@ places = "ash"
 id = "sulfur"
 name = "Sulfur"
 color = [0.75, 0.65, 0.1]
+
+[[item]]
+id = "raw_meat"
+name = "Raw Meat"
+color = [0.55, 0.12, 0.10]
+
+[[item]]
+id = "hide"
+name = "Hide"
+color = [0.45, 0.30, 0.18]
+
+[[item]]
+id = "raw_fish"
+name = "Raw Fish"
+color = [0.55, 0.62, 0.68]
