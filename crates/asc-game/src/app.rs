@@ -945,8 +945,13 @@ impl State {
         if self.input.pressed(KeyCode::F8)
             && let Some(audio) = &mut self.audio
         {
-            let library = audio.toggle_library();
-            self.show_notice(if library { "Sounds: library recordings".into() } else { "Sounds: generated".into() });
+            if self.input.held(KeyCode::ShiftLeft) || self.input.held(KeyCode::ShiftRight) {
+                let set = audio.next_step_set();
+                self.show_notice(format!("Footsteps: {set}"));
+            } else {
+                let library = audio.toggle_library();
+                self.show_notice(if library { "Sounds: library recordings".into() } else { "Sounds: generated".into() });
+            }
         }
         if self.input.pressed(KeyCode::F9) {
             self.send(ClientMsg::Save);

@@ -43,6 +43,7 @@ Licence: CC0 1.0. Source: https://opengameart.org/content/fantozzis-footsteps-gr
 Licence: CC-BY 3.0 (credit: congusbongus, EminYILDIRIM, swuing). Source: https://opengameart.org/content/footsteps-on-different-surfaces
 
 - step_water (5): 0.ogg, 1.ogg, 2.ogg, 3.ogg, 4.ogg
+- steps/congusbongus (9): 0.ogg, 1.ogg, 2.ogg, 3.ogg, 4.ogg, 5.ogg, 6.ogg, 7.ogg, 8.ogg
 
 ## rubberduck, 40 CC0 water / splash / slime SFX
 
@@ -82,4 +83,16 @@ Licence: CC0 1.0. Source: https://opengameart.org/content/synthesized-explosion
 Licence: CC-BY 3.0 (credit: Michel Baradari). Source: https://opengameart.org/content/rumbleexplosion
 
 - boom_0: rumble.flac
+
+## TinyWorlds, Different steps on wood, stone, leaves, gravel and mud
+
+Licence: CC0 1.0. Source: https://opengameart.org/content/different-steps-on-wood-stone-leaves-gravel-and-mud
+
+- steps/tinyworlds (3): leaves01.ogg, leaves02.ogg, mud02.ogg
+
+## Kenney, RPG Audio
+
+Licence: CC0 1.0. Source: https://kenney.nl/assets/rpg-audio
+
+- steps/kenney_rpg (10): footstep00-09
 

@@ -157,6 +157,10 @@ pub struct Audio {
     generated: Bank,
     library: Bank,
     use_library: bool,
+    /// Other footsteps on soft ground to audition (Shift+F8 cycles; 0 is the set in use), each
+    /// with its name.
+    steps: Vec<(String, Vec<StaticSoundData>, f32)>,
+    step_set: usize,
     loops: HashMap<Ambience, Loop>,
     /// Sounds still travelling: when they arrive, which, where, its range and volume.
     travelling: Vec<(Instant, String, Vec3, Range, f32)>,
@@ -178,7 +182,7 @@ fn tween(seconds: f32) -> Tween {
 impl Audio {
     /// Open the audio device and load the generated sounds in `dir`, and the library ones in
     /// `library` if it's there.
-    pub fn new(dir: &Path, library: &Path) -> Result<Self> {
+    pub fn new(dir: &Path, library_dir: &Path) -> Result<Self> {
         let mut manager = AudioManager::<DefaultBackend>::new(AudioManagerSettings {
             capacities: kira::Capacities { sub_track_capacity: 256, ..Default::default() },
             ..Default::default()
@@ -195,7 +199,7 @@ impl Audio {
             0.7,
         )))?;
         let generated = Bank::load(dir)?;
-        let mut library = if library.is_dir() { Bank::load(library)? } else { Bank::default() };
+        let mut library = if library_dir.is_dir() { Bank::load(library_dir)? } else { Bank::default() };
         let names: Vec<String> = library.sounds.keys().cloned().collect();
         for name in names {
             let gain = match (generated.loudness(&name), library.loudness(&name)) {
@@ -204,7 +208,13 @@ impl Audio {
             };
             library.gain.insert(name, gain);
         }
-        log::info!("audio: {} generated sounds, {} from libraries", generated.sounds.len(), library.sounds.len());
+        let steps = step_sets(library_dir, &generated, &library)?;
+        log::info!(
+            "audio: {} generated sounds, {} from libraries, {} footstep sets to try",
+            generated.sounds.len(),
+            library.sounds.len(),
+            steps.len()
+        );
         // The library recordings where there are any (preferred over the generated ones).
         let use_library = !library.sounds.is_empty();
         let mut audio = Self {
@@ -217,6 +227,8 @@ impl Audio {
             generated,
             library,
             use_library,
+            steps,
+            step_set: 0,
             loops: HashMap::new(),
             travelling: Vec::new(),
             at: Vec3::ZERO,
@@ -238,8 +250,22 @@ impl Audio {
         self.use_library
     }
 
+    /// Try the next footstep set on soft ground; its name.
+    pub fn next_step_set(&mut self) -> String {
+        self.step_set = (self.step_set + 1) % (self.steps.len() + 1);
+        match self.step_set {
+            0 => "the set in use".to_owned(),
+            n => self.steps[n - 1].0.clone(),
+        }
+    }
+
     /// `name`'s variations from the set in use, and the gain to play them at.
     fn variations(&self, name: &str) -> Option<(&[StaticSoundData], f32)> {
+        if name == "step_grass"
+            && let Some((_, v, gain)) = self.step_set.checked_sub(1).and_then(|i| self.steps.get(i))
+        {
+            return Some((v, *gain));
+        }
         if self.use_library
             && let Some(v) = self.library.sounds.get(name)
         {
@@ -407,6 +433,48 @@ impl Audio {
     pub fn set_volume(&mut self, volume: f32) {
         self.manager.main_track().set_volume(db(volume), tween(0.2));
     }
+}
+
+/// The footstep sets to audition: each folder in `library/steps` (its `step_grass` variations),
+/// and the library's own steps cut short (they ring on past the next step), each levelled to the
+/// generated steps' loudness.
+fn step_sets(library: &Path, generated: &Bank, current: &Bank) -> Result<Vec<(String, Vec<StaticSoundData>, f32)>> {
+    let mut sets = Vec::new();
+    let target = generated.loudness("step_grass");
+    let level = |bank: &Bank| match (target, bank.loudness("step_grass")) {
+        (Some(g), Some(l)) if l > 1e-5 => (g / l).clamp(0.05, 20.0),
+        _ => 1.0,
+    };
+    if let Some(v) = current.sounds.get("step_grass") {
+        let cut: Vec<StaticSoundData> = v.iter().map(|d| trimmed(d, 0.3, 0.06)).collect();
+        sets.push(("Kenney, cut to 0.3 s".to_owned(), cut, current.gain.get("step_grass").copied().unwrap_or(1.0)));
+    }
+    let dir = library.join("steps");
+    if dir.is_dir() {
+        let mut folders: Vec<_> = std::fs::read_dir(&dir)?.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_dir()).collect();
+        folders.sort();
+        for folder in folders {
+            let bank = Bank::load(&folder)?;
+            if let Some(v) = bank.sounds.get("step_grass") {
+                let name = folder.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                sets.push((name, v.clone(), level(&bank)));
+            }
+        }
+    }
+    Ok(sets)
+}
+
+/// The first `seconds` of a sound, fading out over its last `fade`.
+fn trimmed(data: &StaticSoundData, seconds: f32, fade: f32) -> StaticSoundData {
+    let rate = data.sample_rate as f32;
+    let n = ((seconds * rate) as usize).min(data.frames.len());
+    let fade = ((fade * rate) as usize).clamp(1, n.max(1));
+    let frames: Vec<kira::Frame> = data.frames[..n]
+        .iter()
+        .enumerate()
+        .map(|(i, f)| *f * ((n - i) as f32 / fade as f32).min(1.0))
+        .collect();
+    StaticSoundData { sample_rate: data.sample_rate, frames: frames.into(), settings: data.settings, slice: None }
 }
 
 /// The sound of walking on (or digging) a material: soft ground, sand, snow, or hard stone.
