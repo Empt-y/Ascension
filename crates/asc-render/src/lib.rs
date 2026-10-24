@@ -11,6 +11,7 @@ mod far;
 mod gpu;
 pub mod models;
 mod parts;
+pub mod skeleton;
 mod pipelines;
 mod shaders;
 mod targets;
