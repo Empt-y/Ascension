@@ -255,6 +255,65 @@ fn fs_main(in: VsOut) -> SceneOut {
     return out;
 }
 
+// Skinned models (creatures, characters): each vertex moved by up to four joints' matrices, from
+// this frame's palette and (for the motion TAA needs) last frame's. Lit as parts; never foliage.
+@group(2) @binding(0) var<storage, read> joint_matrices: array<mat4x4<f32>>;
+
+struct SkinnedIn {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) color: vec4<f32>,
+    @location(6) joints: vec4<u32>,
+    @location(7) weights: vec4<f32>,
+    // xyz = camera-relative origin, w = yaw.
+    @location(4) origin: vec4<f32>,
+    // x = scale, w = fade.
+    @location(5) params: vec4<f32>,
+    // Last frame's origin (relative to this frame's camera) and yaw.
+    @location(8) prev_origin: vec4<f32>,
+    // x = this frame's first joint, y = last frame's.
+    @location(9) palette: vec2<u32>,
+}
+
+fn skin_matrix(base: u32, j: vec4<u32>, w: vec4<f32>) -> mat4x4<f32> {
+    return joint_matrices[base + j.x] * w.x + joint_matrices[base + j.y] * w.y
+        + joint_matrices[base + j.z] * w.z + joint_matrices[base + j.w] * w.w;
+}
+
+fn skinned_rel(in: SkinnedIn, base: u32, origin: vec4<f32>) -> vec3<f32> {
+    let local = (skin_matrix(base, in.joints, in.weights) * vec4(in.position, 1.0)).xyz * in.params.x;
+    return rotate_y(local, origin.w) + origin.xyz;
+}
+
+@vertex
+fn vs_skinned(in: SkinnedIn) -> VsOut {
+    var out: VsOut;
+    let m = skin_matrix(in.palette.x, in.joints, in.weights);
+    out.rel = rotate_y((m * vec4(in.position, 1.0)).xyz * in.params.x, in.origin.w) + in.origin.xyz;
+    out.normal = rotate_y(normalize((m * vec4(in.normal, 0.0)).xyz), in.origin.w);
+    out.clip = globals.view_proj * vec4(out.rel, 1.0);
+    out.now_clip = out.clip;
+    out.prev_clip = globals.view_proj * vec4(skinned_rel(in, in.palette.y, in.prev_origin), 1.0);
+    out.uv = in.uv;
+    out.color = in.color;
+    out.ghost = 0u;
+    out.variety = 0.5;
+    out.fade = in.params.w;
+    out.ambient = vec3(0.0);
+    out.sun = vec3(0.0);
+    out.fog = vec4(0.0);
+    return out;
+}
+
+@vertex
+fn vs_skinned_shadow(in: SkinnedIn) -> ShadowOut {
+    var out: ShadowOut;
+    out.clip = shadow_caster_matrix() * vec4(skinned_rel(in, in.palette.x, in.origin), 1.0);
+    out.uv = in.uv;
+    return out;
+}
+
 // Placement preview: the part tinted blue (fits) or red (doesn't), translucent, with a rim.
 @fragment
 fn fs_ghost(in: VsOut) -> @location(0) vec4<f32> {

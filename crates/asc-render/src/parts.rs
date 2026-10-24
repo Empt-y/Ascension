@@ -17,7 +17,7 @@ use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 use crate::camera::Frustum;
-use crate::models::{ModelData, PartVertex, TextureData};
+use crate::models::{MaterialData, ModelData, PartVertex, TextureData};
 use crate::targets::CASCADES;
 
 /// Instances beyond this distance aren't drawn (fog has hidden them by then).
@@ -244,6 +244,45 @@ impl Parts {
         Some(layer)
     }
 
+    /// A material's bind group (its texture, if any, goes into the shared array). Skinned models
+    /// use these too.
+    pub fn material(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+        m: &MaterialData,
+    ) -> wgpu::BindGroup {
+        let cutoff = m.alpha_cutoff.unwrap_or(0.5);
+        let layer = m.texture.as_ref().and_then(|t| self.texture_layer(queue, t, cutoff));
+        // Cut-out textured primitives are leaf cards: shaded as foliage.
+        let foliage = layer.is_some() && m.alpha_cutoff.is_some();
+        let uniform = MaterialUniform {
+            base: [m.base_color[0], m.base_color[1], m.base_color[2], m.roughness.clamp(0.05, 1.0)],
+            extra: [
+                m.metallic,
+                layer.map_or(-1.0, |l| l as f32),
+                if foliage { cutoff } else { 0.0 },
+                f32::from(u8::from(foliage)),
+            ],
+            emissive: [m.emissive[0], m.emissive[1], m.emissive[2], 0.0],
+        };
+        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("part material"),
+            contents: bytemuck::bytes_of(&uniform),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("part material"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.texture_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        })
+    }
+
     pub fn add_model(
         &mut self,
         device: &wgpu::Device,
@@ -253,25 +292,15 @@ impl Parts {
     ) -> ModelId {
         let mut primitives = Vec::new();
         for p in &model.primitives {
-            let cutoff = p.alpha_cutoff.unwrap_or(0.5);
-            let layer = p.texture.as_ref().and_then(|t| self.texture_layer(queue, t, cutoff));
-            // Cut-out textured primitives are leaf cards: shaded as foliage.
-            let foliage = layer.is_some() && p.alpha_cutoff.is_some();
-            let uniform = MaterialUniform {
-                base: [p.base_color[0], p.base_color[1], p.base_color[2], p.roughness.clamp(0.05, 1.0)],
-                extra: [
-                    p.metallic,
-                    layer.map_or(-1.0, |l| l as f32),
-                    if foliage { cutoff } else { 0.0 },
-                    f32::from(u8::from(foliage)),
-                ],
-                emissive: [p.emissive[0], p.emissive[1], p.emissive[2], 0.0],
+            let material = MaterialData {
+                base_color: p.base_color,
+                roughness: p.roughness,
+                metallic: p.metallic,
+                texture: p.texture.clone(),
+                alpha_cutoff: p.alpha_cutoff,
+                emissive: p.emissive,
             };
-            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("part material"),
-                contents: bytemuck::bytes_of(&uniform),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
+            let material = self.material(device, queue, layout, &material);
             primitives.push(GpuPrimitive {
                 vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("part vertices"),
@@ -284,21 +313,7 @@ impl Parts {
                     usage: wgpu::BufferUsages::INDEX,
                 }),
                 index_count: p.indices.len() as u32,
-                material: device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("part material"),
-                    layout,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&self.texture_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&self.sampler),
-                        },
-                    ],
-                }),
+                material,
             });
         }
         let radius = model.min.length().max(model.max.length());

@@ -12,6 +12,7 @@ mod gpu;
 pub mod models;
 mod parts;
 pub mod skeleton;
+mod skinned;
 mod pipelines;
 mod shaders;
 mod targets;
@@ -32,6 +33,7 @@ use far::FarTerrain;
 pub use gpu::Gpu;
 use parts::Parts;
 pub use parts::{Ghost, ModelId, PartInstance, ScatterBatch};
+pub use skinned::{SkinnedId, SkinnedInstance};
 use pipelines::{Layouts, Pipelines};
 pub use shaders::ShaderLib;
 use targets::{BLOOM_LEVELS, CASCADES, SHADOW_LAYERS, SHADOW_SIZE, Targets};
@@ -209,6 +211,7 @@ pub struct UiFrame<'a> {
 pub struct FrameStats {
     pub chunks_drawn: usize,
     pub parts_drawn: usize,
+    pub skinned_drawn: usize,
     pub far_levels: usize,
     pub far_triangles: usize,
     pub shadow_chunks: usize,
@@ -277,6 +280,7 @@ pub struct Renderer {
     indices: Arena,
     far: FarTerrain,
     parts: Parts,
+    skinned: skinned::Skinned,
     pub fog_density: f32,
     msaa: u32,
     // Per-frame scratch, kept to avoid allocating every frame.
@@ -378,6 +382,7 @@ impl Renderer {
         let indices = Arena::new(device, "chunk indices", wgpu::BufferUsages::INDEX, 4, 12 << 20);
         let far = FarTerrain::new(device, &layouts.far);
         let parts = Parts::new(device);
+        let skinned = skinned::Skinned::new(device, &layouts.skin);
         let egui = egui_wgpu::Renderer::new(device, gpu.ui_format(), egui_wgpu::RendererOptions::default());
 
         let (scene_bg, shadow_bgs) = Self::scene_bind_groups(
@@ -449,6 +454,7 @@ impl Renderer {
             indices,
             far,
             parts,
+            skinned,
             fog_density: DEFAULT_FOG_DENSITY,
             msaa,
             draw_list: Vec::new(),
@@ -795,6 +801,16 @@ impl Renderer {
         self.far.upload(&self.gpu.queue, level, to, rects);
     }
 
+    /// Upload a skinned model (a creature, a character).
+    pub fn add_skinned_model(&mut self, model: &models::SkinnedModelData) -> SkinnedId {
+        self.skinned.add_model(&self.gpu.device, &self.gpu.queue, &self.layouts.material, &mut self.parts, model)
+    }
+
+    /// This frame's skinned instances, posed.
+    pub fn set_skinned(&mut self, instances: Vec<SkinnedInstance>) {
+        self.skinned.set_instances(instances);
+    }
+
     /// Upload a model for drawing as building parts.
     pub fn add_model(&mut self, model: &models::ModelData) -> ModelId {
         self.parts.add_model(&self.gpu.device, &self.gpu.queue, &self.layouts.material, model)
@@ -1071,6 +1087,8 @@ impl Renderer {
         let pixels_per_radian = height as f32 / (2.0 * (cam.fov_y * 0.5).tan());
         self.parts.prepare(&self.gpu.device, queue, cam.position, view_proj, pixels_per_radian, cascades);
         stats.parts_drawn = self.parts.drawn;
+        self.skinned.prepare(&self.gpu.device, queue, &self.layouts.skin, cam.position, view_proj, cascades);
+        stats.skinned_drawn = self.skinned.drawn;
         stats.far_levels = if self.far.enabled { self.far.ready_levels() } else { 0 };
         stats.far_triangles = self.far.triangles();
 
@@ -1324,6 +1342,8 @@ impl Renderer {
             }
             pass.set_pipeline(&self.pipelines.parts_shadow);
             self.parts.draw_shadows(&mut pass, c);
+            pass.set_pipeline(&self.pipelines.skinned_shadow);
+            self.skinned.draw_shadows(&mut pass, c);
         }
     }
 
@@ -1396,6 +1416,8 @@ impl Renderer {
         self.mark_in(&mut pass, "terrain");
         pass.set_pipeline(&self.pipelines.parts);
         self.parts.draw(&mut pass);
+        pass.set_pipeline(&self.pipelines.skinned);
+        self.skinned.draw(&mut pass);
         self.mark_in(&mut pass, "parts");
         // Far terrain after the chunks, so the depth test lets chunks win wherever they exist.
         pass.set_pipeline(&self.pipelines.far);

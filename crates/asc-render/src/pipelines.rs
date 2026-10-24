@@ -16,6 +16,8 @@ pub struct Layouts {
     pub far: wgpu::BindGroupLayout,
     /// One model material: its uniform, plus the shared model texture array and sampler.
     pub material: wgpu::BindGroupLayout,
+    /// Skinned models' joint matrices.
+    pub skin: wgpu::BindGroupLayout,
     /// TAA: this frame, the history, a linear sampler and the scene depth (multisampled or not).
     pub taa_ms: wgpu::BindGroupLayout,
     pub taa_ss: wgpu::BindGroupLayout,
@@ -135,6 +137,10 @@ impl Layouts {
                 label: Some("shadow"),
                 entries: &[uniform_entry(0), storage_entry(1)],
             }),
+            skin: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("skinned joints"),
+                entries: &[storage_entry(0)],
+            }),
             material: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("part material"),
                 entries: &[
@@ -238,6 +244,8 @@ pub struct Pipelines {
     pub particles: wgpu::RenderPipeline,
     pub parts: wgpu::RenderPipeline,
     pub parts_shadow: wgpu::RenderPipeline,
+    pub skinned: wgpu::RenderPipeline,
+    pub skinned_shadow: wgpu::RenderPipeline,
     pub ghost: wgpu::RenderPipeline,
     pub taa: wgpu::RenderPipeline,
 }
@@ -363,6 +371,8 @@ impl Pipelines {
         let far_layout = b.layout(&[&layouts.scene, &layouts.far]);
         let parts_layout = b.layout(&[&layouts.scene, &layouts.material]);
         let parts_shadow_layout = b.layout(&[&layouts.shadow, &layouts.material]);
+        let skinned_layout = b.layout(&[&layouts.scene, &layouts.material, &layouts.skin]);
+        let skinned_shadow_layout = b.layout(&[&layouts.shadow, &layouts.material, &layouts.skin]);
         let vertex = [Some(wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<asc_world::Vertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -590,6 +600,39 @@ impl Pipelines {
             }),
             None,
         );
+        let skinned_buffers = crate::skinned::vertex_layouts();
+        let skinned = models_builder.pipeline(
+            "skinned",
+            &skinned_layout,
+            &parts_src,
+            ("vs_skinned", Some("fs_main")),
+            &skinned_buffers,
+            back_culled,
+            Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Greater),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            replace(HDR_FORMAT),
+        );
+        let skinned_shadow = b.pipeline(
+            "skinned shadow",
+            &skinned_shadow_layout,
+            &parts_src,
+            ("vs_skinned_shadow", Some("fs_shadow")),
+            &skinned_buffers,
+            wgpu::PrimitiveState::default(),
+            Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
+            }),
+            None,
+        );
         let ghost = scene_builder.pipeline(
             "ghost",
             &parts_layout,
@@ -627,6 +670,8 @@ impl Pipelines {
             particles,
             parts,
             parts_shadow,
+            skinned,
+            skinned_shadow,
             ghost,
             taa,
         })
