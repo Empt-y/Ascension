@@ -99,6 +99,7 @@ impl Field {
                 alive: true,
                 in_water: false,
                 health: 1.0,
+                torch: false,
             },
             hazards: Hazards::default(),
             ticks: 100,

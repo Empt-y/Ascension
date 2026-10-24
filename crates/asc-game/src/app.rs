@@ -308,6 +308,12 @@ struct State {
     third_person: bool,
     placed_at: Option<f64>,
     died_at: Option<f64>,
+    /// The handheld tools: their models, their use and effects, where the held one's business end
+    /// is (last frame), and the waypoint beacons placed.
+    tool_models: crate::assets::ToolModels,
+    tools: crate::tools::Tools,
+    muzzle: Vec3,
+    beacons: std::collections::BTreeMap<u32, Vec3>,
     /// The creature (or carcass) under the crosshair, if it's nearer than the ground there.
     creature_hit: Option<crate::creatures::CreatureHit>,
     /// Butchering: which carcass, and for how long the button has been held on it (seconds).
@@ -404,6 +410,7 @@ impl State {
         let nature = crate::assets::NatureModels::load(&mut renderer)?;
         let ores = crate::assets::OreModels::load(&mut renderer)?;
         let volcanic = crate::assets::VolcanicModels::load(&mut renderer)?;
+        let tool_models = crate::assets::ToolModels::load(&mut renderer)?;
         let player_model = crate::assets::PlayerModel::load(&mut renderer)?;
         let creature_models = crate::assets::CreatureModels::load(&mut renderer)?;
         let mut scatter = crate::scatter::Scatter::new(
@@ -588,6 +595,14 @@ impl State {
             third_person: !options.first_person && options.camera.is_none(),
             placed_at: None,
             died_at: None,
+            tool_models,
+            tools: {
+                let mut t = crate::tools::Tools::new();
+                t.set_state(welcome.tools);
+                t
+            },
+            muzzle: Vec3::ZERO,
+            beacons: welcome.beacons.iter().copied().collect(),
             creature_hit: None,
             butchering: None,
             struck_at: None,
@@ -733,7 +748,12 @@ impl State {
                 self.edit_terrain();
             }
             if self.player.mode == Mode::Walk && !self.inventory_open && !self.building.menu_open {
-                self.mine_and_place(dt.as_secs_f32());
+                if self.held_tool().is_some() {
+                    self.mining.reset();
+                    self.use_tools(dt.as_secs_f32());
+                } else {
+                    self.mine_and_place(dt.as_secs_f32());
+                }
             } else {
                 self.mining.reset();
             }
@@ -787,6 +807,16 @@ impl State {
             Some((_, t)) => t / BUTCHER_SECONDS,
             None => self.mining.progress(&self.content),
         };
+        let tool_hud = self.held_tool().map(|kind| inventory_ui::ToolHud {
+            kind,
+            mode: self.tools.mode,
+            heat: self.tools.state.heat(kind),
+            locked: self.tools.state.locked(kind),
+            charge: self.tools.state.charge,
+            brush: self.tools.brush,
+        });
+        let marks_view = self.view_camera();
+        let (scanner, creatures, beacons, clock) = (&self.tools.scanner, &self.creatures, &self.beacons, self.anim_clock);
         let creature = self.creature_hit.and_then(|h| self.creatures.get(h.id)).map(|c| {
             let k = c.kind();
             let name = if c.dead() { format!("{} (hold to butcher)", k.name) } else { k.name.clone() };
@@ -811,6 +841,10 @@ impl State {
         let output = self.egui_ctx.run_ui(raw_input, |ui| {
             let ctx = ui.ctx();
             hud::draw(ctx, &info);
+            scanner.overlay(ctx, &marks_view, clock, creatures, beacons);
+            if let Some(t) = &tool_hud {
+                inventory_ui::tool_hud(ctx, t);
+            }
             if captured {
                 inventory_ui::crosshair(ctx, progress);
                 if let Some((name, health)) = &creature {
@@ -857,7 +891,12 @@ impl State {
         let params = FrameParams {
             camera: Camera { position: view.position + shake, ..view },
             ash,
-            particles: self.effects.particles(&self.volcanism),
+            particles: {
+                let mut p = self.effects.particles(&self.volcanism);
+                let held = self.held_tool();
+                self.tools.particles(held, self.muzzle, &self.beacons, self.anim_clock, &mut p);
+                p
+            },
             sun_dir: self.sim.sun_dir(),
             view_distance: self.streamer.view_radius as f32 * 32.0,
             underwater: self.fluids.fraction_at(&self.world, view.position) > 0.5,
@@ -872,6 +911,8 @@ impl State {
                 }));
                 // Burning ground, near by.
                 lights.extend(self.effects.fire_lights(&self.world.worldgen, self.camera.position, 6));
+                let held = self.held_tool();
+                self.tools.lights(held, self.muzzle, &self.beacons, &mut lights);
                 // Volcanic bombs glow as they fly.
                 lights.extend(self.volcanism.bombs.iter().map(|&(position, _)| asc_render::PointLight {
                     position,
@@ -1099,6 +1140,8 @@ impl State {
                 let tier = if wheel > 0.0 { (sel.tier + tiers - 1) % tiers } else { (sel.tier + 1) % tiers };
                 self.set_build_tool(Some(BuildTool::Piece(Selection { tier, ..sel })));
             }
+        } else if wheel != 0.0 && self.held_tool() == Some(asc_sim::tools::ToolKind::Manipulator) {
+            // (The manipulator's brush size: see `tools`.)
         } else if wheel != 0.0 && self.player.mode == Mode::Walk && !self.input.held(KeyCode::AltLeft) {
             // Wheel down moves right along the hotbar, as in most games.
             let step = if wheel > 0.0 { HOTBAR - 1 } else { 1 };
@@ -1309,6 +1352,13 @@ impl State {
             ServerMsg::CreatureMoves(moves) => self.creatures.moves(&moves),
             ServerMsg::CreatureActs(acts) => self.creatures.acts(&acts),
             ServerMsg::CreatureHurt(hurt) => self.creatures.hurt(&hurt),
+            ServerMsg::ToolState(state) => self.tools.set_state(state),
+            ServerMsg::BeaconPlaced { id, at } => {
+                self.beacons.insert(id, at);
+            }
+            ServerMsg::BeaconTaken { id } => {
+                self.beacons.remove(&id);
+            }
             ServerMsg::Steam(spots) => self.steam(&spots),
             ServerMsg::Fire(changed) => {
                 self.scatter.set_fire(&changed);
@@ -1412,14 +1462,16 @@ impl State {
             velocity: p.velocity,
             submerged: p.submerged,
             look_yaw: p.yaw,
-            mining: self.captured && self.input.button_held(MouseButton::Left) && self.hit.is_some(),
+            mining: self.captured && self.input.button_held(MouseButton::Left) && self.hit.is_some() && self.held_tool().is_none(),
             since_placed: self.placed_at.map(|t| (self.anim_clock - t) as f32),
             since_died: self.died_at.map(|t| (self.anim_clock - t) as f32),
             since_struck: self.struck_at.map(|t| ((self.anim_clock - t) as f32, self.strikes)),
             since_hurt: self.hurt_at.map(|t| (self.anim_clock - t) as f32),
             butchering: self.butchering.is_some(),
+            held: self.tools.held_pose(self.held_tool(), self.anim_clock),
+            look_pitch: self.player.pitch,
         };
-        let (yaw, palette) = self.avatar.update(&self.player_model, &state, dt);
+        let (yaw, palette, hand) = self.avatar.update(&self.player_model, &state, dt);
         let feet = self.player.eye() - Vec3::Y * player::EYE_HEIGHT;
         // Through the player's own eyes the body isn't drawn (it would fill the view), but it
         // still casts its shadow.
@@ -1434,10 +1486,88 @@ impl State {
                 scale: 1.0,
                 palette: palette.clone(),
                 shadow_only,
+                casts_shadow: true,
             });
         }
+        self.hold_tool(feet, yaw, hand, &mut instances);
         self.creatures.instances(&self.creature_models, self.anim_clock, self.camera.position, feet, &mut instances);
         self.renderer.set_skinned(instances);
+    }
+
+    /// The held tool, in the right hand (third person) or before the eyes (first person, a view
+    /// model), aimed where the player looks; and the beacons standing about.
+    fn hold_tool(&mut self, feet: Vec3, body_yaw: f32, hand: glam::Mat4, out: &mut Vec<asc_render::SkinnedInstance>) {
+        use asc_sim::tools::ToolKind;
+        use glam::{Mat3, Mat4, Quat};
+        for (id, p) in &self.beacons {
+            out.push(asc_render::SkinnedInstance {
+                model: self.tool_models.tools[&ToolKind::Beacon],
+                key: 0xBEAC_0000_0000 + *id as u64,
+                position: *p,
+                yaw: 0.0,
+                scale: 1.0,
+                palette: std::sync::Arc::from([Mat4::IDENTITY].as_slice()),
+                shadow_only: false,
+                casts_shadow: true,
+            });
+        }
+        let Some(kind) = self.held_tool() else { return };
+        let dir = self.camera.forward();
+        let aim_yaw = asc_sim::creatures::yaw_facing(glam::Vec2::new(dir.x, dir.z));
+        let pitch = dir.y.clamp(-1.0, 1.0).asin() + self.tools.recoil * 0.12;
+        let aims = matches!(kind, ToolKind::Multitool | ToolKind::Manipulator | ToolKind::Injector);
+        let (position, rotation) = if self.third_person {
+            let hand_at = feet + Mat3::from_rotation_y(body_yaw) * hand.w_axis.truncate();
+            let rotation = match kind {
+                _ if aims => Quat::from_rotation_y(aim_yaw) * Quat::from_rotation_x(-pitch),
+                ToolKind::Torch => Quat::from_rotation_y(body_yaw),
+                _ => Quat::from_rotation_y(body_yaw) * Quat::from_rotation_x(0.3),
+            };
+            (hand_at, rotation)
+        } else {
+            // Lower right of the view (the scanner held up in the middle), swaying a little as the
+            // body walks, kicked back by a shot.
+            let right = dir.cross(Vec3::Y).normalize_or(Vec3::X);
+            let up = right.cross(dir);
+            let sway = (self.anim_clock as f32 * 7.0).sin() * 0.008 * (self.player.velocity.length() / 4.0).min(1.0);
+            let (r, u, f) = match kind {
+                ToolKind::Scanner => (0.02, -0.24, 0.34),
+                ToolKind::Torch => (0.24, -0.3, 0.42),
+                ToolKind::Beacon => (0.22, -0.4, 0.45),
+                _ => (0.2, -0.2, 0.36),
+            };
+            let at = self.camera.position + right * r + up * (u + sway) + dir * (f - self.tools.recoil * 0.06);
+            let rotation = match kind {
+                ToolKind::Scanner => Quat::from_rotation_y(aim_yaw) * Quat::from_rotation_x(-pitch + 0.35),
+                ToolKind::Torch => Quat::from_rotation_y(aim_yaw),
+                _ => Quat::from_rotation_y(aim_yaw) * Quat::from_rotation_x(-pitch),
+            };
+            (at, rotation)
+        };
+        self.muzzle = position + rotation * crate::assets::tool_tip(kind);
+        let palette: std::sync::Arc<[Mat4]> = std::sync::Arc::from([Mat4::from_quat(rotation)].as_slice());
+        let shadow = self.third_person;
+        let mut put = |model, key| {
+            out.push(asc_render::SkinnedInstance {
+                model,
+                key,
+                position,
+                yaw: 0.0,
+                scale: 1.0,
+                palette: palette.clone(),
+                shadow_only: false,
+                casts_shadow: shadow,
+            });
+        };
+        put(self.tool_models.tools[&kind], 0x7001_0000);
+        if kind == ToolKind::Multitool {
+            let light = match self.tools.mode {
+                asc_sim::tools::Mode::Laser => 0,
+                asc_sim::tools::Mode::Rifle => 1,
+                asc_sim::tools::Mode::Flamer => 2,
+            };
+            put(self.tool_models.mode_lights[light], 0x7001_0001);
+        }
     }
 
     /// Footsteps on whatever is underfoot, a thump on landing, a splash on falling into water.
@@ -2003,6 +2133,82 @@ impl State {
             if self.mining.try_place() {
                 self.placed_at = Some(self.anim_clock);
                 self.send(ClientMsg::Fill { point: hit.point, normal: hit.normal, fresh });
+            }
+        }
+    }
+
+    /// The tool selected in the hotbar, if it's a tool.
+    fn held_tool(&self) -> Option<asc_sim::tools::ToolKind> {
+        self.inventory.slots[self.inventory.selected].and_then(|s| self.content.item(s.item).tool)
+    }
+
+    /// Use the tool in hand (or the scanner from anywhere, with C).
+    fn use_tools(&mut self, dt: f32) {
+        use asc_sim::tools::ToolKind;
+        let held = self.held_tool();
+        // A carcass under the crosshair is butchered whatever's held.
+        if self.creature_hit.is_some_and(|h| h.dead) {
+            self.hunt(dt);
+            return;
+        }
+        self.butchering = None;
+        // The laser breaks ore nodes as hands do, faster.
+        if held == Some(ToolKind::Multitool)
+            && self.tools.mode == asc_sim::tools::Mode::Laser
+            && self.captured
+            && self.input.button_held(MouseButton::Left)
+            && let Some(node) = self.hit.and_then(|h| self.scatter.node_at(h.point, NODE_TOLERANCE))
+        {
+            self.mine_node(dt * asc_sim::tools::LASER_SPEED, node);
+        }
+        let has_scanner = self.content.tool_item(ToolKind::Scanner).is_some_and(|s| self.inventory.slots.iter().flatten().any(|x| x.item == s));
+        let captured = self.captured;
+        let i = &self.input;
+        let (world, building, scatter) = (&self.world, &self.building, &self.scatter);
+        let ray = |o: Vec3, d: Vec3, r: f32| raycast(|p| world.density_at(p).min(building.sdf(p)).min(scatter.sdf(p)), o, d, r);
+        let input = crate::tools::ToolInput {
+            held,
+            has_scanner,
+            lmb: (captured && i.button_pressed(MouseButton::Left), captured && i.button_held(MouseButton::Left)),
+            rmb: (captured && i.button_pressed(MouseButton::Right), captured && i.button_held(MouseButton::Right)),
+            mode_key: captured && i.pressed(KeyCode::KeyR),
+            scan_key: captured && i.pressed(KeyCode::KeyC),
+            wheel: if captured { i.wheel } else { 0.0 },
+            eye: self.camera.position,
+            dir: self.camera.forward(),
+            muzzle: self.muzzle,
+            ray: &ray,
+            creatures: &self.creatures,
+            beacons: &self.beacons,
+            world: &self.world,
+            content: &self.content,
+            dt,
+            clock: self.anim_clock,
+        };
+        let scan = self.tools.wants_scan(&input);
+        let msgs = self.tools.update(&input);
+        if scan {
+            let from = crate::scanner::ScanFrom {
+                at: self.player.feet,
+                world: &self.world,
+                seed: self.world.worldgen.seed(),
+                creatures: &self.creatures,
+                mined: self.scatter.mined(),
+                stashes: &self.stashes,
+            };
+            self.tools.scanner.scan(from, self.anim_clock);
+            self.tools.sounds.push(("tool_scan", 0.6, None));
+        }
+        for m in msgs {
+            self.send(m);
+        }
+        let sounds = std::mem::take(&mut self.tools.sounds);
+        if let Some(audio) = &mut self.audio {
+            for (name, volume, at) in sounds {
+                match at {
+                    Some(p) => audio.play_at(name, p, crate::audio::Range(3.0, 40.0), volume),
+                    None => audio.play(name, volume),
+                }
             }
         }
     }

@@ -5,6 +5,7 @@ the libraries don't have stays generated.
     python tools/library_sounds.py <downloads dir>
 
 The downloads dir holds what was fetched and unpacked (see the sources below): `kenney/impact.zip`,
+`kenney/scifi.zip`,
 `jcsounds/extracted/Nature Ambient Pack Vol 1 - mp3/...`, the OpenGameArt files in `oga/` and
 Mixkit's in `mixkit/` (by id). Writes
 assets/sounds_library/CREDITS.md with each sound's source and licence.
@@ -43,6 +44,19 @@ DKLON = ("dklon, Big Explosion", "CC-BY 3.0 (credit: dklon)", "https://opengamea
 
 
 # Game name -> (source, list of files); one-shots get numbered variations, loops keep one file.
+KENNEY_SCIFI = ("Kenney, Sci-fi Sounds", "CC0 1.0", "https://kenney.nl/assets/sci-fi-sounds")
+# The handheld tools' sounds, from the sci-fi pack (`kenney/scifi.zip`).
+SCIFI_SHOTS = {
+    "tool_laser": "forceField",
+    "tool_shot": "laserLarge",
+    "tool_flame": "thrusterFire",
+    "tool_scan": "computerNoise",
+    "tool_terraform": "spaceEngineLow",
+    "tool_overheat": "impactMetal",
+    "tool_beacon": "doorOpen",
+    "tool_switch": "doorClose",
+    "tool_inject": "slime",
+}
 KENNEY_SHOTS = {
     "step_snow": "footstep_snow",
     "step_hard": "footstep_concrete",
@@ -122,6 +136,13 @@ def main():
                 with z.open(f) as data, open(os.path.join(OUT, f"{name}_{n}.ogg"), "wb") as out:
                     shutil.copyfileobj(data, out)
             credits.setdefault(KENNEY, []).append(f"{name} ({len(files)}): {prefix}_*")
+    with zipfile.ZipFile(os.path.join(src, "kenney", "scifi.zip")) as z:
+        for name, prefix in SCIFI_SHOTS.items():
+            files = sorted(f for f in z.namelist() if f.split("/")[-1].startswith(prefix + "_") and f.endswith(".ogg"))
+            for n, f in enumerate(files):
+                with z.open(f) as data, open(os.path.join(OUT, f"{name}_{n}.ogg"), "wb") as out:
+                    shutil.copyfileobj(data, out)
+            credits.setdefault(KENNEY_SCIFI, []).append(f"{name} ({len(files)}): {prefix}_*")
     for name, (source, path) in LOOPS.items():
         ext = os.path.splitext(path)[1]
         shutil.copyfile(os.path.join(src, path), os.path.join(OUT, name + ext))

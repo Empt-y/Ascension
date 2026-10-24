@@ -216,8 +216,9 @@ fn hunt(h: &mut Herd, alive: &[&Agent], seen: &Seen, w: &World) {
             best = Some((score, Who::Creature(o.id)));
         }
     }
-    // The player, at night, alone in the open, when the pack is hungry enough.
-    if near_player && w.night() && hunger > 0.6 {
+    // The player, at night, alone in the open, when the pack is hungry enough (and not carrying a
+    // torch: they keep off fire).
+    if near_player && !p.torch && w.night() && hunger > 0.6 {
         let d = p.xz().distance(leader.xz());
         let score = (1.0 - d / PLAYER_REACH) + (1.0 - p.health) + 0.3;
         if best.is_none_or(|(b, _)| score > b) {

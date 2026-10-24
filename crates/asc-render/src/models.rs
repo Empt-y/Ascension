@@ -210,6 +210,47 @@ impl SkinnedModelData {
     }
 }
 
+/// A static model as a skinned one with a single joint every vertex follows: something held, which
+/// is drawn where its one matrix (the hand's, or the eyes') puts it.
+pub fn rigid(model: &ModelData) -> SkinnedModelData {
+    let primitives = model
+        .primitives
+        .iter()
+        .map(|p| SkinnedPrimitive {
+            vertices: p
+                .vertices
+                .iter()
+                .map(|v| SkinnedVertex {
+                    position: v.position,
+                    normal: v.normal,
+                    uv: v.uv,
+                    color: v.color,
+                    joints: [0; 4],
+                    weights: [1.0, 0.0, 0.0, 0.0],
+                })
+                .collect(),
+            indices: p.indices.clone(),
+            material: MaterialData {
+                base_color: p.base_color,
+                roughness: p.roughness,
+                metallic: p.metallic,
+                texture: p.texture.clone(),
+                alpha_cutoff: p.alpha_cutoff,
+                emissive: p.emissive,
+            },
+        })
+        .collect();
+    let skeleton = Skeleton {
+        names: vec!["root".into()],
+        parents: vec![None],
+        above: vec![Mat4::IDENTITY],
+        inverse_bind: vec![Mat4::IDENTITY],
+        rest: vec![crate::skeleton::Transform::IDENTITY],
+        order: vec![0],
+    };
+    SkinnedModelData { primitives, skeleton, clips: Vec::new(), min: model.min, max: model.max }
+}
+
 /// Parse a skinned `.glb`: every skinned mesh in it, on the first skin's skeleton (other skins'
 /// joints are matched to it by name).
 pub fn load_skinned_glb(bytes: &[u8]) -> Result<SkinnedModelData> {
@@ -369,6 +410,24 @@ mod tests {
             }
         }
         assert_eq!(count, 2 * ores);
+    }
+
+    #[test]
+    fn every_tool_loads_as_a_one_joint_model() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/models/tools");
+        for name in ["scanner", "multitool", "manipulator", "torch", "beacon", "injector", "multitool_light_laser"] {
+            let model = load_glb(&std::fs::read(dir.join(format!("{name}.glb"))).unwrap()).unwrap();
+            let held = rigid(&model);
+            assert_eq!(held.skeleton.len(), 1);
+            assert_eq!(held.triangles(), model.triangles());
+            assert!(held.primitives.iter().flat_map(|p| &p.vertices).all(|v| v.joints == [0; 4] && v.weights[0] == 1.0));
+            // Small enough to hold (the beacon stands on the ground).
+            let size = (model.max - model.min).max_element();
+            assert!(size < if name == "beacon" { 1.0 } else { 0.7 }, "{name}: {size} m");
+        }
+        // Something glows on the multitool (its coils).
+        let mt = load_glb(&std::fs::read(dir.join("multitool.glb")).unwrap()).unwrap();
+        assert!(mt.primitives.iter().any(|p| p.emissive.iter().any(|e| *e > 0.5)));
     }
 
     #[test]

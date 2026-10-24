@@ -189,6 +189,16 @@ impl ClientCreatures {
         self.creatures.len()
     }
 
+    /// Where `id` is drawn this frame.
+    pub fn drawn_at(&self, id: CreatureId) -> Option<Vec3> {
+        self.creatures.get(&id).map(|e| e.drawn.0)
+    }
+
+    /// The creatures within `reach` of `p`: id, where drawn, and what it is.
+    pub fn near(&self, p: Vec3, reach: f32) -> Vec<(CreatureId, Vec3, &Creature)> {
+        self.creatures.values().filter(|e| e.drawn.0.distance(p) < reach).map(|e| (e.creature.id, e.drawn.0, &e.creature)).collect()
+    }
+
     pub fn get(&self, id: CreatureId) -> Option<&Creature> {
         self.creatures.get(&id).map(|e| &e.creature)
     }
@@ -248,6 +258,7 @@ impl ClientCreatures {
                 scale: c.kind().scale,
                 palette: palette.clone(),
                 shadow_only: false,
+                casts_shadow: true,
             });
         }
     }

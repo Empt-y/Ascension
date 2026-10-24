@@ -220,6 +220,45 @@ impl OreModels {
     }
 }
 
+/// The handheld tools (tools/build_tools.py), as one-joint skinned models: each is drawn wherever
+/// its one matrix (the hand's, or the eyes') puts it.
+pub struct ToolModels {
+    pub tools: std::collections::HashMap<asc_sim::tools::ToolKind, asc_render::SkinnedId>,
+    /// The multitool's mode lights: laser, rifle, flamer.
+    pub mode_lights: [asc_render::SkinnedId; 3],
+}
+
+impl ToolModels {
+    pub fn load(renderer: &mut Renderer) -> Result<Self> {
+        let dir = root()?.join("models").join("tools");
+        let mut load = |name: &str| -> Result<asc_render::SkinnedId> {
+            let path = dir.join(format!("{name}.glb"));
+            let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            let data = asc_render::models::load_glb(&bytes).with_context(|| format!("loading {}", path.display()))?;
+            Ok(renderer.add_skinned_model(&asc_render::models::rigid(&data)))
+        };
+        let mut tools = std::collections::HashMap::new();
+        for kind in asc_sim::tools::ToolKind::ALL {
+            tools.insert(kind, load(kind.name())?);
+        }
+        let mode_lights = [load("multitool_light_laser")?, load("multitool_light_rifle")?, load("multitool_light_flamer")?];
+        Ok(Self { tools, mode_lights })
+    }
+}
+
+/// Where each tool's business end is, in its model (from tools/blender/tools.py's report).
+pub fn tool_tip(kind: asc_sim::tools::ToolKind) -> glam::Vec3 {
+    use asc_sim::tools::ToolKind::*;
+    match kind {
+        Multitool => glam::Vec3::new(0.0, 0.025, 0.425),
+        Scanner => glam::Vec3::new(0.0, 0.17, 0.065),
+        Manipulator => glam::Vec3::new(0.0, 0.03, 0.29),
+        Torch => glam::Vec3::new(0.0, 0.175, 0.0),
+        Beacon => glam::Vec3::new(0.0, 0.8, 0.0),
+        Injector => glam::Vec3::new(0.0, 0.02, 0.17),
+    }
+}
+
 /// The volcanic bombs, smallest first (tools/build_volcanic.py).
 pub struct VolcanicModels {
     pub bombs: Vec<asc_render::ModelId>,

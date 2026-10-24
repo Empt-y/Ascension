@@ -21,6 +21,7 @@ use crate::protocol::{ClientMsg, ServerMsg, Welcome};
 use crate::rules::{self, FillOutcome};
 use crate::save::{self, PlayerSave, SaveGame, SlotSave, WorldMeta};
 use crate::sim::Sim;
+use crate::tools::{self, ToolKind, ToolState, ToolUse};
 use crate::vitals::{Cause, Outcome, Vitals};
 use crate::{EYE_HEIGHT, Mode};
 
@@ -126,7 +127,22 @@ pub struct PlayerState {
     pub noise: f32,
     /// When they last struck a creature.
     last_strike: Option<Instant>,
+    /// The tools' heat and the rifle's charge, as last sent; which tool is heating (until the
+    /// tick); when each rate-limited use was last (ticks); and until when they're throwing flame
+    /// (animals run from it), along which way.
+    pub tools: ToolState,
+    sent_tools: ToolState,
+    heating: Option<(ToolKind, u64)>,
+    last_use: [Option<u64>; 3],
+    flaming: Option<(u64, Vec3)>,
+    /// The starter kit has been given.
+    kit: bool,
 }
+
+/// `PlayerState::last_use` slots: zaps and flame bursts, rifle shots, terraforming.
+const USE_BURST: usize = 0;
+const USE_SHOT: usize = 1;
+const USE_TERRAFORM: usize = 2;
 
 impl PlayerState {
     fn eye(&self) -> Vec3 {
@@ -155,6 +171,8 @@ pub struct Server {
     pub spawn: Vec3,
     /// What players left where they died.
     pub stashes: Vec<save::StashSave>,
+    /// Waypoint beacons placed: id and where.
+    pub beacons: Vec<(u32, Vec3)>,
     /// Water (and later lava) where something has disturbed it.
     pub fluid_sim: crate::fluids::FluidSim,
     volcanism: crate::volcanism::Volcanism,
@@ -241,9 +259,18 @@ impl Server {
             velocity: Vec3::ZERO,
             noise: 0.0,
             last_strike: None,
+            tools: ToolState::default(),
+            sent_tools: ToolState::default(),
+            heating: None,
+            last_use: [None; 3],
+            flaming: None,
+            kit: false,
         };
         if let Some(saved) = loaded.as_ref().and_then(|g| g.players.get(save::LOCAL_PLAYER)) {
             restore_player(saved, &content, &mut player);
+        }
+        if !player.kit {
+            give_kit(&content, &mut player);
         }
         let ticks = sim.ticks;
         Ok(Self {
@@ -256,6 +283,7 @@ impl Server {
             player,
             spawn,
             stashes,
+            beacons: loaded.as_ref().map_or_else(Vec::new, |g| g.beacons.iter().map(|(id, at)| (*id, Vec3::from(*at))).collect()),
             fluid_sim,
             volcanism,
             fire,
@@ -303,6 +331,8 @@ impl Server {
             fire: self.fire.stages(self.sim.ticks),
             scars: self.scars.clone(),
             creatures: self.creatures.all().copied().collect(),
+            beacons: self.beacons.clone(),
+            tools: p.tools,
             fluids: {
                 // In coordinate order: the same state always makes the same message.
                 let mut f: Vec<_> = self
@@ -376,6 +406,7 @@ impl Server {
             self.scars.push(scar);
             self.outbox.push(ServerMsg::Scar(scar));
         }
+        self.tools_tick();
         // Wild creatures come and go round the player and go about their business.
         self.creatures_tick(hazards);
         // Fire: bombs and spilled lava set what grows where they land alight; it spreads.
@@ -470,16 +501,7 @@ impl Server {
                     log::warn!("bite at {point} refused: too soon after the last");
                     return;
                 }
-                let bite = rules::bite(&mut self.world, &self.content, &mut self.player.inventory, point, normal);
-                self.player.noise = self.player.noise.max(0.6);
-                self.creatures.ground_changed(bite.op.center, bite.op.reach());
-                log::debug!("bite at {} removed {:.2} m3", bite.op.center, bite.removed.total_solid());
-                self.fluid_sim.disturb(&self.world, &bite.op);
-                self.outbox.push(ServerMsg::Edited(bite.op));
-                self.send_inventory();
-                if bite.overflow > 0 {
-                    self.notice(format!("Inventory full: {} items lost", bite.overflow));
-                }
+                self.bite(point, normal, rules::BITE_RADIUS);
             }
             ClientMsg::Fill { point, normal, fresh } => {
                 if !self.within(point, ACTION_REACH)
@@ -511,6 +533,7 @@ impl Server {
             ClientMsg::MineNode { id } => self.mine_node(id),
             ClientMsg::Strike { id } => self.strike(id),
             ClientMsg::Butcher { id } => self.butcher(id),
+            ClientMsg::Tool(u) => self.use_tool(u),
             ClientMsg::Place { piece, gap } => {
                 let (position, _) = self.structures.lattice.placement(&piece.key);
                 if !self.within(position, BUILD_REACH) {
@@ -801,9 +824,21 @@ impl Server {
             alive: p.vitals.alive(),
             in_water,
             health: p.vitals.health as f32 / crate::vitals::MAX_HEALTH as f32,
+            torch: false,
         };
+        let view = crate::creatures::PlayerView { torch: self.held_tool() == Some(ToolKind::Torch), ..view };
         let here = Vec2::new(feet.x, feet.z);
         hazards.fires = self.fire.burning_cells().filter(|c| c.distance(here) < 300.0).collect();
+        // Flame the player is throwing: animals run from it as from fire.
+        if let Some((until, dir)) = self.player.flaming
+            && until >= self.sim.ticks
+        {
+            let eye = self.player.eye();
+            for d in [2.0, 4.0, 6.0, 8.0] {
+                let p = eye + dir * d;
+                hazards.fires.push(Vec2::new(p.x, p.z));
+            }
+        }
         let ground = crate::nav::Ground {
             world: &self.world,
             structures: &self.structures,
@@ -830,6 +865,219 @@ impl Server {
             if died {
                 break;
             }
+        }
+    }
+
+    /// The tool the player holds (selected in the hotbar), if it's a tool.
+    pub fn held_tool(&self) -> Option<ToolKind> {
+        self.player.inventory.selected_stack().and_then(|s| self.content.item(s.item).tool)
+    }
+
+    /// A bite of `radius` out of the ground at `point` (bare hands, the laser, the manipulator):
+    /// what it removes goes into the inventory.
+    fn bite(&mut self, point: Vec3, normal: Vec3, radius: f32) {
+        let bite = rules::bite_sized(&mut self.world, &self.content, &mut self.player.inventory, point, normal, radius);
+        self.player.noise = self.player.noise.max(0.6);
+        self.creatures.ground_changed(bite.op.center, bite.op.reach());
+        log::debug!("bite at {} removed {:.2} m3", bite.op.center, bite.removed.total_solid());
+        self.fluid_sim.disturb(&self.world, &bite.op);
+        self.outbox.push(ServerMsg::Edited(bite.op));
+        self.send_inventory();
+        if bite.overflow > 0 {
+            self.notice(format!("Inventory full: {} items lost", bite.overflow));
+        }
+    }
+
+    /// Heat and charge: a tick on, and the client told when they've changed enough to show.
+    fn tools_tick(&mut self) {
+        let ticks = self.sim.ticks;
+        let p = &mut self.player;
+        let heating = p.heating.filter(|(_, until)| *until >= ticks).map(|(k, _)| k);
+        p.tools.step(1.0 / 20.0, heating);
+        let (a, b) = (&p.tools, &p.sent_tools);
+        let changed = a.heat.iter().zip(&b.heat).any(|(x, y)| (x - y).abs() > 0.02)
+            || (a.charge - b.charge).abs() > 0.1
+            || a.locked.iter().zip(&b.locked).any(|(x, y)| (*x == 0) != (*y == 0));
+        if changed && ticks.is_multiple_of(2) {
+            p.sent_tools = p.tools;
+            self.outbox.push(ServerMsg::ToolState(p.tools));
+        }
+    }
+
+    /// Whether the use slot `slot` was last used at least `every` ticks ago (and if so, now).
+    fn rate(&mut self, slot: usize, every: u64) -> bool {
+        let ticks = self.sim.ticks;
+        let last = &mut self.player.last_use[slot];
+        if self.validate && last.is_some_and(|l| ticks < l + every) {
+            return false;
+        }
+        *last = Some(ticks);
+        true
+    }
+
+    /// The first thing along the ray from the eye: how far to the ground (or a building), and the
+    /// creature in front of that, if any.
+    fn aim(&self, dir: Vec3, reach: f32) -> (f32, Option<(crate::creatures::CreatureId, f32)>) {
+        let eye = self.player.eye();
+        let (world, structures) = (&self.world, &self.structures);
+        let ground = asc_world::raycast(|p| world.density_at(p).min(structures.sdf(p)), eye, dir, reach)
+            .map_or(reach, |h| h.point.distance(eye));
+        (ground, self.creatures.ray(eye, dir, ground))
+    }
+
+    /// The player uses the tool they hold.
+    fn use_tool(&mut self, u: ToolUse) {
+        let Some(kind) = self.held_tool() else { return };
+        if !self.player.vitals.alive() {
+            return;
+        }
+        let ticks = self.sim.ticks;
+        let eye = self.player.eye();
+        let locked = self.player.tools.locked(kind);
+        let heat = |s: &mut Self| s.player.heating = Some((kind, ticks + (tools::HEATING_HOLD * 20.0).ceil() as u64));
+        match u {
+            ToolUse::Hold if kind.heats().is_some() && !locked => heat(self),
+            ToolUse::Laser { point, normal } if kind == ToolKind::Multitool && !locked => {
+                if point.distance(eye) > tools::LASER_REACH + 1.0 {
+                    return;
+                }
+                let (_, byte) = self.world.sample_raw(point - normal * 0.3);
+                if byte == asc_world::Material::Air as u8 {
+                    return;
+                }
+                let hardness = self.content.sample(byte).hardness / tools::LASER_SPEED;
+                if self.validate && !PlayerState::ready(&mut self.player.last_dig, hardness) {
+                    return;
+                }
+                heat(self);
+                self.bite(point, normal, rules::BITE_RADIUS);
+            }
+            ToolUse::Zap { id } if kind == ToolKind::Multitool && !locked => {
+                let Some(body) = self.creatures.get(id).map(|c| c.body()) else { return };
+                let dir = (body - eye).normalize_or_zero();
+                let (_, hit) = self.aim(dir, tools::LASER_REACH);
+                if hit.is_some_and(|(h, _)| h == id) && self.rate(USE_BURST, 2) {
+                    heat(self);
+                    let _ = self.creatures.hurt_by_player(id, eye, tools::LASER_DAMAGE, ticks);
+                }
+            }
+            ToolUse::Shoot { dir } if kind == ToolKind::Multitool => {
+                let dir = dir.normalize_or_zero();
+                if !self.rate(USE_SHOT, (tools::RIFLE_INTERVAL * 20.0) as u64) || !self.player.tools.shoot() {
+                    return;
+                }
+                self.player.noise = 1.0;
+                if let (_, Some((id, _))) = self.aim(dir, tools::RIFLE_REACH)
+                    && let Ok(true) = self.creatures.hurt_by_player(id, eye, tools::RIFLE_DAMAGE, ticks)
+                {
+                    self.killed_notice(id);
+                }
+            }
+            ToolUse::Flame { dir } if kind == ToolKind::Multitool && !locked => {
+                let dir = dir.normalize_or_zero();
+                if !self.rate(USE_BURST, 2) {
+                    return;
+                }
+                heat(self);
+                self.player.flaming = Some((ticks + 10, dir));
+                self.player.noise = self.player.noise.max(0.5);
+                for id in self.creatures.in_cone(eye, dir, tools::FLAME_ANGLE, tools::FLAME_REACH) {
+                    // Not through hills.
+                    let Some(body) = self.creatures.get(id).map(|c| c.body()) else { continue };
+                    let (ground, _) = self.aim((body - eye).normalize_or_zero(), tools::FLAME_REACH + 2.0);
+                    if ground + 0.5 >= body.distance(eye)
+                        && let Ok(true) = self.creatures.hurt_by_player(id, eye, tools::FLAME_DAMAGE, ticks)
+                    {
+                        self.killed_notice(id);
+                    }
+                }
+                // The ground it reaches catches.
+                let (ground, _) = self.aim(dir, tools::FLAME_REACH);
+                if ground < tools::FLAME_REACH && ticks.is_multiple_of(6) {
+                    let at = eye + dir * ground;
+                    self.fire.ignite(&self.world.worldgen, at.x, at.z, ticks);
+                }
+            }
+            ToolUse::Terraform { point, normal, radius, fill } if kind == ToolKind::Manipulator && !locked => {
+                let radius = radius.clamp(tools::BRUSH[0], tools::BRUSH[1]);
+                if point.distance(eye) > tools::TERRAFORM_REACH + radius || !self.rate(USE_TERRAFORM, 3) {
+                    return;
+                }
+                heat(self);
+                if !fill {
+                    self.bite(point, normal, radius);
+                    return;
+                }
+                // Fill with whatever placeable material there's most of.
+                let p = &self.player;
+                let Some(item) = p
+                    .inventory
+                    .slots
+                    .iter()
+                    .flatten()
+                    .filter(|s| self.content.item(s.item).places.is_some())
+                    .max_by_key(|s| s.count)
+                    .map(|s| s.item)
+                else {
+                    self.notice("Nothing to fill with: dig some first".into());
+                    return;
+                };
+                let feet = self.player.feet;
+                match rules::fill_with(&mut self.world, &self.content, &mut self.player.inventory, item, point, normal, feet, radius) {
+                    rules::FillOutcome::Placed(op) => {
+                        self.fluid_sim.disturb(&self.world, &op);
+                        self.creatures.ground_changed(op.center, op.reach());
+                        self.outbox.push(ServerMsg::Edited(op));
+                        self.send_inventory();
+                    }
+                    rules::FillOutcome::NotEnough => self.notice(format!("Not enough {}", self.content.item(item).name)),
+                    _ => {}
+                }
+            }
+            ToolUse::PlaceBeacon { at } if kind == ToolKind::Beacon => {
+                let Some(item) = self.content.tool_item(ToolKind::Beacon) else { return };
+                if at.distance(self.player.feet) > 6.0 || !self.player.inventory.take(item, 1) {
+                    return;
+                }
+                let id = self.beacons.iter().map(|b| b.0 + 1).max().unwrap_or(0);
+                self.beacons.push((id, at));
+                self.outbox.push(ServerMsg::BeaconPlaced { id, at });
+                self.send_inventory();
+            }
+            ToolUse::TakeBeacon { id } => {
+                let feet = self.player.feet;
+                let Some(i) = self.beacons.iter().position(|(b, at)| *b == id && at.distance(feet) < tools::BEACON_REACH) else {
+                    return;
+                };
+                let Some(item) = self.content.tool_item(ToolKind::Beacon) else { return };
+                if self.player.inventory.add(&self.content, item, 1) > 0 {
+                    self.notice("Inventory full".into());
+                    return;
+                }
+                self.beacons.remove(i);
+                self.outbox.push(ServerMsg::BeaconTaken { id });
+                self.send_inventory();
+            }
+            ToolUse::Inject if kind == ToolKind::Injector => {
+                let Some(meat) = self.content.item_id(tools::INJECT_COST) else { return };
+                if self.player.vitals.healing > 0 {
+                    return;
+                }
+                if !self.player.inventory.take(meat, 1) {
+                    self.notice(format!("The injector needs {}", self.content.item(meat).name));
+                    return;
+                }
+                self.player.vitals.heal_over(tools::INJECT_HEAL);
+                self.send_inventory();
+            }
+            _ => {}
+        }
+    }
+
+    fn killed_notice(&mut self, id: crate::creatures::CreatureId) {
+        if let Some(c) = self.creatures.get(id) {
+            let name = c.kind().name.to_lowercase();
+            self.notice(format!("You killed the {name}"));
         }
     }
 
@@ -914,6 +1162,7 @@ impl Server {
                     .collect(),
                 remainders: inventory.remainders.iter().map(|(id, v)| (item_id(*id), *v)).collect(),
                 vitals: Some(p.vitals),
+                kit: p.kit,
             })]
             .into(),
             ops: self.world.edits.ops().to_vec(),
@@ -934,6 +1183,7 @@ impl Server {
             burnt: self.fire.stages(self.sim.ticks).into_iter().map(|(c, _)| c).collect(),
             scars: self.scars.clone(),
             losses: self.creatures.losses(),
+            beacons: self.beacons.iter().map(|(id, at)| (*id, (*at).into())).collect(),
         }
     }
 
@@ -968,8 +1218,28 @@ impl Server {
 
 /// Put a saved player and inventory back. Unknown items (removed from the content files) are dropped
 /// with a warning rather than failing the load.
+/// The tools a new player starts with (once: an old save gets them on its next load).
+fn give_kit(content: &Content, player: &mut PlayerState) {
+    player.kit = true;
+    for (kind, count) in [
+        (ToolKind::Multitool, 1),
+        (ToolKind::Scanner, 1),
+        (ToolKind::Manipulator, 1),
+        (ToolKind::Torch, 1),
+        (ToolKind::Beacon, 3),
+        (ToolKind::Injector, 1),
+    ] {
+        if let Some(item) = content.tool_item(kind)
+            && player.inventory.count(item) == 0
+        {
+            player.inventory.add(content, item, count);
+        }
+    }
+}
+
 fn restore_player(saved: &PlayerSave, content: &Content, player: &mut PlayerState) {
     player.feet = Vec3::from(saved.feet);
+    player.kit = saved.kit;
     player.mode = saved.mode;
     player.vitals = saved.vitals.unwrap_or_default();
     (player.yaw, player.pitch) = (saved.yaw, saved.pitch);

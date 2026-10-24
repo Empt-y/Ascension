@@ -24,6 +24,8 @@ pub struct ItemDef {
     pub color: [f32; 3],
     pub stack: u32,
     pub places: Option<Material>,
+    /// A tool, held to use.
+    pub tool: Option<crate::tools::ToolKind>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -55,6 +57,7 @@ struct RawItem {
     #[serde(default = "default_stack")]
     stack: u32,
     places: Option<String>,
+    tool: Option<crate::tools::ToolKind>,
 }
 
 fn default_stack() -> u32 {
@@ -110,7 +113,7 @@ impl Content {
             if by_id.insert(raw.id.clone(), id).is_some() {
                 bail!("item {} is defined twice", raw.id);
             }
-            items.push(ItemDef { id: raw.id, name: raw.name, color: raw.color, stack: raw.stack, places });
+            items.push(ItemDef { id: raw.id, name: raw.name, color: raw.color, stack: raw.stack, places, tool: raw.tool });
         }
         // An item per ore.
         let table = asc_world::ores::builtin();
@@ -127,6 +130,7 @@ impl Content {
                 color: ore.color,
                 stack: 64,
                 places: None,
+                tool: None,
             });
             ore_items.push(item);
         }
@@ -176,6 +180,11 @@ impl Content {
 
     pub fn item(&self, id: ItemId) -> &ItemDef {
         &self.items[id.0 as usize]
+    }
+
+    /// The item that is the tool `kind`.
+    pub fn tool_item(&self, kind: crate::tools::ToolKind) -> Option<ItemId> {
+        self.items.iter().position(|i| i.tool == Some(kind)).map(|i| ItemId(i as u16))
     }
 
     pub fn item_id(&self, name: &str) -> Option<ItemId> {

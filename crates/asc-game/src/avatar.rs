@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use glam::{Mat4, Vec2, Vec3};
 
-use crate::animation::{Playing, Poser};
+use crate::animation::{Layer, Playing, Poser};
 use crate::assets::PlayerModel;
 use crate::player::Mode;
 
@@ -35,6 +35,35 @@ pub struct State {
     pub since_struck: Option<(f32, u32)>,
     pub since_hurt: Option<f32>,
     pub butchering: bool,
+    /// What's in the hands, and how the view is pitched (radians, up positive).
+    pub held: Held,
+    pub look_pitch: f32,
+}
+
+/// What the hands are doing with what they hold (played over the arms and chest, so the legs walk
+/// on underneath).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Held {
+    #[default]
+    Nothing,
+    /// Carrying it (a beacon, an idle scanner).
+    Carry,
+    /// Aiming it along the view (the multitool, the manipulator).
+    Aim,
+    /// Seconds since a shot.
+    Shoot(f32),
+    /// Seconds since a scan.
+    Scan(f32),
+    Torch,
+    /// Seconds since starting an injection.
+    Inject(f32),
+}
+
+impl Held {
+    /// Whether the body turns to face where the player looks.
+    fn faces_view(self) -> bool {
+        !matches!(self, Self::Nothing | Self::Carry | Self::Torch)
+    }
 }
 
 #[derive(Default)]
@@ -48,6 +77,27 @@ pub struct Avatar {
     airborne: f32,
     landed: f32,
     poser: Poser,
+    /// The arms' clip, how much of it shows (0..1), and the joints it's on (from the chest up).
+    layer: Option<Playing>,
+    layer_weight: f32,
+    upper: Vec<bool>,
+}
+
+/// The arms' clip for what's held: the clip, whether it loops, and (one-shots) how far in.
+fn layer_clip(model: &PlayerModel, held: Held) -> Option<(usize, bool, Option<f32>)> {
+    let clip = |n: &str| model.body.clip(n);
+    let (name, once) = match held {
+        Held::Nothing => return None,
+        Held::Carry => ("Pistol_Idle_Loop", None),
+        Held::Aim => ("Pistol_Aim_Neutral", None),
+        Held::Shoot(t) if t < 0.35 => ("Pistol_Shoot", Some(t)),
+        Held::Shoot(_) => ("Pistol_Aim_Neutral", None),
+        Held::Scan(t) if t < 0.9 => ("Spell_Simple_Shoot", Some(t)),
+        Held::Scan(_) => ("Spell_Simple_Idle_Loop", None),
+        Held::Torch => ("Idle_Torch_Loop", None),
+        Held::Inject(t) => ("Consume", Some(t)),
+    };
+    clip(name).map(|c| (c, once.is_none(), once))
 }
 
 /// The clip a state calls for, and its playback rate (looped clips) or `None` for a one-shot.
@@ -95,8 +145,9 @@ fn choose(model: &PlayerModel, s: &State, airborne: f32, landed: f32) -> (Option
 }
 
 impl Avatar {
-    /// Step `dt` seconds on from the last frame in `state`; the body's yaw and joint palette.
-    pub fn update(&mut self, model: &PlayerModel, state: &State, dt: f32) -> (f32, Arc<[Mat4]>) {
+    /// Step `dt` seconds on from the last frame in `state`: the body's yaw, its joint palette, and
+    /// where its right hand is (model space).
+    pub fn update(&mut self, model: &PlayerModel, state: &State, dt: f32) -> (f32, Arc<[Mat4]>, Mat4) {
         if state.grounded || state.mode == Mode::Fly {
             if self.airborne > 0.4 {
                 self.landed = 0.0;
@@ -130,13 +181,37 @@ impl Avatar {
         } else {
             Vec2::new(state.look_yaw.cos(), state.look_yaw.sin())
         };
+        let facing = if state.held.faces_view() && flat.length() < 5.0 { Vec2::new(state.look_yaw.cos(), state.look_yaw.sin()) } else { facing };
         let target = asc_sim::creatures::yaw_facing(facing);
         let diff = (target - self.yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
         self.yaw += diff.clamp(-TURN_RATE * dt, TURN_RATE * dt);
+        // The arms: what's held, eased in and out.
+        let skeleton = &model.body.skeleton;
+        if self.upper.is_empty() {
+            self.upper = skeleton.index("spine_02").map_or_else(|| vec![false; skeleton.len()], |j| skeleton.below(j));
+        }
+        let want = layer_clip(model, state.held);
+        self.layer_weight = (self.layer_weight + if want.is_some() { dt } else { -dt } / 0.2).clamp(0.0, 1.0);
+        if let Some((clip, looped, at)) = want {
+            match &mut self.layer {
+                Some(p) if p.clip == clip => p.time = at.unwrap_or(p.time + dt),
+                _ => self.layer = Some(Playing { clip, time: at.unwrap_or(0.0), looped }),
+            }
+        }
+        // Aiming: the neutral aim blended towards up or down with the view's pitch.
+        let with = (matches!(state.held, Held::Aim | Held::Shoot(_)))
+            .then(|| {
+                let name = if state.look_pitch > 0.0 { "Pistol_Aim_Up" } else { "Pistol_Aim_Down" };
+                model.body.clip(name).map(|c| (Playing { clip: c, time: 0.0, looped: true }, (state.look_pitch.abs() / 1.1).min(1.0)))
+            })
+            .flatten()
+            .filter(|_| !matches!(state.held, Held::Shoot(t) if t < 0.35));
+        let layer = self.layer.filter(|_| self.layer_weight > 0.0).map(|now| Layer { now, with, weight: self.layer_weight, mask: &self.upper });
         let palette = match self.playing {
-            Some(now) => self.poser.palette(&model.body, now, self.fading),
+            Some(now) => self.poser.layered(&model.body, now, self.fading, layer),
             None => self.poser.rest(&model.body),
         };
-        (self.yaw, palette)
+        let hand = skeleton.index("hand_r").map_or(Mat4::IDENTITY, |j| palette[j] * skeleton.inverse_bind[j].inverse());
+        (self.yaw, palette, hand)
     }
 }

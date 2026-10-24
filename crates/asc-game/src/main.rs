@@ -17,8 +17,10 @@ mod input;
 mod inventory_ui;
 mod mining;
 mod player;
+mod scanner;
 mod scatter;
 mod streaming;
+mod tools;
 
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(

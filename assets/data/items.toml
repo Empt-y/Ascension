@@ -90,3 +90,46 @@ color = [0.45, 0.30, 0.18]
 id = "raw_fish"
 name = "Raw Fish"
 color = [0.55, 0.62, 0.68]
+
+# Tools: held (selected in the hotbar) to use; see asc_sim::tools.
+[[item]]
+id = "multitool"
+name = "Multitool"
+color = [0.85, 0.35, 0.08]
+stack = 1
+tool = "multitool"
+
+[[item]]
+id = "scanner"
+name = "Survey Scanner"
+color = [0.2, 0.8, 1.0]
+stack = 1
+tool = "scanner"
+
+[[item]]
+id = "manipulator"
+name = "Terrain Manipulator"
+color = [0.2, 0.9, 0.55]
+stack = 1
+tool = "manipulator"
+
+[[item]]
+id = "torch"
+name = "Torch"
+color = [1.0, 0.8, 0.45]
+stack = 1
+tool = "torch"
+
+[[item]]
+id = "beacon"
+name = "Waypoint Beacon"
+color = [0.3, 0.6, 1.0]
+stack = 5
+tool = "beacon"
+
+[[item]]
+id = "injector"
+name = "Med Injector"
+color = [0.4, 1.0, 0.5]
+stack = 1
+tool = "injector"

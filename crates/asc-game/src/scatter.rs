@@ -533,6 +533,11 @@ impl Scatter {
         self.invalidate(Vec3::new(centre.x, 0.0, centre.y), radius);
     }
 
+    /// The ore nodes mined away.
+    pub fn mined(&self) -> &HashSet<NodeId> {
+        &self.removed
+    }
+
     /// Take a node out of the world (it has been mined).
     pub fn remove_node(&mut self, id: NodeId) {
         self.removed.insert(id);

@@ -36,9 +36,14 @@ pub struct Bite {
 /// Take a bite out of the surface at `point` (facing `normal`): the edit goes into the world and
 /// its yield into the inventory.
 pub fn bite(world: &mut World, content: &Content, inventory: &mut Inventory, point: Vec3, normal: Vec3) -> Bite {
-    let center = point - normal * BITE_RADIUS * INSET;
-    let removed = world.census(center, BITE_RADIUS, CENSUS_STEP);
-    let op = EditOp { center, radius: BITE_RADIUS, kind: EditKind::Dig, material: Material::Air };
+    bite_sized(world, content, inventory, point, normal, BITE_RADIUS)
+}
+
+/// `bite`, of `radius` (the terrain manipulator's brush).
+pub fn bite_sized(world: &mut World, content: &Content, inventory: &mut Inventory, point: Vec3, normal: Vec3, radius: f32) -> Bite {
+    let center = point - normal * radius * INSET;
+    let removed = world.census(center, radius, CENSUS_STEP.max(radius / 8.0));
+    let op = EditOp { center, radius, kind: EditKind::Dig, material: Material::Air };
     world.edits.push(op);
     let mut overflow = 0;
     for m in Material::ALL.into_iter().filter(|m| *m != Material::Ore) {
@@ -78,16 +83,32 @@ pub fn fill(
     player_feet: Vec3,
 ) -> FillOutcome {
     let Some(stack) = inventory.selected_stack() else { return FillOutcome::NothingSelected };
-    let Some(material) = content.item(stack.item).places else { return FillOutcome::NotPlaceable };
-    let center = point + normal * BITE_RADIUS * INSET;
-    if Capsule::PLAYER.overlaps_sphere(player_feet, center, BITE_RADIUS) {
+    fill_with(world, content, inventory, stack.item, point, normal, player_feet, BITE_RADIUS)
+}
+
+/// A ball of `radius` of `item`'s material at `point`, paying for the air it fills (from anywhere in
+/// the inventory: the terrain manipulator is held, not the material).
+#[allow(clippy::too_many_arguments)]
+pub fn fill_with(
+    world: &mut World,
+    content: &Content,
+    inventory: &mut Inventory,
+    item: crate::content::ItemId,
+    point: Vec3,
+    normal: Vec3,
+    player_feet: Vec3,
+    radius: f32,
+) -> FillOutcome {
+    let Some(material) = content.item(item).places else { return FillOutcome::NotPlaceable };
+    let center = point + normal * radius * INSET;
+    if Capsule::PLAYER.overlaps_sphere(player_feet, center, radius) {
         return FillOutcome::WouldBury;
     }
-    let filled = world.census(center, BITE_RADIUS, CENSUS_STEP).air;
-    if !inventory.pay_volume(stack.item, filled) {
+    let filled = world.census(center, radius, CENSUS_STEP.max(radius / 8.0)).air;
+    if !inventory.pay_volume(item, filled) {
         return FillOutcome::NotEnough;
     }
-    let op = EditOp { center, radius: BITE_RADIUS, kind: EditKind::Fill, material };
+    let op = EditOp { center, radius, kind: EditKind::Fill, material };
     world.edits.push(op);
     FillOutcome::Placed(op)
 }

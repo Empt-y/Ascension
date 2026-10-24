@@ -22,7 +22,7 @@ fn main() {
     let start = asc_sim::rules::spawn_point(&world);
     let mut creatures = Creatures::new(seed);
     let hazards = Hazards::default();
-    let mut player = PlayerView { feet: start, velocity: Vec3::ZERO, noise: 0.0, alive: true, in_water: false, health: 1.0 };
+    let mut player = PlayerView { feet: start, velocity: Vec3::ZERO, noise: 0.0, alive: true, in_water: false, health: 1.0, torch: false };
     let ticks_total = (minutes * 60.0 * 20.0) as u64;
     let mut time_of_day = 0.3f32;
     let mut counts: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();

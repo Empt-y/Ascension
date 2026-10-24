@@ -64,11 +64,17 @@ pub struct Vitals {
     /// Ticks spent without air.
     #[serde(default)]
     pub drowning: u32,
+    /// Health still to come back from an injection (it comes `HEAL_PER_TICK` a tick).
+    #[serde(default)]
+    pub healing: i32,
 }
+
+/// An injection heals this fast.
+const HEAL_PER_TICK: i32 = 3;
 
 impl Default for Vitals {
     fn default() -> Self {
-        Self { health: MAX_HEALTH, air: MAX_AIR, temperature: BODY_TEMPERATURE, calm: REGEN_DELAY, drowning: 0 }
+        Self { health: MAX_HEALTH, air: MAX_AIR, temperature: BODY_TEMPERATURE, calm: REGEN_DELAY, drowning: 0, healing: 0 }
     }
 }
 
@@ -95,6 +101,13 @@ impl Vitals {
         if self.alive() { Outcome::Hurt(amount, cause) } else { Outcome::Died(cause) }
     }
 
+    /// Heal `amount` over the next ticks (an injection).
+    pub fn heal_over(&mut self, amount: i32) {
+        if self.alive() {
+            self.healing += amount;
+        }
+    }
+
     /// Damage for landing after falling `height` metres.
     pub fn fall_damage(height: f32) -> i32 {
         ((height - SAFE_FALL).max(0.0) * FALL_DAMAGE) as i32
@@ -119,6 +132,11 @@ impl Vitals {
         } else {
             self.air = (self.air + 5).min(MAX_AIR);
             self.drowning = 0;
+        }
+        if self.healing > 0 {
+            let h = self.healing.min(HEAL_PER_TICK);
+            self.healing -= h;
+            self.health = (self.health + h).min(MAX_HEALTH);
         }
         self.calm = self.calm.saturating_add(1);
         if self.calm >= REGEN_DELAY && self.alive() {

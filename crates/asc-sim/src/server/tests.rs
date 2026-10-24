@@ -105,6 +105,7 @@ fn an_ore_node_breaks_once() {
 #[test]
 fn inventory_ops_echo_their_sequence_number() {
     let mut s = server("inventory");
+    s.player.inventory = Inventory::default();
     let rock = s.content.item_id("rock").unwrap();
     s.player.inventory.add(&s.content, rock, 10);
     s.handle(ClientMsg::Inventory { seq: 1, op: crate::inventory::InventoryOp::Click(0) });
@@ -292,4 +293,159 @@ fn dying_leaves_a_stash_to_come_back_for() {
     assert_eq!(s.player.inventory.count(rock), 20);
     assert!(s.stashes.is_empty());
     assert!(s.drain().any(|m| matches!(m, ServerMsg::StashTaken { .. })));
+}
+
+/// Hold the tool `kind` (select its hotbar slot).
+fn hold(s: &mut Server, kind: ToolKind) {
+    let item = s.content.tool_item(kind).unwrap();
+    let slot = s.player.inventory.slots.iter().position(|x| x.is_some_and(|x| x.item == item)).expect("the tool in the inventory");
+    assert!(slot < crate::inventory::HOTBAR, "{kind:?} isn't on the hotbar");
+    s.handle(ClientMsg::Inventory { seq: 1, op: crate::inventory::InventoryOp::Select(slot) });
+    assert_eq!(s.held_tool(), Some(kind));
+}
+
+#[test]
+fn a_new_player_gets_the_starter_kit_once() {
+    let mut s = server("kit");
+    for kind in ToolKind::ALL {
+        let item = s.content.tool_item(kind).unwrap();
+        assert!(s.player.inventory.count(item) > 0, "no {kind:?}");
+    }
+    let dir = s.save_dir.clone();
+    let multitool = s.content.tool_item(ToolKind::Multitool).unwrap();
+    s.player.inventory.take(multitool, 1);
+    s.save("saved");
+    let config = Config { save_dir: dir, seed: Some(1337), new_world: false, validate: true, cheats: false, stress: None };
+    let again = Server::open(config, lattice()).unwrap();
+    assert_eq!(again.player.inventory.count(multitool), 0, "the kit came again");
+}
+
+#[test]
+fn the_laser_mines_from_further_off_but_only_held() {
+    let mut s = server("laser");
+    let hit = ground(&s, 40.0, 40.0);
+    stand(&mut s, hit.point + Vec3::new(15.0, 0.0, 0.0));
+    hold(&mut s, ToolKind::Scanner);
+    s.handle(ClientMsg::Tool(ToolUse::Laser { point: hit.point, normal: hit.normal }));
+    assert!(s.world.edits.is_empty(), "the scanner doesn't mine");
+    hold(&mut s, ToolKind::Multitool);
+    s.handle(ClientMsg::Tool(ToolUse::Laser { point: hit.point, normal: hit.normal }));
+    assert_eq!(s.world.edits.len(), 1, "the laser reaches 15 m");
+    stand(&mut s, hit.point + Vec3::new(30.0, 0.0, 0.0));
+    s.player.last_dig = None;
+    s.handle(ClientMsg::Tool(ToolUse::Laser { point: hit.point, normal: hit.normal }));
+    assert_eq!(s.world.edits.len(), 1, "not 30 m");
+}
+
+#[test]
+fn holding_the_trigger_overheats_the_multitool() {
+    let mut s = server("heat");
+    hold(&mut s, ToolKind::Multitool);
+    for _ in 0..(tools::HEAT_SECONDS * 20.0) as u32 + 10 {
+        s.handle(ClientMsg::Tool(ToolUse::Hold));
+        s.tick();
+    }
+    assert!(s.player.tools.locked(ToolKind::Multitool));
+    let hit = ground(&s, 40.0, 40.0);
+    stand(&mut s, hit.point + Vec3::new(5.0, 0.0, 0.0));
+    s.handle(ClientMsg::Tool(ToolUse::Laser { point: hit.point, normal: hit.normal }));
+    assert!(s.world.edits.is_empty(), "locked: no mining");
+    assert!(s.drain().any(|m| matches!(m, ServerMsg::ToolState(t) if t.locked(ToolKind::Multitool))));
+}
+
+/// A land animal (standing the player by the nearest herd and letting them come).
+fn a_creature(s: &mut Server) -> crate::creatures::Creature {
+    let home = (Vec2::new(s.player.feet.x, s.player.feet.z) / crate::creatures::CELL).floor().as_ivec2();
+    let at = (0..400)
+        .find_map(|i| {
+            let cell = home + glam::IVec2::new(i % 20 - 10, i / 20 - 10);
+            crate::creatures::herds_in(&s.world, 1337, cell).into_iter().find(|h| !h.2[0].kind().swims()).map(|h| h.2[0].at)
+        })
+        .expect("a herd on land somewhere near");
+    stand(s, at + Vec3::new(40.0, 0.0, 0.0));
+    for _ in 0..60 {
+        s.tick();
+    }
+    *s.creatures.all().find(|c| !c.kind().swims()).expect("animals near spawn")
+}
+
+#[test]
+fn the_rifle_and_flamer_hurt_what_they_hit() {
+    let mut s = server("rifle");
+    let c = a_creature(&mut s);
+    hold(&mut s, ToolKind::Multitool);
+    // From above it, looking down: nothing between.
+    let body = c.body();
+    stand(&mut s, body + Vec3::Y * 5.0 - Vec3::Y * EYE_HEIGHT);
+    s.handle(ClientMsg::Tool(ToolUse::Shoot { dir: -Vec3::Y }));
+    let after = s.creatures.get(c.id).unwrap().health;
+    assert_eq!(after, c.health - tools::RIFLE_DAMAGE);
+    // Shooting off to the side misses.
+    s.tick();
+    s.tick();
+    s.tick();
+    s.handle(ClientMsg::Tool(ToolUse::Shoot { dir: Vec3::X }));
+    assert_eq!(s.creatures.get(c.id).unwrap().health, after);
+    assert!(s.player.tools.charge < tools::RIFLE_CHARGE - 1.5);
+    // The flame, from closer.
+    stand(&mut s, body + Vec3::Y * 3.0 - Vec3::Y * EYE_HEIGHT);
+    s.tick();
+    s.tick();
+    s.handle(ClientMsg::Tool(ToolUse::Flame { dir: -Vec3::Y }));
+    assert_eq!(s.creatures.get(c.id).unwrap().health, after - tools::FLAME_DAMAGE);
+}
+
+#[test]
+fn beacons_are_placed_taken_and_saved() {
+    let mut s = server("beacons");
+    hold(&mut s, ToolKind::Beacon);
+    let at = s.player.feet + Vec3::new(2.0, 0.0, 0.0);
+    let beacon = s.content.tool_item(ToolKind::Beacon).unwrap();
+    let before = s.player.inventory.count(beacon);
+    s.handle(ClientMsg::Tool(ToolUse::PlaceBeacon { at }));
+    s.handle(ClientMsg::Tool(ToolUse::PlaceBeacon { at: at + Vec3::X * 40.0 }));
+    assert_eq!(s.beacons.len(), 1, "not 40 m off");
+    assert_eq!(s.player.inventory.count(beacon), before - 1);
+    let dir = s.save_dir.clone();
+    s.save("saved");
+    let config = Config { save_dir: dir, seed: Some(1337), new_world: false, validate: true, cheats: false, stress: None };
+    let mut s = Server::open(config, lattice()).unwrap();
+    assert_eq!(s.beacons, vec![(0, at)]);
+    s.handle(ClientMsg::Tool(ToolUse::TakeBeacon { id: 0 }));
+    assert!(s.beacons.is_empty());
+    assert_eq!(s.player.inventory.count(beacon), before);
+}
+
+#[test]
+fn the_injector_heals_for_meat() {
+    let mut s = server("inject");
+    hold(&mut s, ToolKind::Injector);
+    s.player.vitals.hurt(500, Cause::Fall);
+    s.handle(ClientMsg::Tool(ToolUse::Inject));
+    assert_eq!(s.player.vitals.healing, 0, "no meat, no healing");
+    let meat = s.content.item_id(tools::INJECT_COST).unwrap();
+    s.player.inventory.add(&s.content, meat, 2);
+    s.handle(ClientMsg::Tool(ToolUse::Inject));
+    assert_eq!(s.player.inventory.count(meat), 1);
+    for _ in 0..(tools::INJECT_SECONDS * 20.0) as u32 + 5 {
+        s.tick();
+    }
+    assert!(s.player.vitals.health >= 500 + tools::INJECT_HEAL, "health {}", s.player.vitals.health);
+}
+
+#[test]
+fn the_manipulator_digs_a_big_ball_and_fills_it_back() {
+    let mut s = server("terraform");
+    let hit = ground(&s, 40.0, 40.0);
+    stand(&mut s, hit.point + Vec3::new(8.0, 0.0, 0.0));
+    hold(&mut s, ToolKind::Manipulator);
+    s.handle(ClientMsg::Tool(ToolUse::Terraform { point: hit.point, normal: hit.normal, radius: 2.0, fill: false }));
+    assert_eq!(s.world.edits.ops()[0].radius, 2.0);
+    let got: u32 = s.player.inventory.slots.iter().flatten().filter(|x| s.content.item(x.item).places.is_some()).map(|x| x.count).sum();
+    assert!(got > 4, "a 2 m ball gave {got} items");
+    for _ in 0..4 {
+        s.tick();
+    }
+    s.handle(ClientMsg::Tool(ToolUse::Terraform { point: hit.point - Vec3::Y, normal: hit.normal, radius: 1.0, fill: true }));
+    assert_eq!(s.world.edits.len(), 2);
 }

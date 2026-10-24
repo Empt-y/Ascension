@@ -15,6 +15,20 @@ Licence: CC0 1.0. Source: https://kenney.nl/assets/impact-sounds
 - hurt (5): impactPunch_heavy_*
 - land (5): impactGeneric_light_*
 
+## Kenney, Sci-fi Sounds
+
+Licence: CC0 1.0. Source: https://kenney.nl/assets/sci-fi-sounds
+
+- tool_laser (5): forceField_*
+- tool_shot (5): laserLarge_*
+- tool_flame (5): thrusterFire_*
+- tool_scan (4): computerNoise_*
+- tool_terraform (5): spaceEngineLow_*
+- tool_overheat (5): impactMetal_*
+- tool_beacon (3): doorOpen_*
+- tool_switch (3): doorClose_*
+- tool_inject (2): slime_*
+
 ## JC Sounds, Nature Ambient Pack Vol 1
 
 Licence: CC-BY 4.0 (credit: JC Sounds). Source: https://opengameart.org/node/180349

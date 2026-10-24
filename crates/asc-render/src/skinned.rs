@@ -35,6 +35,8 @@ pub struct SkinnedInstance {
     pub palette: Arc<[Mat4]>,
     /// Cast a shadow but don't draw (the player's own body seen in first person).
     pub shadow_only: bool,
+    /// Cast a shadow at all (not a tool held in front of the eyes).
+    pub casts_shadow: bool,
 }
 
 #[repr(C)]
@@ -203,7 +205,8 @@ impl Skinned {
             let radius = self.models[m].radius * i.scale;
             let rel = i.position - camera;
             let in_view = !i.shadow_only && rel.length() < DRAW_DISTANCE + radius && frustum.intersects_box(rel - radius, rel + radius);
-            let casts: Vec<usize> = (0..CASCADES).filter(|&c| rel.length() < DRAW_DISTANCE && covers(c, rel, radius)).collect();
+            let casts: Vec<usize> =
+                (0..CASCADES).filter(|&c| i.casts_shadow && rel.length() < DRAW_DISTANCE && covers(c, rel, radius)).collect();
             next_prev.insert(i.key, (i.palette.clone(), i.position, i.yaw));
             if !in_view && casts.is_empty() {
                 continue;

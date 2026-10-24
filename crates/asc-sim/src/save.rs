@@ -61,6 +61,9 @@ pub struct PlayerSave {
     /// Missing in saves before format 5: full health.
     #[serde(default)]
     pub vitals: Option<crate::vitals::Vitals>,
+    /// The starter kit of tools has been given.
+    #[serde(default)]
+    pub kit: bool,
 }
 
 /// What a player left where they died, to come back for.
@@ -102,6 +105,14 @@ pub struct SaveGame {
     pub scars: Vec<crate::volcanism::Scar>,
     /// Animals killed from each herd: herd, how many, the tick the last was killed.
     pub losses: Vec<(u64, u32, u64)>,
+    /// Waypoint beacons: id and where.
+    pub beacons: Vec<(u32, [f32; 3])>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct BeaconsFile {
+    format_version: u32,
+    beacons: Vec<(u32, [f32; 3])>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -247,6 +258,8 @@ pub fn save(dir: &Path, game: &SaveGame) -> Result<()> {
     write_atomic(&dir.join("fire.bin"), &postcard::to_stdvec(&fire)?)?;
     let creatures = CreaturesFile { format_version: FORMAT_VERSION, losses: game.losses.clone() };
     write_atomic(&dir.join("creatures.bin"), &postcard::to_stdvec(&creatures)?)?;
+    let beacons = BeaconsFile { format_version: FORMAT_VERSION, beacons: game.beacons.clone() };
+    write_atomic(&dir.join("beacons.bin"), &postcard::to_stdvec(&beacons)?)?;
     Ok(())
 }
 
@@ -340,7 +353,14 @@ pub fn load(dir: &Path) -> Result<Option<SaveGame>> {
         let file: CreaturesFile = read_with_backup(&creatures_path, |b| Ok(postcard::from_bytes(b)?))?;
         file.losses
     };
-    Ok(Some(SaveGame { meta, players, ops: edits.ops, structures, nodes, stashes, fluids, burnt, scars, losses }))
+    let beacons_path = dir.join("beacons.bin");
+    let beacons = if !beacons_path.exists() && !with_suffix(&beacons_path, ".bak").exists() {
+        Vec::new()
+    } else {
+        let file: BeaconsFile = read_with_backup(&beacons_path, |b| Ok(postcard::from_bytes(b)?))?;
+        file.beacons
+    };
+    Ok(Some(SaveGame { meta, players, ops: edits.ops, structures, nodes, stashes, fluids, burnt, scars, losses, beacons }))
 }
 
 #[cfg(test)]
@@ -376,6 +396,7 @@ mod tests {
                 ],
                 remainders: [("rock".to_owned(), 0.375)].into(),
                 vitals: Some(crate::vitals::Vitals { health: 640, ..Default::default() }),
+                kit: true,
             })]
             .into(),
             ops: (0..50)
@@ -414,6 +435,7 @@ mod tests {
                 width: 250.0,
             }],
             losses: vec![(77, 2, 1234)],
+            beacons: vec![(4, [1.0, 2.0, 3.0])],
         }
     }
 

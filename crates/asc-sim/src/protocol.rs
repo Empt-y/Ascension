@@ -29,6 +29,8 @@ pub enum ClientMsg {
     Strike { id: crate::creatures::CreatureId },
     /// Finished butchering a carcass.
     Butcher { id: crate::creatures::CreatureId },
+    /// Used the tool held.
+    Tool(crate::tools::ToolUse),
     /// Place a building piece. `gap`: for foundations, how far the ground falls away under it.
     Place { piece: Piece, gap: f32 },
     Dismantle { key: PieceKey },
@@ -77,6 +79,9 @@ pub struct Welcome {
     pub scars: Vec<crate::volcanism::Scar>,
     /// The wild creatures near the player.
     pub creatures: Vec<crate::creatures::Creature>,
+    /// Waypoint beacons placed.
+    pub beacons: Vec<(u32, Vec3)>,
+    pub tools: crate::tools::ToolState,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -121,6 +126,10 @@ pub enum ServerMsg {
     CreatureActs(Vec<(crate::creatures::CreatureId, crate::creatures::Act, u64)>),
     /// Creatures hurt: their health now.
     CreatureHurt(Vec<(crate::creatures::CreatureId, i32)>),
+    /// The tools' heat and the rifle's charge.
+    ToolState(crate::tools::ToolState),
+    BeaconPlaced { id: u32, at: Vec3 },
+    BeaconTaken { id: u32 },
     /// Lava met water and set to rock here this tick (steam: a few spots, a cell apart at least).
     Steam(Vec<glam::Vec3>),
 }

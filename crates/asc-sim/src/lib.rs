@@ -19,6 +19,7 @@ pub mod schedule;
 pub mod server;
 pub mod sim;
 pub mod stress;
+pub mod tools;
 pub mod vitals;
 pub mod volcanism;
 

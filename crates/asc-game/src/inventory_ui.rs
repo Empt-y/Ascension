@@ -118,6 +118,56 @@ pub fn crosshair(ctx: &egui::Context, progress: f32) {
     }
 }
 
+/// What the HUD shows of the tool held.
+pub struct ToolHud {
+    pub kind: asc_sim::tools::ToolKind,
+    pub mode: asc_sim::tools::Mode,
+    pub heat: f32,
+    pub locked: bool,
+    pub charge: f32,
+    pub brush: f32,
+}
+
+/// The held tool's gauges to the right of the crosshair (heat, the rifle's charge, the brush), and
+/// its controls along the bottom.
+pub fn tool_hud(ctx: &egui::Context, t: &ToolHud) {
+    use asc_sim::tools::{BRUSH, Mode, RIFLE_CHARGE, ToolKind};
+    let center = ctx.content_rect().center();
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("tool")));
+    let font = FontId::proportional(13.0);
+    let white = Color32::from_white_alpha(220);
+    let at = center + Vec2::new(40.0, -30.0);
+    let (title, keys) = match t.kind {
+        ToolKind::Multitool => (t.mode.name(), "LMB: use   R: mode"),
+        ToolKind::Scanner => ("Survey scanner", "LMB or C: scan"),
+        ToolKind::Manipulator => ("Terrain manipulator", "LMB: dig   RMB: fill   wheel: size"),
+        ToolKind::Torch => ("Torch", "LMB: raise"),
+        ToolKind::Beacon => ("Waypoint beacon", "RMB: place   LMB: pick up"),
+        ToolKind::Injector => ("Med injector", "hold RMB: inject (uses raw meat)"),
+    };
+    painter.text(at, Align2::LEFT_TOP, title, font.clone(), white);
+    let bar = |y: f32, fill: f32, color: Color32, label: &str| {
+        let r = Rect::from_min_size(at + Vec2::new(0.0, y), Vec2::new(90.0, 6.0));
+        painter.rect_filled(r, 2.0, Color32::from_black_alpha(140));
+        let mut f = r;
+        f.set_width(r.width() * fill.clamp(0.0, 1.0));
+        painter.rect_filled(f, 2.0, color);
+        painter.text(r.right_center() + Vec2::new(6.0, 0.0), Align2::LEFT_CENTER, label, FontId::proportional(11.0), white);
+    };
+    if t.kind.heats().is_some() {
+        let color = if t.locked { Color32::from_rgb(255, 60, 40) } else { Color32::from_rgb(255, (200.0 * (1.0 - t.heat)) as u8 + 40, 40) };
+        bar(20.0, t.heat, color, if t.locked { "OVERHEATED" } else { "heat" });
+    }
+    if t.kind == ToolKind::Multitool && t.mode == Mode::Rifle {
+        bar(32.0, t.charge / RIFLE_CHARGE, Color32::from_rgb(255, 170, 60), &format!("{:.0} shots", t.charge.floor()));
+    }
+    if t.kind == ToolKind::Manipulator {
+        bar(32.0, (t.brush - BRUSH[0]) / (BRUSH[1] - BRUSH[0]), Color32::from_rgb(80, 230, 150), &format!("{:.1} m", t.brush));
+    }
+    let screen = ctx.content_rect();
+    painter.text(Pos2::new(screen.center().x, screen.bottom() - 92.0), Align2::CENTER_BOTTOM, keys, FontId::proportional(12.0), Color32::from_white_alpha(160));
+}
+
 /// The creature under the crosshair: its name, and a bar of its health.
 pub fn creature_label(ctx: &egui::Context, name: &str, health: f32) {
     let center = ctx.content_rect().center();

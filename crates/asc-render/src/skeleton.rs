@@ -118,19 +118,41 @@ impl Skeleton {
         }
     }
 
-    /// The matrices skinning needs: each joint's model-space transform times its inverse bind
-    /// matrix.
-    pub fn palette(&self, pose: &Pose, out: &mut Vec<Mat4>) {
-        let mut global = vec![Mat4::IDENTITY; self.len()];
+    /// Each joint's model-space transform in `pose`.
+    pub fn globals(&self, pose: &Pose, out: &mut Vec<Mat4>) {
+        out.clear();
+        out.resize(self.len(), Mat4::IDENTITY);
         for &j in &self.order {
             let local = pose[j].matrix();
-            global[j] = match self.parents[j] {
-                Some(p) => global[p] * local,
+            out[j] = match self.parents[j] {
+                Some(p) => out[p] * local,
                 None => self.above[j] * local,
             };
         }
+    }
+
+    /// The matrices skinning needs: each joint's model-space transform times its inverse bind
+    /// matrix.
+    pub fn palette(&self, pose: &Pose, out: &mut Vec<Mat4>) {
+        let mut global = Vec::new();
+        self.globals(pose, &mut global);
         out.clear();
         out.extend(global.iter().zip(&self.inverse_bind).map(|(g, ib)| *g * *ib));
+    }
+
+    /// Which joints are `joint` or below it (a mask for blending part of a body: the arms and
+    /// chest from `spine_02` up, say).
+    pub fn below(&self, joint: usize) -> Vec<bool> {
+        let mut mask = vec![false; self.len()];
+        mask[joint] = true;
+        for &j in &self.order {
+            if let Some(p) = self.parents[j]
+                && mask[p]
+            {
+                mask[j] = true;
+            }
+        }
+        mask
     }
 }
 
@@ -152,6 +174,12 @@ fn key_at(times: &[f32], t: f32, step: bool) -> (usize, f32) {
 pub fn blend(a: &Pose, b: &Pose, w: f32, out: &mut Pose) {
     out.clear();
     out.extend(a.iter().zip(b).map(|(x, y)| x.lerp(y, w)));
+}
+
+/// `a`, with the joints in `mask` blended towards `b` by `w` (0 all `a`, 1 all `b`).
+pub fn blend_masked(a: &Pose, b: &Pose, w: f32, mask: &[bool], out: &mut Pose) {
+    out.clear();
+    out.extend(a.iter().zip(b).zip(mask).map(|((x, y), m)| if *m { x.lerp(y, w) } else { *x }));
 }
 
 /// Every node's world matrix, by node index.
@@ -331,5 +359,33 @@ mod tests {
         assert_eq!(key_at(&[0.0, 1.0, 2.0], 1.5, false), (1, 0.5));
         assert_eq!(key_at(&[0.0, 1.0, 2.0], 1.5, true), (1, 0.0));
         assert_eq!(key_at(&[0.0, 1.0, 2.0], 5.0, false), (2, 0.0));
+    }
+}
+
+#[cfg(test)]
+mod layer_tests {
+    use super::*;
+
+    #[test]
+    fn a_masked_blend_moves_only_the_masked_joints() {
+        // A chain: 0 (hips) -> 1 (chest) -> 2 (arm), and 3 (leg) off the hips.
+        let s = Skeleton {
+            names: ["hips", "chest", "arm", "leg"].map(String::from).to_vec(),
+            parents: vec![None, Some(0), Some(1), Some(0)],
+            above: vec![Mat4::IDENTITY; 4],
+            inverse_bind: vec![Mat4::IDENTITY; 4],
+            rest: vec![Transform::IDENTITY; 4],
+            order: vec![0, 1, 2, 3],
+        };
+        let mask = s.below(1);
+        assert_eq!(mask, vec![false, true, true, false]);
+        let a = s.rest_pose();
+        let b: Pose = a.iter().map(|t| Transform { translation: Vec3::Y, ..*t }).collect();
+        let mut out = Vec::new();
+        blend_masked(&a, &b, 1.0, &mask, &mut out);
+        assert_eq!(out[1].translation, Vec3::Y);
+        assert_eq!(out[2].translation, Vec3::Y);
+        assert_eq!(out[3].translation, Vec3::ZERO, "the leg stays");
+        assert_eq!(out[0].translation, Vec3::ZERO);
     }
 }

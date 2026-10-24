@@ -450,6 +450,30 @@ impl Creature {
     pub fn forward(&self) -> Vec2 {
         Vec2::new(self.yaw.sin(), self.yaw.cos())
     }
+
+    /// Its body as a capsule: the segment's ends and the radius (about as long as it's tall; lying
+    /// down when dead).
+    pub fn capsule(&self) -> (Vec3, Vec3, f32) {
+        let k = self.kind();
+        let f = self.forward();
+        let fwd = Vec3::new(f.x, 0.0, f.y);
+        if self.dead() {
+            let mid = self.at + Vec3::Y * k.radius * 0.6;
+            let half = (k.height * 0.5).max(k.radius) * 0.5;
+            return (mid - fwd * half, mid + fwd * half, k.radius * 0.9);
+        }
+        let radius = k.radius.max(k.height * 0.3);
+        let half = (k.height * 0.6 - radius).max(0.0);
+        let mid = self.body();
+        (mid - fwd * half, mid + fwd * half, radius)
+    }
+}
+
+/// Distance from `p` to the segment `a`..`b`.
+pub fn capsule_distance(p: Vec3, a: Vec3, b: Vec3) -> f32 {
+    let ab = b - a;
+    let t = if ab.length_squared() > 0.0 { ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+    (p - (a + ab * t)).length()
 }
 
 /// Where a creature has got to, for the clients (sent for those that moved, a few times a second).
@@ -588,6 +612,8 @@ pub struct PlayerView {
     pub in_water: bool,
     /// 0..1 of full health.
     pub health: f32,
+    /// Holding a lit torch (wolves keep off).
+    pub torch: bool,
 }
 
 impl PlayerView {
@@ -954,6 +980,59 @@ impl Creatures {
         }
     }
 
+    /// The first live creature the ray from `origin` along `dir` (unit) meets within `max`, and how
+    /// far along.
+    pub fn ray(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<(CreatureId, f32)> {
+        self.agents
+            .values()
+            .filter(|a| !a.c.dead() && a.c.at.distance(origin) < max + 6.0)
+            .filter_map(|a| {
+                let (p, q, r) = a.c.capsule();
+                // Sphere tracing: a capsule is simple enough to converge in a few steps.
+                let mut t = 0.0;
+                for _ in 0..32 {
+                    let d = capsule_distance(origin + dir * t, p, q) - r;
+                    if d < 0.02 {
+                        return Some((a.c.id, t));
+                    }
+                    t += d;
+                    if t > max {
+                        return None;
+                    }
+                }
+                None
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
+    /// The live creatures whose bodies are within the cone from `from` along `dir`.
+    pub fn in_cone(&self, from: Vec3, dir: Vec3, angle: f32, reach: f32) -> Vec<CreatureId> {
+        self.agents
+            .values()
+            .filter(|a| !a.c.dead() && crate::tools::in_cone(from, dir, angle, reach + a.c.kind().radius, a.c.body()))
+            .map(|a| a.c.id)
+            .collect()
+    }
+
+    /// The player hurts creature `id` (with a tool, from `from`): no reach or rate checks (the
+    /// caller made them). Whether it died.
+    pub fn hurt_by_player(&mut self, id: CreatureId, from: Vec3, damage: i32, ticks: u64) -> Result<bool, Miss> {
+        let Some(a) = self.agents.get_mut(&id) else { return Err(Miss::NoSuchCreature) };
+        if a.c.dead() {
+            return Err(Miss::AlreadyDead);
+        }
+        let died = combat::hurt(a, damage, Some(brain::Who::Player), ticks, &mut self.pending);
+        let herd = a.herd;
+        if let Some(h) = self.herds.get_mut(&herd) {
+            h.wary = h.wary.max(0.7);
+            h.alarm = Some((ticks, Vec2::new(from.x, from.z)));
+        }
+        if died {
+            self.lost(herd, true, ticks);
+        }
+        Ok(died)
+    }
+
     /// The player strikes creature `id` from `eye` with `damage`. Checked: it must be alive, within
     /// reach and the last strike long enough ago.
     pub fn strike(&mut self, id: CreatureId, eye: Vec3, damage: i32, ticks: u64) -> Result<bool, Miss> {
@@ -969,16 +1048,7 @@ impl Creatures {
             return Err(Miss::TooSoon);
         }
         self.last_strike = ticks;
-        let died = combat::hurt(a, damage, Some(brain::Who::Player), ticks, &mut self.pending);
-        let herd = a.herd;
-        if let Some(h) = self.herds.get_mut(&herd) {
-            h.wary = h.wary.max(0.7);
-            h.alarm = Some((ticks, Vec2::new(eye.x, eye.z)));
-        }
-        if died {
-            self.lost(herd, true, ticks);
-        }
-        Ok(died)
+        self.hurt_by_player(id, eye, damage, ticks)
     }
 
     /// Butcher the carcass `id` standing at `feet`: what it gives (item id, count), and it's gone.
