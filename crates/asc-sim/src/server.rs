@@ -365,6 +365,17 @@ impl Server {
             self.outbox.push(ServerMsg::Fire(changed));
         }
         self.fluid_sim.tick(&self.world);
+        // Steam where lava met water: a few spots (one per 8 m cell), for the clients to show.
+        let mut steam: Vec<Vec3> = Vec::new();
+        for cell in self.fluid_sim.take_steam() {
+            let p = cell.as_vec3() + Vec3::splat(0.5);
+            if steam.len() < 16 && !steam.iter().any(|s| s.distance(p) < 8.0) {
+                steam.push(p);
+            }
+        }
+        if !steam.is_empty() {
+            self.outbox.push(ServerMsg::Steam(steam));
+        }
         for (cell, height, material) in self.fluid_sim.take_solidified() {
             // A run `height` metres up from the bottom of `cell`, as one box.
             let op = asc_world::EditOp {

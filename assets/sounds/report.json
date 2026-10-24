@@ -166,6 +166,21 @@
     "rms_db": -22.0,
     "seconds": 1.0
   },
+  "steam_0": {
+    "peak_db": -3.0,
+    "rms_db": -21.8,
+    "seconds": 1.6
+  },
+  "steam_1": {
+    "peak_db": -3.0,
+    "rms_db": -21.4,
+    "seconds": 1.6
+  },
+  "steam_2": {
+    "peak_db": -3.0,
+    "rms_db": -20.8,
+    "seconds": 1.6
+  },
   "step_grass_0": {
     "peak_db": -6.0,
     "rms_db": -23.3,
@@ -190,6 +205,31 @@
     "peak_db": -6.0,
     "rms_db": -23.5,
     "seconds": 0.22
+  },
+  "step_gravel_0": {
+    "peak_db": -6.0,
+    "rms_db": -23.9,
+    "seconds": 0.25
+  },
+  "step_gravel_1": {
+    "peak_db": -6.0,
+    "rms_db": -25.1,
+    "seconds": 0.25
+  },
+  "step_gravel_2": {
+    "peak_db": -6.0,
+    "rms_db": -24.0,
+    "seconds": 0.25
+  },
+  "step_gravel_3": {
+    "peak_db": -6.0,
+    "rms_db": -25.0,
+    "seconds": 0.25
+  },
+  "step_gravel_4": {
+    "peak_db": -6.0,
+    "rms_db": -25.5,
+    "seconds": 0.25
   },
   "step_hard_0": {
     "peak_db": -6.0,

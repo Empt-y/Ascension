@@ -76,6 +76,29 @@ impl Effects {
         (self.rng >> 40) as f32 / (1u64 << 24) as f32
     }
 
+    /// Lava met water at `at`: a few pale puffs of steam billow up (pale: no ash fog).
+    pub fn steam(&mut self, at: Vec3) {
+        for _ in 0..4 {
+            let side = Vec2::from_angle(self.random() * std::f32::consts::TAU) * 1.5;
+            let size = 2.0 + 2.0 * self.random();
+            let puff = Puff {
+                at: at + Vec3::new(side.x, 0.5 + self.random(), side.y),
+                from: at.y,
+                vel: Vec3::new(side.x * 0.5, 3.0 + 3.0 * self.random(), side.y * 0.5),
+                size,
+                age: 0.0,
+                dark: 0.0,
+                opacity: 0.25 + 0.15 * self.random(),
+                seed: self.random() * 100.0,
+                spin: self.random() * std::f32::consts::TAU,
+                lift: 1.5,
+                max: size * 3.0,
+                hot: 0.0,
+            };
+            self.puffs.push(puff);
+        }
+    }
+
     /// Fire cells whose stage changed (burnt-out ones stop burning).
     pub fn set_fire(&mut self, changed: &[([i32; 2], u8)]) {
         for &(c, stage) in changed {

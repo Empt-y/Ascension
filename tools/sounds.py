@@ -224,6 +224,18 @@ def step_snow(rng):
     return step(rng, 600, 3000, 0.06, 420, (1200, 3500), thud=0.3, seconds=0.3)
 
 
+def step_gravel(rng):
+    return step(rng, 900, 5000, 0.03, 300, (1500, 6000), thud=0.7, seconds=0.25)
+
+
+def steam(rng):
+    """Lava meeting water: a sharp hiss of steam, dying away."""
+    s = 1.6
+    hiss = band(white(rng, s), 2500, 11000, 2) * env(s, 0.01, 0.35) * slow(rng, s, 6, 0.3)
+    spit = scatter(rng, s, 40, lambda: click(rng, 0.01, 1500, 6000)) * env(s, 0.01, 0.3)
+    return to_peak(fade_out(hiss + 0.4 * spit, 0.1), -3)
+
+
 def step_water(rng):
     s = 0.4
     slosh = band(pink(rng, s), 300, 2500) * env(s, 0.01, 0.1)
@@ -376,6 +388,8 @@ ONE_SHOTS = {
     "step_sand": (step_sand, 5),
     "step_snow": (step_snow, 5),
     "step_water": (step_water, 4),
+    "step_gravel": (step_gravel, 5),
+    "steam": (steam, 3),
     "thump": (thump, 4),
     "land": (land, 2),
     "hurt": (hurt, 3),

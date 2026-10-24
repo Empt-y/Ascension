@@ -58,6 +58,21 @@ LOOPS = {
     "river": (JCSOUNDS, f"{JC}/Water Enviroments/AMB_Nature Pack Vol 1_Water Enviroments_Mountain Stream.mp3"),
     "lake": (JCSOUNDS, f"{JC}/Water Enviroments/AMB_Nature Pack Vol 1_Water Enviroments_Peaceful Lake .mp3"),
     "fire": (JCSOUNDS, f"{JC}/Fire & Elemental/AMB_Nature Pack Vol 1_ Fire & Elemental_Large Bonfire.mp3"),
+    "campfire": (JCSOUNDS, f"{JC}/Fire & Elemental/AMB_Nature Pack Vol 1_ Fire & Elemental_Campfire Crackling.mp3"),
+    # What a place sounds like (by biome and time of day), and the sea, waterfalls, caves, storms.
+    "forest_day": (JCSOUNDS, f"{JC}/Forest Enviroments/AMB_Nature Pack Vol 1_Forest Enviroments_Forest Day.mp3"),
+    "forest_night": (JCSOUNDS, f"{JC}/Forest Enviroments/AMB_Nature Pack Vol 1_Forest Enviroments_Forest Night.mp3"),
+    "pine": (JCSOUNDS, f"{JC}/Forest Enviroments/AMB_Nature Pack Vol 1_Forest Enviroments_Pine Forest .mp3"),
+    "rainforest": (JCSOUNDS, f"{JC}/Forest Enviroments/AMB_Nature Pack Vol 1_Forest Enviroments_Rainforest Canopy.mp3"),
+    "clearing": (JCSOUNDS, f"{JC}/Forest Enviroments/AMB_Nature Pack Vol 1_Forest Enviroments_Forest Clearing.mp3"),
+    "evening": (JCSOUNDS, f"{JC}/Weather/AMB_Nature Pack Vol 1_Weather_Summer Evening.mp3"),
+    "swamp": (JCSOUNDS, f"{JC}/Water Enviroments/AMB_Nature Pack Vol 1_Water Enviroments_Swamp.mp3"),
+    "desert_wind": (JCSOUNDS, f"{JC}/Weather/AMB_Nature Pack Vol 1_Weather_Desert Wind.mp3"),
+    "winter_wind": (JCSOUNDS, f"{JC}/Weather/AMB_Nature Pack Vol 1_Weather_Winter Wind.mp3"),
+    "ocean": (JCSOUNDS, f"{JC}/Water Enviroments/AMB_Nature Pack Vol 1_Water Enviroments_Ocean Waves.mp3"),
+    "waterfall": (JCSOUNDS, f"{JC}/Water Enviroments/AMB_Nature Pack Vol 1_Water Enviroments_Waterfall.mp3"),
+    "cave": (JCSOUNDS, f"{JC}/Water Enviroments/AMB_Nature Pack Vol 1_Water Enviroments_ Underground River .mp3"),
+    "storm": (JCSOUNDS, f"{JC}/Weather/AMB_Nature Pack Vol 1_Weather_Heavy Thunderstorm.mp3"),
     "underwater": (BMACZERO, "oga/bubbles-loop1-amp.wav"),
 }
 # Loops cut from a long recording (seconds in, seconds long), the ends crossfaded so it loops.
@@ -66,11 +81,16 @@ CUTS = {
     # "Volcano eruption with lava flow" and "Bubbling volcano lava".
     "roar": (MIXKIT, "mixkit/2443.wav", 10.0, 40.0),
     "lava": (MIXKIT, "mixkit/2440.wav", 5.0, 30.0),
+    # "Bubbling volcano lava flow" (spilled lava running) and "Inside a volcano" (in a crater).
+    "lava_flow": (MIXKIT, "mixkit/2444.wav", 5.0, 30.0),
+    "crater": (MIXKIT, "mixkit/2438.wav", 0.2, 7.5),
 }
 # Numbered variations from loose files.
 FILES = {
     # Picked by ear over Kenney's grass, Kenney's RPG steps and TinyWorlds' leaves and mud.
     "step_grass": (CONGUS, [f"oga/x_footsteps_0/footsteps/grass/{n}.ogg" for n in range(9)]),
+    # Ash and pumice underfoot.
+    "step_gravel": (CONGUS, [f"oga/x_footsteps_0/footsteps/gravel/{n}.ogg" for n in range(10)]),
     "step_sand": (FANTOZZI, [f"oga/fantozzi/Fantozzi-footsteps/ogg/Fantozzi-Sand{s}{n}.ogg" for s in "LR" for n in (1, 2, 3)]),
     "step_water": (CONGUS, [f"oga/x_footsteps_0/footsteps/water/{n}.ogg" for n in range(5)]),
     "splash": (RUBBERDUCK, [f"oga/x_water-splash-slime-sfx/splash_{n:02}.ogg" for n in range(1, 9)]),
@@ -83,6 +103,9 @@ SINGLES = {
     "boom_0": (BARADARI, "oga/rumble.flac"),
     # "Volcano lava and ash burst".
     "bomb_land_1": (MIXKIT, "mixkit/2449.wav"),
+    # "Lava entering water" (steam where they meet) and "Erupting volcano" (as it bursts out).
+    "steam_0": (MIXKIT, "mixkit/2446.wav"),
+    "eruption_0": (MIXKIT, "mixkit/2441.wav"),
 }
 
 

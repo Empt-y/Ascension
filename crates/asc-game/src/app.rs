@@ -1195,6 +1195,7 @@ impl State {
                 self.volcanism = report;
             }
             ServerMsg::Scar(scar) => self.scatter.add_scar(scar),
+            ServerMsg::Steam(spots) => self.steam(&spots),
             ServerMsg::Fire(changed) => {
                 self.scatter.set_fire(&changed);
                 self.effects.set_fire(&changed);
@@ -1311,6 +1312,19 @@ impl State {
         self.was_submerged = p.submerged;
     }
 
+    /// Lava met water at `spots`: steam puffs up and hisses (the nearest few).
+    fn steam(&mut self, spots: &[Vec3]) {
+        let ear = self.camera.position;
+        let mut near: Vec<Vec3> = spots.iter().copied().filter(|p| p.distance(ear) < 150.0).collect();
+        near.sort_by(|a, b| a.distance(ear).total_cmp(&b.distance(ear)));
+        for &p in near.iter().take(3) {
+            self.effects.steam(p);
+            if let Some(audio) = &mut self.audio {
+                audio.play_at("steam", p, crate::audio::Range(4.0, 120.0), 0.8);
+            }
+        }
+    }
+
     /// Digging and placing make a sound by what was dug or placed (sampled before the edit lands).
     fn edit_sound(&mut self, op: &EditOp) {
         let Some(audio) = &mut self.audio else { return };
@@ -1345,6 +1359,7 @@ impl State {
             let before = self.volcanism.active.iter().find(|b| b.summit.distance(a.summit) < 50.0).map(|b| b.phase);
             if a.phase == Phase::Erupting && before.is_some_and(|p| p != Phase::Erupting) {
                 audio.play_at("boom", a.summit, crate::audio::Range(300.0, 9000.0), 1.0);
+                audio.play_at("eruption", a.summit, crate::audio::Range(300.0, 9000.0), 0.9);
             }
         }
         for b in &report.blasts {
@@ -1370,34 +1385,65 @@ impl State {
         let wg = &self.world.worldgen;
         let mut scene = crate::audio::Scene::default();
         let ground = wg.height(at.x, at.z);
-        // Under the ground (a cave, a tunnel): no wind or rain.
-        let outside = at.y > ground - 2.0;
-        let exposure = if outside { 0.35 + 0.65 * smoothstep(0.0, 40.0, at.y - ground) } else { 0.0 };
+        // Under the ground (a cave, a tunnel): enclosed, with an echo and no wind or rain.
+        let enclosed = smoothstep(3.0, 12.0, ground - at.y);
+        let outside = 1.0 - enclosed;
+        let exposure = (0.35 + 0.65 * smoothstep(0.0, 40.0, at.y - ground)) * outside;
+        scene.enclosed = enclosed;
+        if enclosed > 0.01 {
+            scene.levels.insert(Ambience::Cave, (None, 0.5 * enclosed));
+        }
         let weather = self.weather.at(wg, at.x, at.z, ground, self.sim.ticks, self.sim.time_of_day);
         let wind = weather.wind.length();
         scene.levels.insert(Ambience::Wind, (None, (0.15 + wind / 14.0).min(1.0) * exposure * 0.4));
-        if weather.fall == asc_world::weather::Fall::Rain && outside {
-            scene.levels.insert(Ambience::Rain, (None, weather.precipitation * 0.9));
+        if weather.fall == asc_world::weather::Fall::Rain {
+            // A storm's thunder and downpour take over from plain rain as it builds.
+            scene.levels.insert(Ambience::Rain, (None, weather.precipitation * (1.0 - 0.6 * weather.storm) * 0.9 * outside));
+            scene.levels.insert(Ambience::Storm, (None, weather.storm * 0.9 * outside));
         }
-        let (river, lake) = crate::audio::water_near(wg, at, 48.0);
-        if let Some((p, strength)) = river {
+        // What the place sounds like (birds by day, insects at night), quieter in the rain.
+        let t = self.sim.time_of_day;
+        let daylight = smoothstep(0.2, 0.3, t) * (1.0 - smoothstep(0.7, 0.8, t));
+        for (a, share) in crate::audio::place_sounds(wg, at, daylight) {
+            let level = share * 0.45 * outside * (1.0 - 0.7 * weather.precipitation);
+            scene.levels.insert(a, (None, level));
+        }
+        let waters = crate::audio::water_near(wg, at, 48.0);
+        if let Some((p, strength)) = waters.river {
             scene.levels.insert(Ambience::River, (Some(p), 0.2 + 0.25 * strength));
         }
-        if let Some((p, _)) = lake {
+        if let Some((p, _)) = waters.lake {
             scene.levels.insert(Ambience::Lake, (Some(p), 0.3));
         }
-        let mut lava = self.fluids.lava_lights(at);
-        lava.extend(self.streamer.lava_lights(&self.fluids, at, 120.0));
-        if let Some(l) = lava.iter().min_by(|a, b| a.position.distance(at).total_cmp(&b.position.distance(at))) {
-            scene.levels.insert(Ambience::Lava, (Some(l.position), 0.9));
-            // Now and then a bubble bursts or the crust hisses (one every two seconds or so).
-            if audio.chance(0.12) {
-                audio.play_at("lava_pop", l.position, crate::audio::Range(3.0, 60.0), 0.7);
-            }
+        if let Some((p, _)) = waters.sea {
+            scene.levels.insert(Ambience::Ocean, (Some(p), 0.35));
         }
+        if let Some((p, strength)) = waters.waterfall {
+            scene.levels.insert(Ambience::Waterfall, (Some(p), 0.3 + 0.4 * strength));
+        }
+        // Lava running loose (simulated: an eruption's spill) and a lake of it (natural).
+        let nearest = |v: &[asc_render::PointLight]| {
+            v.iter().min_by(|a, b| a.position.distance(at).total_cmp(&b.position.distance(at))).map(|l| l.position)
+        };
+        let spilled = nearest(&self.fluids.lava_lights(at));
+        let lake = nearest(&self.streamer.lava_lights(&self.fluids, at, 120.0));
+        if let Some(p) = spilled {
+            scene.levels.insert(Ambience::LavaFlow, (Some(p), 0.8));
+        }
+        if let Some(p) = lake {
+            scene.levels.insert(Ambience::Lava, (Some(p), 0.9));
+        }
+        if let Some(p) = spilled.into_iter().chain(lake).min_by(|a, b| a.distance(at).total_cmp(&b.distance(at)))
+            && audio.chance(0.12)
+        {
+            // Now and then a bubble bursts or the crust hisses (one every two seconds or so).
+            audio.play_at("lava_pop", p, crate::audio::Range(3.0, 60.0), 0.7);
+        }
+        // A small fire crackles; a spreading one roars.
         let fires = self.effects.fire_lights(wg, at, 6);
         if let Some(f) = fires.first() {
-            scene.levels.insert(Ambience::Fire, (Some(f.position), 0.35 + 0.1 * fires.len() as f32));
+            let (a, level) = if fires.len() <= 2 { (Ambience::Campfire, 0.6) } else { (Ambience::Fire, 0.35 + 0.1 * fires.len() as f32) };
+            scene.levels.insert(a, (Some(f.position), level));
         }
         if let Some(a) = self.volcanism.active.iter().min_by(|a, b| a.summit.distance(at).total_cmp(&b.summit.distance(at))) {
             let rumble = match a.phase {
@@ -1409,6 +1455,12 @@ impl State {
             scene.levels.insert(Ambience::Rumble, (Some(a.summit), rumble));
             if a.phase == Phase::Erupting {
                 scene.levels.insert(Ambience::Roar, (Some(a.summit), 0.4 + 0.6 * a.strength));
+            }
+            // Down in its crater (about a tenth of the cone across).
+            let crater = (a.radius * 0.1).max(20.0) * 1.5;
+            let d = Vec2::new(a.summit.x - at.x, a.summit.z - at.z).length();
+            if d < crater && at.y > a.summit.y - 80.0 {
+                scene.levels.insert(Ambience::Crater, (None, 0.6 * (1.0 - d / crater).clamp(0.3, 1.0)));
             }
         }
         scene.underwater = self.fluids.fraction_at(&self.world, at) > 0.5;

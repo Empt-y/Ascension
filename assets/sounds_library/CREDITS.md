@@ -24,6 +24,20 @@ Licence: CC-BY 4.0 (credit: JC Sounds). Source: https://opengameart.org/node/180
 - river: AMB_Nature Pack Vol 1_Water Enviroments_Mountain Stream.mp3
 - lake: AMB_Nature Pack Vol 1_Water Enviroments_Peaceful Lake .mp3
 - fire: AMB_Nature Pack Vol 1_ Fire & Elemental_Large Bonfire.mp3
+- campfire: AMB_Nature Pack Vol 1_ Fire & Elemental_Campfire Crackling.mp3
+- forest_day: AMB_Nature Pack Vol 1_Forest Enviroments_Forest Day.mp3
+- forest_night: AMB_Nature Pack Vol 1_Forest Enviroments_Forest Night.mp3
+- pine: AMB_Nature Pack Vol 1_Forest Enviroments_Pine Forest .mp3
+- rainforest: AMB_Nature Pack Vol 1_Forest Enviroments_Rainforest Canopy.mp3
+- clearing: AMB_Nature Pack Vol 1_Forest Enviroments_Forest Clearing.mp3
+- evening: AMB_Nature Pack Vol 1_Weather_Summer Evening.mp3
+- swamp: AMB_Nature Pack Vol 1_Water Enviroments_Swamp.mp3
+- desert_wind: AMB_Nature Pack Vol 1_Weather_Desert Wind.mp3
+- winter_wind: AMB_Nature Pack Vol 1_Weather_Winter Wind.mp3
+- ocean: AMB_Nature Pack Vol 1_Water Enviroments_Ocean Waves.mp3
+- waterfall: AMB_Nature Pack Vol 1_Water Enviroments_Waterfall.mp3
+- cave: AMB_Nature Pack Vol 1_Water Enviroments_ Underground River .mp3
+- storm: AMB_Nature Pack Vol 1_Weather_Heavy Thunderstorm.mp3
 
 ## BMacZero, Bubble Sound Effects
 
@@ -36,6 +50,7 @@ Licence: CC0 1.0. Source: https://opengameart.org/content/bubble-sound-effects
 Licence: CC-BY 3.0 (credit: congusbongus, EminYILDIRIM, swuing). Source: https://opengameart.org/content/footsteps-on-different-surfaces
 
 - step_grass (9): 0.ogg, 1.ogg, 2.ogg, 3.ogg, 4.ogg, 5.ogg, 6.ogg, 7.ogg, 8.ogg
+- step_gravel (10): 0.ogg, 1.ogg, 2.ogg, 3.ogg, 4.ogg, 5.ogg, 6.ogg, 7.ogg, 8.ogg, 9.ogg
 - step_water (5): 0.ogg, 1.ogg, 2.ogg, 3.ogg, 4.ogg
 
 ## Fantozzi, Footsteps (Grass/Sand & Stone)
@@ -63,7 +78,11 @@ Licence: Mixkit Sound Effects Free License (no credit needed). Source: https://m
 - lava_pop (3): 2445.wav, 2447.wav, 2448.wav
 - roar: 40 s of 2443.wav from 10 s, looped
 - lava: 30 s of 2440.wav from 5 s, looped
+- lava_flow: 30 s of 2444.wav from 5 s, looped
+- crater: 8 s of 2438.wav from 0 s, looped
 - bomb_land_1: 2449.wav
+- steam_0: 2446.wav
+- eruption_0: 2441.wav
 
 ## bretbernhoft, Rumbling Sound Effects
 

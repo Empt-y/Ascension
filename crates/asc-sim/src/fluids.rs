@@ -148,6 +148,8 @@ pub struct FluidSim {
     /// Rock set from lava since the last `take_solidified`: runs up a column (the lowest cell, the
     /// height in metres from that cell's bottom: whole cells, then the top one's fill) and the rock.
     solidified: Vec<(IVec3, f32, asc_world::Material)>,
+    /// Where lava met water since the last `take_steam`.
+    steam: Vec<IVec3>,
     /// For chunks that have held spilled fluid: the tick each cell last moved (cooling and drying
     /// up go by how long a cell has been still).
     still: AHashMap<ChunkCoord, Vec<u64>>,
@@ -173,6 +175,7 @@ impl FluidSim {
             awake: BTreeMap::new(),
             changed: BTreeSet::new(),
             solidified: Vec::new(),
+            steam: Vec::new(),
             still: AHashMap::new(),
             settle_spills: true,
             ticks: 0,
@@ -182,6 +185,10 @@ impl FluidSim {
 
     /// Rock set from lava (met water, or cooled), for the server to turn into terrain: runs of
     /// cells up a column, from the lowest.
+    pub fn take_steam(&mut self) -> Vec<IVec3> {
+        std::mem::take(&mut self.steam)
+    }
+
     pub fn take_solidified(&mut self) -> Vec<(IVec3, f32, asc_world::Material)> {
         std::mem::take(&mut self.solidified)
     }
@@ -359,6 +366,7 @@ impl FluidSim {
                 let material = if amount >= STILL_LAVA { asc_world::Material::Obsidian } else { asc_world::Material::Basalt };
                 let cell = coord * N + p;
                 self.solidified.push((cell, 1.0, material));
+                self.steam.push(cell);
                 let ch = self.fluids.chunks.get_mut(&coord).expect("still there");
                 let i = cell_index(p.x as usize, p.y as usize, p.z as usize);
                 ch.amount[i] = 0;

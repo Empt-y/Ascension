@@ -107,4 +107,6 @@ pub enum ServerMsg {
     Fire(Vec<([i32; 2], crate::fire::Stage)>),
     /// A pyroclastic flow or blast has scarred the land.
     Scar(crate::volcanism::Scar),
+    /// Lava met water and set to rock here this tick (steam: a few spots, a cell apart at least).
+    Steam(Vec<glam::Vec3>),
 }

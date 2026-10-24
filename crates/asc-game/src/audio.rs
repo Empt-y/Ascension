@@ -1,24 +1,30 @@
-//! Sound: one-shot effects where things happen (footsteps, digging, bombs, blasts) and looping
-//! ambience that follows the world round the listener (wind, rain, water, lava, fire, a volcano's
-//! rumble and roar). The sounds themselves are made by tools/sounds.py into assets/sounds; free
-//! library recordings to compare them with go in assets/sounds_library (tools/library_sounds.py).
+//! Sound: one-shot effects where things happen (footsteps, digging, bombs, blasts, steam) and
+//! looping ambience that follows the world round the listener (wind, rain, storms, water, lava,
+//! fire, a volcano's rumble and roar, and what a place sounds like by biome and time of day). The
+//! generated sounds are made by tools/sounds.py into assets/sounds; free library recordings, used
+//! where there are any, go in assets/sounds_library (tools/library_sounds.py).
 //!
 //! Everything in the world plays through one mixer track whose low-pass filter closes when the
-//! listener is underwater. Sounds from far off arrive late, at the speed of sound (a blast's boom
-//! lands as its shockwave does). Without an audio device the game runs silent.
+//! listener is underwater, and which sends to a reverb heard in caves. Sounds from far off arrive
+//! late, at the speed of sound (a blast's boom lands as its shockwave does). Loops stream from
+//! their files (the ambience recordings run a minute or more each) and pause while silent.
+//! Without an audio device the game runs silent.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use glam::{Mat3, Quat, Vec2, Vec3};
 use kira::effect::eq_filter::{EqFilterBuilder, EqFilterKind};
 use kira::effect::filter::{FilterBuilder, FilterHandle};
+use kira::effect::reverb::ReverbBuilder;
 use kira::listener::ListenerHandle;
-use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
-use kira::track::{SpatialTrackBuilder, SpatialTrackHandle, TrackBuilder, TrackHandle};
-use kira::{AudioManager, AudioManagerSettings, Decibels, DefaultBackend, Tween};
+use kira::sound::FromFileError;
+use kira::sound::static_sound::StaticSoundData;
+use kira::sound::streaming::{StreamingSoundData, StreamingSoundHandle};
+use kira::track::{SendTrackBuilder, SendTrackHandle, SpatialTrackBuilder, SpatialTrackHandle, TrackBuilder, TrackHandle};
+use kira::{AudioManager, AudioManagerSettings, Decibels, DefaultBackend, Mix, Tween};
 
 pub const SPEED_OF_SOUND: f32 = 340.0;
 /// How often the ambience is looked at again (it changes slowly; looking costs worldgen samples).
@@ -28,6 +34,8 @@ const OPEN: f64 = 20_000.0;
 const MUFFLED: f64 = 700.0;
 /// The footsteps' bass boost: a low shelf at this frequency (Hz), this many dB.
 const BODY_SHELF: (f64, f32) = (200.0, 3.0);
+/// How loud the cave reverb gets, fully enclosed.
+const CAVE_REVERB: f32 = 0.7;
 
 /// Where a one-shot plays: its range (full volume within the first, silent beyond the second).
 #[derive(Clone, Copy)]
@@ -38,68 +46,135 @@ pub struct Range(pub f32, pub f32);
 pub enum Ambience {
     Wind,
     Rain,
+    Storm,
     River,
     Lake,
+    Ocean,
+    Waterfall,
     Lava,
+    LavaFlow,
     Fire,
+    Campfire,
     Rumble,
     Roar,
+    Crater,
     Underwater,
+    Cave,
+    ForestDay,
+    ForestNight,
+    Pine,
+    Rainforest,
+    Clearing,
+    Evening,
+    Swamp,
+    DesertWind,
+    WinterWind,
 }
 
 impl Ambience {
-    const ALL: [Self; 9] =
-        [Self::Wind, Self::Rain, Self::River, Self::Lake, Self::Lava, Self::Fire, Self::Rumble, Self::Roar, Self::Underwater];
+    pub const ALL: [Self; 25] = [
+        Self::Wind,
+        Self::Rain,
+        Self::Storm,
+        Self::River,
+        Self::Lake,
+        Self::Ocean,
+        Self::Waterfall,
+        Self::Lava,
+        Self::LavaFlow,
+        Self::Fire,
+        Self::Campfire,
+        Self::Rumble,
+        Self::Roar,
+        Self::Crater,
+        Self::Underwater,
+        Self::Cave,
+        Self::ForestDay,
+        Self::ForestNight,
+        Self::Pine,
+        Self::Rainforest,
+        Self::Clearing,
+        Self::Evening,
+        Self::Swamp,
+        Self::DesertWind,
+        Self::WinterWind,
+    ];
 
     fn file(self) -> &'static str {
         match self {
             Self::Wind => "wind",
             Self::Rain => "rain",
+            Self::Storm => "storm",
             Self::River => "river",
             Self::Lake => "lake",
+            Self::Ocean => "ocean",
+            Self::Waterfall => "waterfall",
             Self::Lava => "lava",
+            Self::LavaFlow => "lava_flow",
             Self::Fire => "fire",
+            Self::Campfire => "campfire",
             Self::Rumble => "rumble",
             Self::Roar => "roar",
+            Self::Crater => "crater",
             Self::Underwater => "underwater",
+            Self::Cave => "cave",
+            Self::ForestDay => "forest_day",
+            Self::ForestNight => "forest_night",
+            Self::Pine => "pine",
+            Self::Rainforest => "rainforest",
+            Self::Clearing => "clearing",
+            Self::Evening => "evening",
+            Self::Swamp => "swamp",
+            Self::DesertWind => "desert_wind",
+            Self::WinterWind => "winter_wind",
         }
     }
 
-    /// Where it's heard from: `None` all round the listener (wind, rain, being underwater), else
-    /// its range.
+    /// Where it's heard from: `None` all round the listener (weather, being underwater or in a
+    /// cave, what a place sounds like), else its range.
     fn range(self) -> Option<Range> {
         match self {
-            Self::Wind | Self::Rain | Self::Underwater => None,
             Self::River => Some(Range(4.0, 60.0)),
             Self::Lake => Some(Range(3.0, 40.0)),
+            Self::Ocean => Some(Range(6.0, 160.0)),
+            Self::Waterfall => Some(Range(6.0, 160.0)),
             Self::Lava => Some(Range(4.0, 90.0)),
+            Self::LavaFlow => Some(Range(4.0, 90.0)),
             Self::Fire => Some(Range(4.0, 120.0)),
+            Self::Campfire => Some(Range(3.0, 50.0)),
             Self::Rumble => Some(Range(300.0, 9000.0)),
             Self::Roar => Some(Range(200.0, 6000.0)),
+            _ => None,
         }
     }
 }
 
-/// What the ambience should be doing now: for each, where (if it has a place) and how loud (0..1).
+/// What the ambience should be doing now: for each, where (if it has a place) and how loud (0..1);
+/// whether the listener is underwater, and how enclosed (0 open air .. 1 deep in a cave).
 #[derive(Default)]
 pub struct Scene {
     pub levels: HashMap<Ambience, (Option<Vec3>, f32)>,
     pub underwater: bool,
+    pub enclosed: f32,
 }
 
 struct Loop {
     track: Option<SpatialTrackHandle>,
-    sound: Option<StaticSoundHandle>,
+    sound: Option<StreamingSoundHandle<FromFileError>>,
     level: f32,
+    /// Paused while silent (a playing loop keeps decoding).
+    paused: bool,
     /// What brings the playing set's recording to the generated one's loudness.
     gain: f32,
 }
 
-/// One set of sounds: each name's variations, and for each the gain that brings it to the
-/// generated set's loudness (so a comparison is of the sound, not its level).
+/// One set of sounds: each one-shot's variations (in memory), each loop's file (streamed), and
+/// the gain that brings a sound to the generated set's loudness (so the two compare as sounds,
+/// not levels).
 #[derive(Default)]
 struct Bank {
     sounds: HashMap<String, Vec<StaticSoundData>>,
+    loops: HashMap<String, PathBuf>,
     gain: HashMap<String, f32>,
 }
 
@@ -114,32 +189,34 @@ impl Bank {
             .filter(|p| p.extension().is_some_and(|x| ["wav", "ogg", "mp3", "flac"].contains(&&*x.to_string_lossy())))
             .collect();
         files.sort();
-        for path in &files {
+        for path in files {
             let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
-            // `dig_soft_2` is the third variation of `dig_soft`; a loop has no number.
+            if Ambience::ALL.iter().any(|a| a.file() == stem) {
+                bank.loops.insert(stem, path);
+                continue;
+            }
+            // `dig_soft_2` is the third variation of `dig_soft`.
             let name = match stem.rsplit_once('_') {
                 Some((base, n)) if n.parse::<u32>().is_ok() => base.to_owned(),
                 _ => stem.clone(),
             };
-            let data = StaticSoundData::from_file(path).with_context(|| format!("loading {}", path.display()))?;
+            let data = StaticSoundData::from_file(&path).with_context(|| format!("loading {}", path.display()))?;
             bank.sounds.entry(name).or_default().push(data);
         }
         Ok(bank)
     }
 
-    /// How loud a sound is: a loop by its average (RMS), a one-shot by its peaks.
+    /// How loud a sound is: a one-shot by its peaks, a loop by its average (RMS: decoded once
+    /// to measure it).
     fn loudness(&self, name: &str) -> Option<f32> {
+        if let Some(path) = self.loops.get(name) {
+            let d = StaticSoundData::from_file(path).ok()?;
+            let sum: f32 = d.frames.iter().map(|f| (0.5 * (f.left + f.right)).powi(2)).sum();
+            return Some((sum / d.frames.len().max(1) as f32).sqrt());
+        }
         let variations = self.sounds.get(name)?;
-        let looped = Ambience::ALL.iter().any(|a| a.file() == name);
-        let each = variations.iter().map(|d| {
-            let mono = d.frames.iter().map(|f| 0.5 * (f.left + f.right));
-            if looped {
-                (mono.map(|x| x * x).sum::<f32>() / d.frames.len().max(1) as f32).sqrt()
-            } else {
-                mono.fold(0.0f32, |m, x| m.max(x.abs()))
-            }
-        });
-        Some(each.sum::<f32>() / variations.len().max(1) as f32)
+        let peaks = variations.iter().map(|d| d.frames.iter().fold(0.0f32, |m, f| m.max((0.5 * (f.left + f.right)).abs())));
+        Some(peaks.sum::<f32>() / variations.len().max(1) as f32)
     }
 }
 
@@ -152,8 +229,11 @@ pub struct Audio {
     body: TrackHandle,
     muffle: FilterHandle,
     underwater: bool,
-    /// The generated sounds, and recordings from free libraries to compare (F8 switches; a sound
-    /// the libraries don't have stays generated).
+    /// The reverb everything in the world sends to, turned up in caves.
+    reverb: SendTrackHandle,
+    enclosed: f32,
+    /// The generated sounds, and recordings from free libraries (used where there are any; F8
+    /// switches to the generated set).
     generated: Bank,
     library: Bank,
     use_library: bool,
@@ -177,7 +257,7 @@ fn tween(seconds: f32) -> Tween {
 
 impl Audio {
     /// Open the audio device and load the generated sounds in `dir`, and the library ones in
-    /// `library` if it's there.
+    /// `library_dir` if it's there.
     pub fn new(dir: &Path, library_dir: &Path) -> Result<Self> {
         let mut manager = AudioManager::<DefaultBackend>::new(AudioManagerSettings {
             capacities: kira::Capacities { sub_track_capacity: 256, ..Default::default() },
@@ -185,7 +265,12 @@ impl Audio {
         })
         .context("opening the audio device")?;
         let listener = manager.add_listener(Vec3::ZERO, Quat::IDENTITY)?;
-        let mut builder = TrackBuilder::new();
+        let reverb = manager.add_send_track(
+            SendTrackBuilder::new()
+                .volume(Decibels::SILENCE)
+                .with_effect(ReverbBuilder::new().feedback(0.85).damping(0.4).mix(Mix::WET)),
+        )?;
+        let mut builder = TrackBuilder::new().with_send(&reverb, Decibels::IDENTITY);
         let muffle = builder.add_effect(FilterBuilder::new().cutoff(OPEN));
         let mut world = manager.add_sub_track(builder)?;
         let body = world.add_sub_track(TrackBuilder::new().with_effect(EqFilterBuilder::new(
@@ -196,15 +281,22 @@ impl Audio {
         )))?;
         let generated = Bank::load(dir)?;
         let mut library = if library_dir.is_dir() { Bank::load(library_dir)? } else { Bank::default() };
-        let names: Vec<String> = library.sounds.keys().cloned().collect();
+        let names: Vec<String> = library.sounds.keys().chain(library.loops.keys()).cloned().collect();
         for name in names {
-            let gain = match (generated.loudness(&name), library.loudness(&name)) {
-                (Some(g), Some(l)) if l > 1e-5 => (g / l).clamp(0.05, 20.0),
+            // (Only measured where there's a generated sound to match: measuring a loop decodes it.)
+            let gain = match generated.loudness(&name).and_then(|g| Some((g, library.loudness(&name)?))) {
+                Some((g, l)) if l > 1e-5 => (g / l).clamp(0.05, 20.0),
                 _ => 1.0,
             };
             library.gain.insert(name, gain);
         }
-        log::info!("audio: {} generated sounds, {} from libraries", generated.sounds.len(), library.sounds.len());
+        log::info!(
+            "audio: {} generated sounds and {} loops, {} and {} from libraries",
+            generated.sounds.len(),
+            generated.loops.len(),
+            library.sounds.len(),
+            library.loops.len()
+        );
         // The library recordings where there are any (preferred over the generated ones).
         let use_library = !library.sounds.is_empty();
         let mut audio = Self {
@@ -214,6 +306,8 @@ impl Audio {
             body,
             muffle,
             underwater: false,
+            reverb,
+            enclosed: 0.0,
             generated,
             library,
             use_library,
@@ -248,13 +342,19 @@ impl Audio {
         self.generated.sounds.get(name).map(|v| (v.as_slice(), 1.0))
     }
 
-    /// (Re)start every loop from the set in use, at its current level.
+    /// The file of loop `name` from the set in use, and its gain.
+    fn loop_file(&self, name: &str) -> Option<(PathBuf, f32)> {
+        if self.use_library
+            && let Some(p) = self.library.loops.get(name)
+        {
+            return Some((p.clone(), self.library.gain.get(name).copied().unwrap_or(1.0)));
+        }
+        self.generated.loops.get(name).map(|p| (p.clone(), 1.0))
+    }
+
+    /// (Re)start every loop from the set in use, at its current level (paused if silent).
     fn start_loops(&mut self) -> Result<()> {
         for a in Ambience::ALL {
-            let Some((data, gain)) = self.variations(a.file()).and_then(|(v, g)| v.first().cloned().map(|d| (d, g))) else {
-                log::warn!("no {} sound: that ambience is silent", a.file());
-                continue;
-            };
             let old = self.loops.remove(&a);
             let level = old.as_ref().map_or(0.0, |l| l.level);
             let mut track = match old {
@@ -273,12 +373,24 @@ impl Audio {
                     None => None,
                 },
             };
-            let data = data.loop_region(..).volume(db(level * gain));
-            let sound = match &mut track {
+            let Some((path, gain)) = self.loop_file(a.file()) else {
+                log::debug!("no {} sound: that ambience is silent", a.file());
+                self.loops.insert(a, Loop { track, sound: None, level, paused: true, gain: 1.0 });
+                continue;
+            };
+            let data = StreamingSoundData::from_file(&path)
+                .with_context(|| format!("opening {}", path.display()))?
+                .loop_region(..)
+                .volume(db(level * gain));
+            let mut sound = match &mut track {
                 Some(track) => track.play(data)?,
                 None => self.world.play(data)?,
             };
-            self.loops.insert(a, Loop { track, sound: Some(sound), level, gain });
+            let paused = level <= 0.001;
+            if paused {
+                sound.pause(Tween::default());
+            }
+            self.loops.insert(a, Loop { track, sound: Some(sound), level, paused, gain });
         }
         Ok(())
     }
@@ -383,23 +495,34 @@ impl Audio {
         true
     }
 
-    /// Move each loop to where it's heard from now and fade it to its level.
+    /// Move each loop to where it's heard from now and fade it to its level (pausing it once
+    /// silent, resuming it when it's wanted again).
     pub fn set_scene(&mut self, scene: &Scene) {
         for (a, l) in &mut self.loops {
             let (at, level) = scene.levels.get(a).copied().unwrap_or((None, 0.0));
             if let (Some(track), Some(at)) = (&mut l.track, at) {
                 track.set_position(at, tween(0.25));
             }
-            if (level - l.level).abs() > 0.01 {
-                if let Some(sound) = &mut l.sound {
-                    sound.set_volume(db(level * l.gain), tween(0.5));
-                }
-                l.level = level;
+            let Some(sound) = &mut l.sound else { continue };
+            if level > 0.001 && l.paused {
+                sound.set_volume(db(level * l.gain), Tween::default());
+                sound.resume(tween(0.5));
+                l.paused = false;
+            } else if level <= 0.001 && !l.paused {
+                sound.pause(tween(0.5));
+                l.paused = true;
+            } else if !l.paused && (level - l.level).abs() > 0.01 {
+                sound.set_volume(db(level * l.gain), tween(0.5));
             }
+            l.level = level;
         }
         if scene.underwater != self.underwater {
             self.underwater = scene.underwater;
             self.muffle.set_cutoff(if scene.underwater { MUFFLED } else { OPEN }, tween(0.15));
+        }
+        if (scene.enclosed - self.enclosed).abs() > 0.02 {
+            self.enclosed = scene.enclosed;
+            self.reverb.set_volume(db(scene.enclosed * CAVE_REVERB), tween(1.0));
         }
     }
 
@@ -409,12 +532,14 @@ impl Audio {
     }
 }
 
-/// The sound of walking on (or digging) a material: soft ground, sand, snow, or hard stone.
+/// The sound of walking on (or digging) a material: soft ground, sand, loose volcanic gravel, snow,
+/// or hard stone.
 pub fn surface(material: asc_world::Material) -> &'static str {
     use asc_world::Material::*;
     match material {
         Grass | Soil | DryGrass | Moss | Mud | Air => "grass",
-        Sand | Ash | Pumice => "sand",
+        Sand => "sand",
+        Ash | Pumice => "gravel",
         Snow => "snow",
         Rock | Ore | Ice | Sandstone | Basalt | Obsidian | Sulfur => "hard",
     }
@@ -433,28 +558,96 @@ pub fn landed(before: &[(Vec3, u8)], now: &[(Vec3, u8)], step: f32) -> Vec<(Vec3
 /// Where something is heard from and how strongly (0..1).
 pub type Spot = Option<(Vec3, f32)>;
 
-/// The nearest natural water round `at` (looked at on a grid out to `reach`): flowing (a river)
-/// and still (a lake or the sea), each with where and how strongly.
-pub fn water_near(worldgen: &asc_world::WorldGen, at: Vec3, reach: f32) -> (Spot, Spot) {
-    let (mut river, mut lake): (Spot, Spot) = (None, None);
-    let step = reach / 4.0;
-    for j in -4..=4 {
-        for i in -4..=4 {
+/// The natural water round `at`, looked at on a grid out to `reach`: the nearest flowing water (a
+/// river), still water (a lake), the sea, and a waterfall (where a river's surface steps down
+/// between neighbouring samples), each with where and how strongly.
+#[derive(Default)]
+pub struct Waters {
+    pub river: Spot,
+    pub lake: Spot,
+    pub sea: Spot,
+    pub waterfall: Spot,
+}
+
+pub fn water_near(worldgen: &asc_world::WorldGen, at: Vec3, reach: f32) -> Waters {
+    const N: i32 = 4;
+    let step = reach / N as f32;
+    let side = (2 * N + 1) as usize;
+    let mut levels = vec![None; side * side];
+    let mut out = Waters::default();
+    let nearer = |slot: &mut Spot, here: Vec3, strength: f32| {
+        if slot.is_none_or(|(s, _)| s.distance(at) > here.distance(at)) {
+            *slot = Some((here, strength));
+        }
+    };
+    for j in -N..=N {
+        for i in -N..=N {
             let p = Vec2::new(at.x, at.z) + Vec2::new(i as f32, j as f32) * step;
             let Some(level) = asc_world::fluid::water_level(worldgen, p.x, p.y) else { continue };
             if worldgen.height(p.x, p.y) >= level {
                 continue;
             }
+            levels[(i + N) as usize + side * (j + N) as usize] = Some(level);
             let here = Vec3::new(p.x, level, p.y);
-            let d = here.distance(at);
             let flow = worldgen.water_flow(p.x, p.y).length();
-            let (slot, strength) = if flow > 0.3 { (&mut river, (flow / 2.0).min(1.0)) } else { (&mut lake, 1.0) };
-            if slot.is_none_or(|(s, _)| s.distance(at) > d) {
-                *slot = Some((here, strength));
+            if flow > 0.3 {
+                nearer(&mut out.river, here, (flow / 2.0).min(1.0));
+            } else if (level - asc_world::SEA_LEVEL).abs() < 0.5 {
+                nearer(&mut out.sea, here, 1.0);
+            } else {
+                nearer(&mut out.lake, here, 1.0);
             }
         }
     }
-    (river, lake)
+    // A drop of more than a couple of metres between neighbouring water samples is a waterfall.
+    for j in 0..side {
+        for i in 0..side {
+            let Some(a) = levels[i + side * j] else { continue };
+            for (di, dj) in [(1, 0), (0, 1)] {
+                let (ni, nj) = (i + di, j + dj);
+                if ni >= side || nj >= side {
+                    continue;
+                }
+                let Some(b) = levels[ni + side * nj] else { continue };
+                let drop = (a - b).abs();
+                if drop > 2.0 {
+                    let mid = Vec2::new(at.x, at.z)
+                        + Vec2::new((i + ni) as f32 * 0.5 - N as f32, (j + nj) as f32 * 0.5 - N as f32) * step;
+                    nearer(&mut out.waterfall, Vec3::new(mid.x, a.min(b), mid.y), (drop / 10.0).clamp(0.3, 1.0));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// What a place sounds like at (x, z), by its biome and the time of day (`daylight` 0 night ..
+/// 1 day), and how much (its share of the ground sampled round the listener).
+pub fn place_sounds(worldgen: &asc_world::WorldGen, at: Vec3, daylight: f32) -> Vec<(Ambience, f32)> {
+    use asc_world::Biome;
+    let mut shares: HashMap<Ambience, f32> = HashMap::new();
+    let samples = [(0.0, 0.0), (40.0, 0.0), (-40.0, 0.0), (0.0, 40.0), (0.0, -40.0)];
+    let each = 1.0 / samples.len() as f32;
+    for (dx, dz) in samples {
+        let g = worldgen.ground(at.x + dx, at.z + dz);
+        if g.underwater {
+            continue;
+        }
+        let (day, night) = match g.biome {
+            Biome::Forest => (Ambience::ForestDay, Ambience::ForestNight),
+            Biome::Taiga => (Ambience::Pine, Ambience::ForestNight),
+            Biome::Jungle => (Ambience::Rainforest, Ambience::Rainforest),
+            Biome::Swamp => (Ambience::Swamp, Ambience::Swamp),
+            Biome::Meadow | Biome::Savanna | Biome::Shore => (Ambience::Clearing, Ambience::Evening),
+            Biome::Desert => (Ambience::DesertWind, Ambience::DesertWind),
+            Biome::Tundra | Biome::Arctic => (Ambience::WinterWind, Ambience::WinterWind),
+        };
+        // Bare ground (fresh rock, ash, ice) is quiet of life.
+        let life = 1.0 - g.barren;
+        *shares.entry(day).or_default() += each * daylight * life;
+        *shares.entry(night).or_default() += each * (1.0 - daylight) * life;
+    }
+    shares.into_iter().filter(|(_, s)| *s > 0.01).collect()
 }
 
 #[cfg(test)]
@@ -472,8 +665,26 @@ mod tests {
     #[test]
     fn every_material_has_a_surface_sound() {
         for m in asc_world::Material::ALL {
-            assert!(["grass", "sand", "snow", "hard"].contains(&surface(m)));
+            assert!(["grass", "sand", "gravel", "snow", "hard"].contains(&surface(m)));
         }
     }
-}
 
+    #[test]
+    fn every_ambience_has_its_own_file() {
+        let mut files: Vec<_> = Ambience::ALL.iter().map(|a| a.file()).collect();
+        files.sort();
+        files.dedup();
+        assert_eq!(files.len(), Ambience::ALL.len());
+    }
+
+    #[test]
+    fn a_place_sounds_like_its_biome_by_day_and_night() {
+        let wg = asc_world::WorldGen::new(1337);
+        let at = Vec3::new(300.0, wg.height(300.0, 200.0), 200.0);
+        let day = place_sounds(&wg, at, 1.0);
+        let night = place_sounds(&wg, at, 0.0);
+        let total = |v: &[(Ambience, f32)]| v.iter().map(|(_, s)| s).sum::<f32>();
+        assert!(total(&day) <= 1.0 + 1e-4 && total(&night) <= 1.0 + 1e-4);
+        assert!(!day.iter().any(|(a, _)| *a == Ambience::ForestNight), "night sounds by day: {day:?}");
+    }
+}
