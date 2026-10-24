@@ -21,8 +21,8 @@
 [[creature]]
 id = "stag"
 models = ["stag"]
-# 2.3 m with its antlers (model 4.2 m)
-scale = 0.55
+# 2.6 m with its antlers (model 4.2 m)
+scale = 0.63
 habitat = "land"
 herd = [2, 5]
 spread = 9.0
@@ -32,8 +32,8 @@ biomes = { forest = 0.12, taiga = 0.08 }
 [[creature]]
 id = "wolf"
 models = ["wolf"]
-# 1 m (model 2.7 m)
-scale = 0.37
+# 1.15 m (model 2.7 m)
+scale = 0.43
 habitat = "land"
 herd = [3, 5]
 spread = 7.0
@@ -43,8 +43,8 @@ biomes = { taiga = 0.07, tundra = 0.06, forest = 0.03, arctic = 0.02 }
 [[creature]]
 id = "fox"
 models = ["fox"]
-# 0.55 m (model 2.7 m)
-scale = 0.21
+# 0.65 m (model 2.7 m)
+scale = 0.24
 habitat = "land"
 herd = [1, 1]
 spread = 1.0
@@ -54,8 +54,8 @@ biomes = { forest = 0.06, meadow = 0.05, taiga = 0.05 }
 [[creature]]
 id = "horse"
 models = ["horse", "horse_white"]
-# 2.2 m (model 4.8 m)
-scale = 0.46
+# 2.55 m (model 4.8 m)
+scale = 0.53
 habitat = "land"
 herd = [4, 8]
 spread = 14.0
@@ -66,8 +66,8 @@ biomes = { meadow = 0.10, savanna = 0.08 }
 id = "cattle"
 models = ["cow"]
 leader = "bull"
-# 1.7 m (model 4.6 m)
-scale = 0.37
+# 2 m (model 4.6 m)
+scale = 0.43
 habitat = "land"
 herd = [3, 6]
 spread = 12.0
@@ -77,8 +77,8 @@ biomes = { meadow = 0.08 }
 [[creature]]
 id = "donkey"
 models = ["donkey"]
-# 1.6 m (model 4.0 m)
-scale = 0.40
+# 1.85 m (model 4.0 m)
+scale = 0.46
 habitat = "land"
 herd = [2, 4]
 spread = 8.0
@@ -88,8 +88,8 @@ biomes = { savanna = 0.08, desert = 0.03 }
 [[creature]]
 id = "alpaca"
 models = ["alpaca"]
-# 1.8 m (model 5.3 m)
-scale = 0.34
+# 2.05 m (model 5.3 m)
+scale = 0.39
 habitat = "land"
 herd = [3, 6]
 spread = 10.0
