@@ -1,10 +1,13 @@
 //! Ascension game binary.
 
+mod animation;
 mod app;
 // The game state and rules live in asc-sim; these keep `crate::content` and friends working.
 use asc_sim::{content, inventory, ore_nodes, save, sim};
 mod assets;
 mod audio;
+mod avatar;
+mod creatures;
 mod building;
 mod effects;
 mod far;

@@ -1,0 +1,116 @@
+# Wild creatures: where they live, in what numbers, and how they're drawn.
+#
+# Herds are placed by asc_sim::creatures, deterministically from the seed: the world is split into
+# 96 m cells, and each cell near the player may hold one herd on land and one in its water. Its
+# biome (at the cell's middle) gives each kind's chance of being the one there.
+#
+#   model      assets/models/creatures/<model>.glb; `models` to pick among (each member at random),
+#              and `leader` for the herd's first member (a bull with the cows)
+#   habitat    "land", "fresh" (rivers and lakes) or "sea"
+#   biomes     chance per cell of a herd of this kind, by biome (land); `chance` for water kinds
+#   herd       how many in a herd (inclusive range)
+#   spread     how far from the herd's middle members stand (m)
+#   scale      model scale
+#   idle       clips a land animal cycles through while it has nothing to do
+#   swim       a swimmer's clip; it circles its spot at `speed` m/s
+#   depth      swimmers: the water must be at least this deep (m)
+#   min_height land: only on ground above this (m)
+#   max_slope  land: not on ground steeper than this (rise over run)
+
+[[creature]]
+id = "stag"
+models = ["stag"]
+habitat = "land"
+herd = [2, 5]
+spread = 9.0
+idle = ["Idle", "Idle_2", "Eating", "Idle_Headlow"]
+biomes = { forest = 0.12, taiga = 0.08 }
+
+[[creature]]
+id = "wolf"
+models = ["wolf"]
+habitat = "land"
+herd = [3, 5]
+spread = 7.0
+idle = ["Idle", "Idle_2", "Idle_2_HeadLow", "Eating"]
+biomes = { taiga = 0.07, tundra = 0.06, forest = 0.03, arctic = 0.02 }
+
+[[creature]]
+id = "fox"
+models = ["fox"]
+habitat = "land"
+herd = [1, 1]
+spread = 1.0
+idle = ["Idle", "Idle_2", "Idle_2_HeadLow", "Eating"]
+biomes = { forest = 0.06, meadow = 0.05, taiga = 0.05 }
+
+[[creature]]
+id = "horse"
+models = ["horse", "horse_white"]
+habitat = "land"
+herd = [4, 8]
+spread = 14.0
+idle = ["Idle", "Idle_2", "Eating", "Idle_Headlow"]
+biomes = { meadow = 0.10, savanna = 0.08 }
+
+[[creature]]
+id = "cattle"
+models = ["cow"]
+leader = "bull"
+habitat = "land"
+herd = [3, 6]
+spread = 12.0
+idle = ["Idle", "Idle_2", "Eating", "Idle_Headlow"]
+biomes = { meadow = 0.08 }
+
+[[creature]]
+id = "donkey"
+models = ["donkey"]
+habitat = "land"
+herd = [2, 4]
+spread = 8.0
+idle = ["Idle", "Idle_2", "Eating", "Idle_Headlow"]
+biomes = { savanna = 0.08, desert = 0.03 }
+
+[[creature]]
+id = "alpaca"
+models = ["alpaca"]
+habitat = "land"
+herd = [3, 6]
+spread = 10.0
+idle = ["Idle", "Idle_2", "Eating", "Idle_Headlow"]
+biomes = { tundra = 0.06, meadow = 0.08 }
+min_height = 110.0
+
+[[creature]]
+id = "fish"
+models = ["fish", "fish_2", "fish_3"]
+habitat = "fresh"
+herd = [3, 8]
+spread = 4.0
+swim = "Swim"
+speed = 1.2
+depth = 1.5
+chance = 0.45
+
+[[creature]]
+id = "dolphin"
+models = ["dolphin"]
+habitat = "sea"
+herd = [2, 4]
+spread = 12.0
+swim = "Swim"
+speed = 4.0
+depth = 6.0
+chance = 0.06
+
+[[creature]]
+id = "manta"
+models = ["manta"]
+habitat = "sea"
+herd = [1, 2]
+spread = 8.0
+swim = "Swim"
+speed = 2.0
+depth = 6.0
+chance = 0.05

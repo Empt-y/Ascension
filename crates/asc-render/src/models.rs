@@ -409,6 +409,35 @@ mod tests {
     }
 
     #[test]
+    fn posing_sixty_creatures_and_the_player_takes_well_under_a_millisecond() {
+        let dir = models_dir();
+        let wolf = load_skinned_glb(&std::fs::read(dir.join("creatures/wolf.glb")).unwrap()).unwrap();
+        let body = load_skinned_glb(&std::fs::read(dir.join("player/body.glb")).unwrap()).unwrap();
+        let lib = load_clips(&std::fs::read(dir.join("player/animations_1.glb")).unwrap()).unwrap();
+        let walk = lib.iter().find(|c| c.name == "Walk_Loop").unwrap();
+        let (wb, bb) = (wolf.skeleton.bind(&wolf.clips[0]), body.skeleton.bind(walk));
+        let (mut pose, mut palette) = (wolf.skeleton.rest_pose(), Vec::new());
+        let mut frame = |t: f32| {
+            for k in 0..60 {
+                wolf.skeleton.sample(&wolf.clips[0], &wb, t + k as f32 * 0.1, true, &mut pose);
+                wolf.skeleton.palette(&pose, &mut palette);
+            }
+            let mut p = body.skeleton.rest_pose();
+            body.skeleton.sample(walk, &bb, t, true, &mut p);
+            body.skeleton.palette(&p, &mut palette);
+        };
+        frame(0.0);
+        let start = std::time::Instant::now();
+        for f in 0..20 {
+            frame(f as f32 / 60.0);
+        }
+        let ms = start.elapsed().as_secs_f64() * 1e3 / 20.0;
+        println!("posing 60 wolves and the player: {ms:.3} ms a frame");
+        // Generous (debug builds and busy machines); release is far under.
+        assert!(ms < 8.0, "{ms} ms a frame");
+    }
+
+    #[test]
     fn wall_bounds_match_the_spec() {
         let model = load_glb(&std::fs::read(models_dir().join("stone_wall.glb")).unwrap()).unwrap();
         let close = |a: Vec3, b: Vec3| (a - b).abs().max_element() < 1e-3;

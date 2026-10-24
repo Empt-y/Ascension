@@ -154,6 +154,8 @@ pub struct Server {
     fire: crate::fire::Fire,
     /// Where pyroclastic flows and blasts have passed.
     scars: Vec<crate::volcanism::Scar>,
+    /// The wild creatures near the player (not saved: they're regenerated where they live).
+    creatures: crate::creatures::Creatures,
     next_stash: u32,
     seed: i32,
     save_dir: PathBuf,
@@ -247,6 +249,7 @@ impl Server {
             volcanism,
             fire,
             scars: loaded.as_ref().map_or_else(Vec::new, |g| g.scars.clone()),
+            creatures: crate::creatures::Creatures::new(seed),
             next_stash,
             seed,
             save_dir,
@@ -282,6 +285,7 @@ impl Server {
             stashes: self.stashes.iter().map(|s| (s.id, Vec3::from(s.at))).collect(),
             fire: self.fire.stages(self.sim.ticks),
             scars: self.scars.clone(),
+            creatures: self.creatures.all().copied().collect(),
             fluids: {
                 // In coordinate order: the same state always makes the same message.
                 let mut f: Vec<_> = self
@@ -344,6 +348,14 @@ impl Server {
         for scar in events.scars {
             self.scars.push(scar);
             self.outbox.push(ServerMsg::Scar(scar));
+        }
+        // Wild creatures come and go round the player and go about their business.
+        let changes = self.creatures.tick(&self.world, self.player.feet, self.sim.ticks);
+        if !changes.spawned.is_empty() || !changes.gone.is_empty() {
+            self.outbox.push(ServerMsg::Creatures { spawned: changes.spawned, gone: changes.gone });
+        }
+        if !changes.acts.is_empty() {
+            self.outbox.push(ServerMsg::CreatureActs(changes.acts));
         }
         // Fire: bombs and spilled lava set what grows where they land alight; it spreads.
         let ticks = self.sim.ticks;

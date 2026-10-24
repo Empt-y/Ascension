@@ -245,6 +245,131 @@ impl VolcanicModels {
     }
 }
 
+/// A skinned model on the GPU with what animates it: its skeleton, and clips bound to it.
+pub struct Animated {
+    pub id: asc_render::SkinnedId,
+    pub skeleton: asc_render::skeleton::Skeleton,
+    pub clips: Vec<(asc_render::skeleton::Clip, asc_render::skeleton::Binding)>,
+}
+
+impl Animated {
+    fn new(renderer: &mut Renderer, data: &asc_render::models::SkinnedModelData, clips: Vec<asc_render::skeleton::Clip>) -> Self {
+        let skeleton = data.skeleton.clone();
+        let clips = clips
+            .into_iter()
+            .map(|c| {
+                let b = skeleton.bind(&c);
+                (c, b)
+            })
+            .collect();
+        Self { id: renderer.add_skinned_model(data), skeleton, clips }
+    }
+
+    /// The clip called `name`, if it has one.
+    pub fn clip(&self, name: &str) -> Option<usize> {
+        self.clips.iter().position(|(c, _)| c.name == name)
+    }
+}
+
+fn read_skinned(path: &std::path::Path) -> Result<asc_render::models::SkinnedModelData> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    asc_render::models::load_skinned_glb(&bytes).with_context(|| format!("loading {}", path.display()))
+}
+
+/// Each creature kind's models (tools/build_creatures.py), in its `models` order; one not built
+/// yet is `None` and the kind's others stand in for it.
+pub struct CreatureModels {
+    kinds: Vec<Vec<Option<std::sync::Arc<Animated>>>>,
+}
+
+impl CreatureModels {
+    pub fn load(renderer: &mut Renderer) -> Result<Self> {
+        let dir = root()?.join("models").join("creatures");
+        let mut loaded: std::collections::HashMap<String, Option<std::sync::Arc<Animated>>> = Default::default();
+        let mut kinds = Vec::new();
+        for kind in asc_sim::creatures::kinds() {
+            let mut models = Vec::new();
+            for name in &kind.models {
+                if !loaded.contains_key(name) {
+                    let path = dir.join(format!("{name}.glb"));
+                    let model = if path.is_file() {
+                        let data = read_skinned(&path)?;
+                        let clips = data.clips.clone();
+                        Some(std::sync::Arc::new(Animated::new(renderer, &data, clips)))
+                    } else {
+                        log::warn!("no {}: {} herds will do without it", path.display(), kind.id);
+                        None
+                    };
+                    loaded.insert(name.clone(), model);
+                }
+                models.push(loaded[name].clone());
+            }
+            kinds.push(models);
+        }
+        log::info!("loaded {} creature models", loaded.values().filter(|m| m.is_some()).count());
+        Ok(Self { kinds })
+    }
+
+    /// Kind `kind`'s model `model`, or another of its kind's if that one isn't built.
+    pub fn get(&self, kind: u16, model: u8) -> Option<&std::sync::Arc<Animated>> {
+        let models = self.kinds.get(kind as usize)?;
+        models.get(model as usize).and_then(Option::as_ref).or_else(|| models.iter().flatten().next())
+    }
+}
+
+/// The player's body (Quaternius's Universal Base Character), the animation libraries bound to it,
+/// and what's worn on it (hair, eyebrows): skinned to the same skeleton, drawn with its palette.
+pub struct PlayerModel {
+    pub body: Animated,
+    pub attachments: Vec<asc_render::SkinnedId>,
+}
+
+/// The hair's colour (its texture is white, to be tinted): a dark brown, linear RGB.
+const HAIR_COLOR: [f32; 3] = [0.09, 0.055, 0.035];
+
+impl PlayerModel {
+    pub fn load(renderer: &mut Renderer) -> Result<Self> {
+        let dir = root()?.join("models").join("player");
+        let body_data = read_skinned(&dir.join("body.glb"))?;
+        let mut clips: Vec<asc_render::skeleton::Clip> = Vec::new();
+        for lib in ["animations_1.glb", "animations_2.glb"] {
+            let path = dir.join(lib);
+            let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            for c in asc_render::models::load_clips(&bytes).with_context(|| format!("loading {}", path.display()))? {
+                if !clips.iter().any(|x| x.name == c.name) {
+                    clips.push(c);
+                }
+            }
+        }
+        let body = Animated::new(renderer, &body_data, clips);
+        let mut attachments = Vec::new();
+        for part in ["hair.glb", "eyebrows.glb"] {
+            let mut data = read_skinned(&dir.join(part))?;
+            // Onto the body's joints (its own skin may list them in another order), and tinted.
+            let remap: Vec<u16> = data
+                .skeleton
+                .names
+                .iter()
+                .map(|n| body.skeleton.index(n).unwrap_or(0) as u16)
+                .collect();
+            for p in &mut data.primitives {
+                for v in &mut p.vertices {
+                    v.joints = v.joints.map(|j| remap[j as usize]);
+                }
+                p.material.base_color = HAIR_COLOR;
+                p.material.roughness = p.material.roughness.max(0.6);
+            }
+            attachments.push(renderer.add_skinned_model(&data));
+        }
+        log::info!(
+            "player: {} triangles, {} animations",
+            body_data.triangles(),
+            body.clips.len()
+        );
+        Ok(Self { body, attachments })
+    }
+}
+
 /// Decode the Blender preview renders into egui textures, `[tier][kind]`.
 pub fn load_previews(ctx: &egui::Context, spec: &BuildingSpec) -> Result<Vec<[egui::TextureHandle; 3]>> {
     let dir = root()?.join("models").join("previews");

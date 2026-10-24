@@ -71,6 +71,8 @@ pub struct Welcome {
     pub fire: Vec<([i32; 2], crate::fire::Stage)>,
     /// Where pyroclastic flows and blasts have passed.
     pub scars: Vec<crate::volcanism::Scar>,
+    /// The wild creatures near the player.
+    pub creatures: Vec<crate::creatures::Creature>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -107,6 +109,10 @@ pub enum ServerMsg {
     Fire(Vec<([i32; 2], crate::fire::Stage)>),
     /// A pyroclastic flow or blast has scarred the land.
     Scar(crate::volcanism::Scar),
+    /// Creatures that came near and ones gone (out of range).
+    Creatures { spawned: Vec<crate::creatures::Creature>, gone: Vec<crate::creatures::CreatureId> },
+    /// Creatures doing something else: what (an index into their kind's clips) and since when.
+    CreatureActs(Vec<(crate::creatures::CreatureId, u8, u64)>),
     /// Lava met water and set to rock here this tick (steam: a few spots, a cell apart at least).
     Steam(Vec<glam::Vec3>),
 }

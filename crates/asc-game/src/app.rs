@@ -71,6 +71,10 @@ pub struct Options {
     pub hide_hud: bool,
     /// Start pose: x, y, z, yaw, pitch (radians).
     pub camera: Option<[f32; 5]>,
+    /// Start seeing through the player's eyes rather than from behind (V switches).
+    pub first_person: bool,
+    /// Start beside the nearest herd on land (a test of the creatures).
+    pub creature_test: bool,
     /// Start on foot near the closest active volcano, facing it (off to the side of its breach).
     pub near_volcano: bool,
     /// World to load or create, under `saves_dir`.
@@ -185,6 +189,8 @@ impl Options {
                 "--fluid-test" => opts.fluid_test = true,
                 "--mute" => opts.mute = true,
                 "--near-volcano" => opts.near_volcano = true,
+                "--first-person" => opts.first_person = true,
+                "--creature-test" => opts.creature_test = true,
                 "--volume" => opts.volume = Some(value("--volume")?.parse()?),
                 "--erupt" => opts.erupt = Some(asc_sim::volcanism::Kind::Natural),
                 "--erupt-flow" => opts.erupt = Some(asc_sim::volcanism::Kind::Flows),
@@ -286,6 +292,17 @@ struct State {
     stride: f32,
     /// Arrived in flight (`--near-volcano`): walk once the server has the new position.
     walk_soon: bool,
+    /// The player's body and the wild creatures, and the game clock they're posed by (seconds,
+    /// kept in step with the server's ticks but smooth between them).
+    player_model: crate::assets::PlayerModel,
+    avatar: crate::avatar::Avatar,
+    creature_models: crate::assets::CreatureModels,
+    creatures: crate::creatures::ClientCreatures,
+    anim_clock: f64,
+    /// Seen from behind the player (else through their eyes).
+    third_person: bool,
+    placed_at: Option<f64>,
+    died_at: Option<f64>,
     was_grounded: bool,
     falling: f32,
     was_submerged: f32,
@@ -373,6 +390,8 @@ impl State {
         let nature = crate::assets::NatureModels::load(&mut renderer)?;
         let ores = crate::assets::OreModels::load(&mut renderer)?;
         let volcanic = crate::assets::VolcanicModels::load(&mut renderer)?;
+        let player_model = crate::assets::PlayerModel::load(&mut renderer)?;
+        let creature_models = crate::assets::CreatureModels::load(&mut renderer)?;
         let mut scatter = crate::scatter::Scatter::new(
             crate::scatter::Config::new(seed, &nature, Some(&ores)),
             world.worldgen.clone(),
@@ -443,6 +462,29 @@ impl State {
                     log::info!("near the volcano at {}: standing {:.0} m from its middle", v.center, to.length());
                 }
                 None => log::warn!("--near-volcano: no active volcano within 20 km"),
+            }
+        }
+        if options.creature_test {
+            // The nearest cell with a herd on land, spiralling out from where the player is.
+            let home = (Vec2::new(player.feet.x, player.feet.z) / asc_sim::creatures::CELL).floor().as_ivec2();
+            let herd = (0..30).find_map(|r: i32| {
+                (-r..=r).flat_map(|dz| (-r..=r).map(move |dx| glam::IVec2::new(dx, dz))).filter(|d| d.abs().max_element() == r).find_map(|d| {
+                    let herd = asc_sim::creatures::herds_in(&world, seed, home + d);
+                    herd.iter().find(|c| c.circle.is_none()).map(|c| (c.at, c.kind().id.clone()))
+                })
+            });
+            match herd {
+                Some((at, kind)) => {
+                    // A dozen metres off, looking at them.
+                    let from = Vec2::new(at.x - 12.0, at.z - 6.0);
+                    player.mode = Mode::Fly;
+                    player.teleport(find_ground(&world, from.x, from.y));
+                    let to = Vec2::new(at.x, at.z) - from;
+                    (player.yaw, player.pitch) = (to.y.atan2(to.x), -0.1);
+                    walk_soon = true;
+                    log::info!("creature test: beside a herd of {kind} at {at}");
+                }
+                None => log::warn!("--creature-test: no herd on land near by"),
             }
         }
         if let Some([x, y, z, yaw, pitch]) = options.camera {
@@ -520,6 +562,18 @@ impl State {
             weather: asc_world::weather::Weather::new(seed),
             stride: 0.0,
             walk_soon,
+            player_model,
+            avatar: Default::default(),
+            creature_models,
+            creatures: {
+                let mut c = crate::creatures::ClientCreatures::default();
+                c.spawned(&welcome.creatures);
+                c
+            },
+            anim_clock: welcome.ticks as f64 / 20.0,
+            third_person: !options.first_person && options.camera.is_none(),
+            placed_at: None,
+            died_at: None,
             was_grounded: true,
             falling: 0.0,
             was_submerged: 0.0,
@@ -758,14 +812,16 @@ impl State {
         let bombs = self.effects.bombs(&self.volcanism, &self.volcanic.bombs, self.started.elapsed().as_secs_f32());
         self.building.set_moving(bombs);
         self.listen();
+        self.pose_bodies(dt);
         let (ash, shake) = self.volcanic_air();
+        let view = self.view_camera();
         let params = FrameParams {
-            camera: Camera { position: self.camera.position + shake, ..self.camera },
+            camera: Camera { position: view.position + shake, ..view },
             ash,
             particles: self.effects.particles(&self.volcanism),
             sun_dir: self.sim.sun_dir(),
             view_distance: self.streamer.view_radius as f32 * 32.0,
-            underwater: self.fluids.fraction_at(&self.world, self.camera.position) > 0.5,
+            underwater: self.fluids.fraction_at(&self.world, view.position) > 0.5,
             lights: {
                 let mut lights = self.fluids.lava_lights(self.camera.position);
                 lights.extend(self.streamer.lava_lights(&self.fluids, self.camera.position, 160.0));
@@ -827,6 +883,11 @@ impl State {
                     self.last_stats.parts_drawn,
                 );
             }
+            log::info!(
+                "creatures: {} near, {} skinned models drawn",
+                self.creatures.len(),
+                self.last_stats.skinned_drawn
+            );
             if !self.building.structures.is_empty() {
                 log::info!(
                     "parts: {} placed, {} instances drawn",
@@ -947,6 +1008,9 @@ impl State {
         {
             let library = audio.toggle_library();
             self.show_notice(if library { "Sounds: library recordings".into() } else { "Sounds: generated".into() });
+        }
+        if self.input.pressed(KeyCode::KeyV) {
+            self.third_person = !self.third_person;
         }
         if self.input.pressed(KeyCode::F9) {
             self.send(ClientMsg::Save);
@@ -1179,6 +1243,7 @@ impl State {
             }
             ServerMsg::Died { cause } => {
                 self.hurt_flash = 1.0;
+                self.died_at = Some(self.anim_clock);
                 if let Some(audio) = &mut self.audio {
                     audio.play("hurt", 1.0);
                 }
@@ -1195,6 +1260,11 @@ impl State {
                 self.volcanism = report;
             }
             ServerMsg::Scar(scar) => self.scatter.add_scar(scar),
+            ServerMsg::Creatures { spawned, gone } => {
+                self.creatures.gone(&gone);
+                self.creatures.spawned(&spawned);
+            }
+            ServerMsg::CreatureActs(acts) => self.creatures.acts(&acts, self.anim_clock),
             ServerMsg::Steam(spots) => self.steam(&spots),
             ServerMsg::Fire(changed) => {
                 self.scatter.set_fire(&changed);
@@ -1265,6 +1335,62 @@ impl State {
             let fill = self.fluids.fraction_at(&self.world, self.fluid_test_end);
             log::info!("fluid test t={t:.1}: trench end {:.2} full, {} fluid chunks here", fill, self.fluids.fluids.chunks.len());
         }
+    }
+
+    /// Where the view is drawn from: the eyes, or (third person) behind and a little above them,
+    /// pulled in where terrain or a building is in the way. Aiming always uses the eyes.
+    fn view_camera(&self) -> Camera {
+        if !self.third_person {
+            return self.camera;
+        }
+        const BACK: f32 = 3.5;
+        let eye = self.camera.position;
+        let dir = (-self.camera.forward() * BACK + Vec3::Y * 0.6).normalize();
+        let (world, building) = (&self.world, &self.building);
+        let blocked = raycast(|p| world.density_at(p).min(building.sdf(p)), eye, dir, BACK + 0.6);
+        let reach = blocked.map_or(BACK + 0.6, |h| (h.point.distance(eye) - 0.3).max(0.3));
+        Camera { position: eye + dir * reach, ..self.camera }
+    }
+
+    /// Pose the player's body and the creatures near by for this frame, and hand them to the
+    /// renderer.
+    fn pose_bodies(&mut self, dt: f32) {
+        // The clock runs smoothly with the frames, kept within a few ticks of the server's.
+        self.anim_clock += f64::from(dt);
+        let server = self.sim.ticks as f64 / 20.0;
+        if (self.anim_clock - server).abs() > 0.5 {
+            self.anim_clock = server;
+        }
+        let p = &self.player;
+        let state = crate::avatar::State {
+            mode: p.mode,
+            grounded: p.grounded,
+            velocity: p.velocity,
+            submerged: p.submerged,
+            look_yaw: p.yaw,
+            mining: self.captured && self.input.button_held(MouseButton::Left) && self.hit.is_some(),
+            since_placed: self.placed_at.map(|t| (self.anim_clock - t) as f32),
+            since_died: self.died_at.map(|t| (self.anim_clock - t) as f32),
+        };
+        let (yaw, palette) = self.avatar.update(&self.player_model, &state, dt);
+        let feet = self.player.eye() - Vec3::Y * player::EYE_HEIGHT;
+        // Through the player's own eyes the body isn't drawn (it would fill the view), but it
+        // still casts its shadow.
+        let shadow_only = !self.third_person;
+        let mut instances = Vec::new();
+        for (k, model) in std::iter::once(self.player_model.body.id).chain(self.player_model.attachments.iter().copied()).enumerate() {
+            instances.push(asc_render::SkinnedInstance {
+                model,
+                key: u64::MAX - k as u64,
+                position: feet,
+                yaw,
+                scale: 1.0,
+                palette: palette.clone(),
+                shadow_only,
+            });
+        }
+        self.creatures.instances(&self.creature_models, self.anim_clock, self.camera.position, &mut instances);
+        self.renderer.set_skinned(instances);
     }
 
     /// Footsteps on whatever is underfoot, a thump on landing, a splash on falling into water.
@@ -1823,6 +1949,7 @@ impl State {
         if place && let Some(hit) = self.hit {
             let fresh = self.input.button_pressed(MouseButton::Right) || self.options.mine_test;
             if self.mining.try_place() {
+                self.placed_at = Some(self.anim_clock);
                 self.send(ClientMsg::Fill { point: hit.point, normal: hit.normal, fresh });
             }
         }
