@@ -71,6 +71,8 @@ pub struct Options {
     pub hide_hud: bool,
     /// Start pose: x, y, z, yaw, pitch (radians).
     pub camera: Option<[f32; 5]>,
+    /// Start on foot near the closest active volcano, facing it (off to the side of its breach).
+    pub near_volcano: bool,
     /// World to load or create, under `saves_dir`.
     pub world: String,
     pub saves_dir: Option<std::path::PathBuf>,
@@ -182,6 +184,7 @@ impl Options {
                 "--fall-test" => opts.fall_test = true,
                 "--fluid-test" => opts.fluid_test = true,
                 "--mute" => opts.mute = true,
+                "--near-volcano" => opts.near_volcano = true,
                 "--volume" => opts.volume = Some(value("--volume")?.parse()?),
                 "--erupt" => opts.erupt = Some(asc_sim::volcanism::Kind::Natural),
                 "--erupt-flow" => opts.erupt = Some(asc_sim::volcanism::Kind::Flows),
@@ -281,6 +284,8 @@ struct State {
     audio: Option<crate::audio::Audio>,
     weather: asc_world::weather::Weather,
     stride: f32,
+    /// Arrived in flight (`--near-volcano`): walk once the server has the new position.
+    walk_soon: bool,
     was_grounded: bool,
     falling: f32,
     was_submerged: f32,
@@ -413,6 +418,33 @@ impl State {
             player.teleport(spawn + Vec3::Y * 25.0);
             player.pitch = -0.3;
         }
+        let mut walk_soon = false;
+        if options.near_volcano {
+            let here = Vec2::new(player.feet.x, player.feet.z);
+            let active = world
+                .worldgen
+                .volcanoes_near(here, 20_000.0)
+                .into_iter()
+                .filter(|v| v.kind == asc_world::volcano::VolcanoKind::Active)
+                .min_by(|a, b| a.center.distance(here).total_cmp(&b.center.distance(here)));
+            match active {
+                Some(v) => {
+                    // Off to the side of the breach (where blasts and its lava go), outside the cone.
+                    let side = if v.tilt == Vec2::ZERO { Vec2::Y } else { v.tilt.perp() };
+                    let at = v.center + side * (v.radius * 1.6).max(900.0);
+                    let ground = find_ground(&world, at.x, at.y);
+                    // There in flight (the host may: a walk that far would be refused as too fast),
+                    // walking from the next frame.
+                    player.mode = Mode::Fly;
+                    player.teleport(ground);
+                    let to = v.center - at;
+                    (player.yaw, player.pitch) = (to.y.atan2(to.x), 0.05);
+                    walk_soon = true;
+                    log::info!("near the volcano at {}: standing {:.0} m from its middle", v.center, to.length());
+                }
+                None => log::warn!("--near-volcano: no active volcano within 20 km"),
+            }
+        }
         if let Some([x, y, z, yaw, pitch]) = options.camera {
             player.mode = Mode::Fly;
             player.teleport(Vec3::new(x, y, z) - Vec3::Y * player::EYE_HEIGHT);
@@ -487,6 +519,7 @@ impl State {
             },
             weather: asc_world::weather::Weather::new(seed),
             stride: 0.0,
+            walk_soon,
             was_grounded: true,
             falling: 0.0,
             was_submerged: 0.0,
@@ -569,6 +602,10 @@ impl State {
         self.body_sounds(dt.as_secs_f32());
         let p = &self.player;
         self.send(ClientMsg::Move { feet: p.feet, yaw: p.yaw, pitch: p.pitch, mode: p.mode });
+        if self.walk_soon {
+            self.walk_soon = false;
+            self.player.mode = Mode::Walk;
+        }
         self.camera = Camera {
             position: self.player.eye(),
             yaw: self.player.yaw,
