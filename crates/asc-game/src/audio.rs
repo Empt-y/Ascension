@@ -27,7 +27,7 @@ const AMBIENCE_EVERY: Duration = Duration::from_millis(250);
 const OPEN: f64 = 20_000.0;
 const MUFFLED: f64 = 700.0;
 /// The footsteps' bass boost: a low shelf at this frequency (Hz), this many dB.
-const BODY_SHELF: (f64, f32) = (200.0, 7.0);
+const BODY_SHELF: (f64, f32) = (200.0, 3.0);
 
 /// Where a one-shot plays: its range (full volume within the first, silent beyond the second).
 #[derive(Clone, Copy)]
@@ -147,7 +147,7 @@ pub struct Audio {
     manager: AudioManager<DefaultBackend>,
     listener: ListenerHandle,
     /// The world's sounds, through the underwater filter; the player's footsteps and landings
-    /// through a further bass boost (they sounded thin).
+    /// through a further bass boost (they sounded thin; a soft low thump is layered under them too).
     world: TrackHandle,
     body: TrackHandle,
     muffle: FilterHandle,
@@ -163,6 +163,8 @@ pub struct Audio {
     at: Vec3,
     last_ambience: Option<Instant>,
     rng: u64,
+    /// Sounds asked for that neither set has (warned about once).
+    missing: std::collections::HashSet<String>,
 }
 
 fn db(level: f32) -> Decibels {
@@ -220,6 +222,7 @@ impl Audio {
             at: Vec3::ZERO,
             last_ambience: None,
             rng: 0x5eed_50f7,
+            missing: Default::default(),
         };
         audio.start_loops()?;
         Ok(audio)
@@ -285,6 +288,11 @@ impl Audio {
         (self.rng >> 40) as f32 / (1u64 << 24) as f32
     }
 
+    /// True with probability `p` (for sounds that come now and then).
+    pub fn chance(&mut self, p: f32) -> bool {
+        self.random() < p
+    }
+
     /// Where the listener is and which way it faces (game yaw: forward is (cos, 0, sin)).
     pub fn listen(&mut self, at: Vec3, yaw: f32) {
         self.at = at;
@@ -335,7 +343,9 @@ impl Audio {
     fn pick(&mut self, name: &str, volume: f32) -> Option<StaticSoundData> {
         let n = self.variations(name).map_or(0, |(v, _)| v.len());
         if n == 0 {
-            log::warn!("no sound {name}");
+            if self.missing.insert(name.to_owned()) {
+                log::warn!("no sound {name}");
+            }
             return None;
         }
         let i = ((self.random() * n as f32) as usize).min(n - 1);
@@ -347,7 +357,7 @@ impl Audio {
 
     fn play_now(&mut self, name: &str, at: Vec3, range: Range, volume: f32) {
         let Some(data) = self.pick(name, volume) else { return };
-        let parent = if name.starts_with("step_") || name == "land" { &mut self.body } else { &mut self.world };
+        let parent = if name.starts_with("step_") || name == "land" || name == "thump" { &mut self.body } else { &mut self.world };
         let track = parent.add_spatial_sub_track(
             &self.listener,
             at,

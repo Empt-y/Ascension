@@ -26,6 +26,51 @@ Licence: CC-BY 4.0 (credit: JC Sounds). Source: https://opengameart.org/node/180
 - lake: AMB_Nature Pack Vol 1_Water Enviroments_Peaceful Lake .mp3
 - fire: AMB_Nature Pack Vol 1_ Fire & Elemental_Large Bonfire.mp3
 
+## BMacZero, Bubble Sound Effects
+
+Licence: CC0 1.0. Source: https://opengameart.org/content/bubble-sound-effects
+
+- underwater: bubbles-loop1-amp.wav
+
+## Fantozzi, Footsteps (Grass/Sand & Stone)
+
+Licence: CC0 1.0. Source: https://opengameart.org/content/fantozzis-footsteps-grasssand-stone
+
+- step_sand (6): Fantozzi-SandL1.ogg, Fantozzi-SandL2.ogg, Fantozzi-SandL3.ogg, Fantozzi-SandR1.ogg, Fantozzi-SandR2.ogg, Fantozzi-SandR3.ogg
+
+## congusbongus, Footsteps on different surfaces (water: from EminYILDIRIM and swuing on freesound.org)
+
+Licence: CC-BY 3.0 (credit: congusbongus, EminYILDIRIM, swuing). Source: https://opengameart.org/content/footsteps-on-different-surfaces
+
+- step_water (5): 0.ogg, 1.ogg, 2.ogg, 3.ogg, 4.ogg
+
+## rubberduck, 40 CC0 water / splash / slime SFX
+
+Licence: CC0 1.0. Source: https://opengameart.org/content/40-cc0-water-splash-slime-sfx
+
+- splash (8): splash_01.ogg, splash_02.ogg, splash_03.ogg, splash_04.ogg, splash_05.ogg, splash_06.ogg, splash_07.ogg, splash_08.ogg
+
+## dklon, Big Explosion
+
+Licence: CC-BY 3.0 (credit: dklon). Source: https://opengameart.org/content/big-explosion
+
+- blast (2): tnt.mp3, DeathFlash.flac
+
+## Mixkit, volcano sound effects
+
+Licence: Mixkit Sound Effects Free License (no credit needed). Source: https://mixkit.co/free-sound-effects/volcano/
+
+- lava_pop (3): 2445.wav, 2447.wav, 2448.wav
+- roar: 40 s of 2443.wav from 10 s, looped
+- lava: 30 s of 2440.wav from 5 s, looped
+- bomb_land_1: 2449.wav
+
+## bretbernhoft, Rumbling Sound Effects
+
+Licence: CC0 1.0. Source: https://opengameart.org/content/rumbling-sound-effects
+
+- rumble: 30 s of rumbling17.wav from 20 s, looped
+
 ## qubodup, Synthesized explosion
 
 Licence: CC0 1.0. Source: https://opengameart.org/content/synthesized-explosion

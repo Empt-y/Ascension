@@ -1251,11 +1251,17 @@ impl State {
                     } else {
                         format!("step_{}", crate::audio::surface(self.world.sample_at(under).1))
                     };
-                    audio.play_at(&name, feet, crate::audio::Range(2.0, 30.0), 0.18 + 0.025 * speed);
+                    let volume = 0.18 + 0.025 * speed;
+                    audio.play_at(&name, feet, crate::audio::Range(2.0, 30.0), volume);
+                    // The body's weight under it, softer when wading.
+                    let weight = if wading { 0.25 } else { 0.55 };
+                    audio.play_at("thump", feet, crate::audio::Range(2.0, 20.0), volume * weight);
                 }
             }
             if p.grounded && !self.was_grounded && self.falling < -5.0 {
-                audio.play_at("land", feet, crate::audio::Range(2.0, 30.0), ((-self.falling - 4.0) / 12.0).clamp(0.3, 1.0));
+                let volume = ((-self.falling - 4.0) / 12.0).clamp(0.3, 1.0);
+                audio.play_at("land", feet, crate::audio::Range(2.0, 30.0), volume);
+                audio.play_at("thump", feet, crate::audio::Range(2.0, 20.0), volume * 0.8);
             }
             if p.submerged > 0.35 && self.was_submerged <= 0.35 && self.falling < -3.0 {
                 audio.play_at("splash", feet, crate::audio::Range(2.0, 40.0), ((-self.falling) / 12.0).clamp(0.4, 1.0));
@@ -1345,6 +1351,10 @@ impl State {
         lava.extend(self.streamer.lava_lights(&self.fluids, at, 120.0));
         if let Some(l) = lava.iter().min_by(|a, b| a.position.distance(at).total_cmp(&b.position.distance(at))) {
             scene.levels.insert(Ambience::Lava, (Some(l.position), 0.9));
+            // Now and then a bubble bursts or the crust hisses (one every two seconds or so).
+            if audio.chance(0.12) {
+                audio.play_at("lava_pop", l.position, crate::audio::Range(3.0, 60.0), 0.7);
+            }
         }
         let fires = self.effects.fire_lights(wg, at, 6);
         if let Some(f) = fires.first() {

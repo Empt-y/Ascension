@@ -286,6 +286,26 @@
     "rms_db": -23.7,
     "seconds": 0.4
   },
+  "thump_0": {
+    "peak_db": -3.0,
+    "rms_db": -17.8,
+    "seconds": 0.25
+  },
+  "thump_1": {
+    "peak_db": -3.0,
+    "rms_db": -16.3,
+    "seconds": 0.25
+  },
+  "thump_2": {
+    "peak_db": -3.0,
+    "rms_db": -18.4,
+    "seconds": 0.25
+  },
+  "thump_3": {
+    "peak_db": -3.0,
+    "rms_db": -16.4,
+    "seconds": 0.25
+  },
   "underwater": {
     "loop": true,
     "peak_db": -7.9,

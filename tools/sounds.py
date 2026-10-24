@@ -231,6 +231,14 @@ def step_water(rng):
     return to_peak(fade_out(slosh + 0.5 * bubbles), -6)
 
 
+def thump(rng):
+    """A soft, low thump: the body's weight landing, layered under every footstep and landing."""
+    s = 0.25
+    tone = chirp(s, rng.uniform(85, 105), rng.uniform(50, 60), 0.05)
+    body = band(white(rng, s), None, 180) * env(s, 0.006, 0.04) * 1.5
+    return to_peak(fade_out(tone * env(s, 0.006, 0.08) + body), -3)
+
+
 def land(rng):
     """Landing from a jump or a fall: a heavy body thump."""
     s = 0.4
@@ -368,6 +376,7 @@ ONE_SHOTS = {
     "step_sand": (step_sand, 5),
     "step_snow": (step_snow, 5),
     "step_water": (step_water, 4),
+    "thump": (thump, 4),
     "land": (land, 2),
     "hurt": (hurt, 3),
     "splash": (splash, 3),
