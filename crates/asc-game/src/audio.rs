@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use glam::{Mat3, Quat, Vec2, Vec3};
+use kira::effect::eq_filter::{EqFilterBuilder, EqFilterKind};
 use kira::effect::filter::{FilterBuilder, FilterHandle};
 use kira::listener::ListenerHandle;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
@@ -25,6 +26,8 @@ const AMBIENCE_EVERY: Duration = Duration::from_millis(250);
 /// The low-pass cutoff in air and underwater (Hz).
 const OPEN: f64 = 20_000.0;
 const MUFFLED: f64 = 700.0;
+/// The footsteps' bass boost: a low shelf at this frequency (Hz), this many dB.
+const BODY_SHELF: (f64, f32) = (200.0, 7.0);
 
 /// Where a one-shot plays: its range (full volume within the first, silent beyond the second).
 #[derive(Clone, Copy)]
@@ -143,8 +146,10 @@ impl Bank {
 pub struct Audio {
     manager: AudioManager<DefaultBackend>,
     listener: ListenerHandle,
-    /// The world's sounds, through the underwater filter.
+    /// The world's sounds, through the underwater filter; the player's footsteps and landings
+    /// through a further bass boost (they sounded thin).
     world: TrackHandle,
+    body: TrackHandle,
     muffle: FilterHandle,
     underwater: bool,
     /// The generated sounds, and recordings from free libraries to compare (F8 switches; a sound
@@ -180,7 +185,13 @@ impl Audio {
         let listener = manager.add_listener(Vec3::ZERO, Quat::IDENTITY)?;
         let mut builder = TrackBuilder::new();
         let muffle = builder.add_effect(FilterBuilder::new().cutoff(OPEN));
-        let world = manager.add_sub_track(builder)?;
+        let mut world = manager.add_sub_track(builder)?;
+        let body = world.add_sub_track(TrackBuilder::new().with_effect(EqFilterBuilder::new(
+            EqFilterKind::LowShelf,
+            BODY_SHELF.0,
+            Decibels(BODY_SHELF.1),
+            0.7,
+        )))?;
         let generated = Bank::load(dir)?;
         let mut library = if library.is_dir() { Bank::load(library)? } else { Bank::default() };
         let names: Vec<String> = library.sounds.keys().cloned().collect();
@@ -198,6 +209,7 @@ impl Audio {
             manager,
             listener,
             world,
+            body,
             muffle,
             underwater: false,
             generated,
@@ -335,7 +347,8 @@ impl Audio {
 
     fn play_now(&mut self, name: &str, at: Vec3, range: Range, volume: f32) {
         let Some(data) = self.pick(name, volume) else { return };
-        let track = self.world.add_spatial_sub_track(
+        let parent = if name.starts_with("step_") || name == "land" { &mut self.body } else { &mut self.world };
+        let track = parent.add_spatial_sub_track(
             &self.listener,
             at,
             SpatialTrackBuilder::new().distances((range.0, range.1)).persist_until_sounds_finish(true),
@@ -453,3 +466,4 @@ mod tests {
         }
     }
 }
+
