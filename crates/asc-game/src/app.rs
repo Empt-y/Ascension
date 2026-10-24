@@ -102,6 +102,10 @@ pub struct Options {
     pub build_test: bool,
     /// Place a large scripted block of pieces near spawn (a building performance test).
     pub build_stress: bool,
+    /// No sound.
+    pub mute: bool,
+    /// How loud everything is, 0..1 (1 when not given).
+    pub volume: Option<f32>,
 }
 
 impl Options {
@@ -177,6 +181,8 @@ impl Options {
                 "--exit-after" => opts.exit_after = Some(value("--exit-after")?.parse()?),
                 "--fall-test" => opts.fall_test = true,
                 "--fluid-test" => opts.fluid_test = true,
+                "--mute" => opts.mute = true,
+                "--volume" => opts.volume = Some(value("--volume")?.parse()?),
                 "--erupt" => opts.erupt = Some(asc_sim::volcanism::Kind::Natural),
                 "--erupt-flow" => opts.erupt = Some(asc_sim::volcanism::Kind::Flows),
                 "--erupt-blast" => opts.erupt = Some(asc_sim::volcanism::Kind::Blast),
@@ -269,6 +275,15 @@ struct State {
     effects: crate::effects::Effects,
     effects_at: std::time::Instant,
     volcanic: crate::assets::VolcanicModels,
+    /// Sound (`None` without an audio device, or with `--mute`), the weather it hears, and what
+    /// it tracks between frames: distance walked since the last footstep, whether the player was
+    /// on the ground and how fast they were falling, how deep in water.
+    audio: Option<crate::audio::Audio>,
+    weather: asc_world::weather::Weather,
+    stride: f32,
+    was_grounded: bool,
+    falling: f32,
+    was_submerged: f32,
     /// Where things left at death lie.
     stashes: std::collections::BTreeMap<u32, Vec3>,
     /// The simulated water, as the server sends it.
@@ -456,6 +471,25 @@ impl State {
             },
             effects_at: std::time::Instant::now(),
             volcanic,
+            audio: if options.mute {
+                None
+            } else {
+                match crate::assets::root().and_then(|r| crate::audio::Audio::new(&r.join("sounds"))) {
+                    Ok(mut a) => {
+                        a.set_volume(options.volume.unwrap_or(1.0));
+                        Some(a)
+                    }
+                    Err(err) => {
+                        log::warn!("no sound: {err:#}");
+                        None
+                    }
+                }
+            },
+            weather: asc_world::weather::Weather::new(seed),
+            stride: 0.0,
+            was_grounded: true,
+            falling: 0.0,
+            was_submerged: 0.0,
             fluids,
             stashes,
             pending_ops: Vec::new(),
@@ -532,6 +566,7 @@ impl State {
         if let Some(rate) = self.options.orbit {
             self.player.yaw += rate * dt.as_secs_f32();
         }
+        self.body_sounds(dt.as_secs_f32());
         let p = &self.player;
         self.send(ClientMsg::Move { feet: p.feet, yaw: p.yaw, pitch: p.pitch, mode: p.mode });
         self.camera = Camera {
@@ -685,6 +720,7 @@ impl State {
         self.effects.update(dt, &self.volcanism, &self.world.worldgen, self.camera.position);
         let bombs = self.effects.bombs(&self.volcanism, &self.volcanic.bombs, self.started.elapsed().as_secs_f32());
         self.building.set_moving(bombs);
+        self.listen();
         let (ash, shake) = self.volcanic_air();
         let params = FrameParams {
             camera: Camera { position: self.camera.position + shake, ..self.camera },
@@ -1074,6 +1110,7 @@ impl State {
         match msg {
             ServerMsg::Welcome(_) => {}
             ServerMsg::Edited(op) => {
+                self.edit_sound(&op);
                 let dirty = self.world.edits.push(op);
                 self.streamer.invalidate(&dirty);
                 self.fluids.edited(&dirty);
@@ -1093,9 +1130,15 @@ impl State {
             ServerMsg::Vitals(v) => self.vitals = v,
             ServerMsg::Hurt { amount, .. } => {
                 self.hurt_flash = (self.hurt_flash + amount as f32 / 200.0).min(1.0);
+                if let Some(audio) = &mut self.audio {
+                    audio.play("hurt", (0.4 + amount as f32 / 300.0).min(1.0));
+                }
             }
             ServerMsg::Died { cause } => {
                 self.hurt_flash = 1.0;
+                if let Some(audio) = &mut self.audio {
+                    audio.play("hurt", 1.0);
+                }
                 self.show_notice(format!("You {}. Your things are where you fell.", cause.describe()));
                 self.player.velocity = Vec3::ZERO;
             }
@@ -1104,7 +1147,10 @@ impl State {
                 self.sync_stashes();
             }
             ServerMsg::Fluid { coord, data } => self.fluids.apply(coord, &data),
-            ServerMsg::Volcanism(report) => self.volcanism = report,
+            ServerMsg::Volcanism(report) => {
+                self.volcanic_sounds(&report);
+                self.volcanism = report;
+            }
             ServerMsg::Scar(scar) => self.scatter.add_scar(scar),
             ServerMsg::Fire(changed) => {
                 self.scatter.set_fire(&changed);
@@ -1175,6 +1221,146 @@ impl State {
             let fill = self.fluids.fraction_at(&self.world, self.fluid_test_end);
             log::info!("fluid test t={t:.1}: trench end {:.2} full, {} fluid chunks here", fill, self.fluids.fluids.chunks.len());
         }
+    }
+
+    /// Footsteps on whatever is underfoot, a thump on landing, a splash on falling into water.
+    fn body_sounds(&mut self, dt: f32) {
+        let Some(audio) = &mut self.audio else { return };
+        let p = &self.player;
+        let feet = p.feet;
+        if p.mode == Mode::Walk {
+            let speed = Vec2::new(p.velocity.x, p.velocity.z).length();
+            let wading = p.submerged > 0.08;
+            if p.grounded && speed > 0.6 && p.submerged < 0.5 {
+                self.stride += speed * dt;
+                // A step every 1.6 m walking, a little longer running.
+                if self.stride > 1.4 + 0.05 * speed {
+                    self.stride = 0.0;
+                    let under = feet - Vec3::Y * 0.25;
+                    let name = if wading {
+                        "step_water".to_owned()
+                    } else if self.world.density_at(under) >= 0.0 && self.building.sdf(under) < 0.1 {
+                        // On a building.
+                        "step_hard".to_owned()
+                    } else {
+                        format!("step_{}", crate::audio::surface(self.world.sample_at(under).1))
+                    };
+                    audio.play_at(&name, feet, crate::audio::Range(2.0, 30.0), 0.35 + 0.05 * speed);
+                }
+            }
+            if p.grounded && !self.was_grounded && self.falling < -5.0 {
+                audio.play_at("land", feet, crate::audio::Range(2.0, 30.0), ((-self.falling - 4.0) / 12.0).clamp(0.3, 1.0));
+            }
+            if p.submerged > 0.35 && self.was_submerged <= 0.35 && self.falling < -3.0 {
+                audio.play_at("splash", feet, crate::audio::Range(2.0, 40.0), ((-self.falling) / 12.0).clamp(0.4, 1.0));
+            }
+        }
+        self.was_grounded = p.grounded;
+        self.falling = p.velocity.y;
+        self.was_submerged = p.submerged;
+    }
+
+    /// Digging and placing make a sound by what was dug or placed (sampled before the edit lands).
+    fn edit_sound(&mut self, op: &EditOp) {
+        let Some(audio) = &mut self.audio else { return };
+        // Only the small sphere edits a player makes (not cooling lava, levelling or a blast).
+        if op.radius > 3.0 || op.center.distance(self.camera.position) > 40.0 {
+            return;
+        }
+        let range = crate::audio::Range(2.0, 40.0);
+        match op.kind {
+            EditKind::Dig => {
+                let material = self.world.sample_at(op.center).1;
+                let name = if crate::audio::surface(material) == "hard" { "dig_hard" } else { "dig_soft" };
+                audio.play_at(name, op.center, range, 0.8);
+            }
+            EditKind::Fill => audio.play_at("place", op.center, range, 0.7),
+            _ => {}
+        }
+    }
+
+    /// What a new report from the volcanoes sounds like: bombs landing, an eruption bursting out,
+    /// a blast's boom as its shockwave reaches the listener.
+    fn volcanic_sounds(&mut self, report: &asc_sim::volcanism::Report) {
+        use asc_sim::volcanism::Phase;
+        let Some(audio) = &mut self.audio else { return };
+        let ear = self.camera.position;
+        // A report comes every tick (0.05 s): no bomb flies further than this between them.
+        for (at, size) in crate::audio::landed(&self.volcanism.bombs, &report.bombs, 6.0) {
+            let volume = 0.45 + 0.13 * size as f32;
+            audio.play_at("bomb_land", at, crate::audio::Range(8.0, 900.0), volume);
+        }
+        for a in &report.active {
+            let before = self.volcanism.active.iter().find(|b| b.summit.distance(a.summit) < 50.0).map(|b| b.phase);
+            if a.phase == Phase::Erupting && before.is_some_and(|p| p != Phase::Erupting) {
+                audio.play_at("boom", a.summit, crate::audio::Range(300.0, 9000.0), 1.0);
+            }
+        }
+        for b in &report.blasts {
+            let before = self.volcanism.blasts.iter().find(|o| o.center.distance(b.center) < 1.0).map_or(0.0, |o| o.radius);
+            let d = b.center.distance(ear);
+            if d > before && d <= b.radius {
+                // The shockwave is here: everywhere at once, loudest close in.
+                audio.play("blast", (1.0 - d / 9000.0).clamp(0.35, 1.0));
+            }
+        }
+    }
+
+    /// Put the listener at the camera; every so often, set the ambience from what's round it.
+    fn listen(&mut self) {
+        use asc_sim::volcanism::Phase;
+        use crate::audio::Ambience;
+        let Some(audio) = &mut self.audio else { return };
+        let at = self.camera.position;
+        audio.listen(at, self.camera.yaw);
+        if !audio.ambience_due() {
+            return;
+        }
+        let wg = &self.world.worldgen;
+        let mut scene = crate::audio::Scene::default();
+        let ground = wg.height(at.x, at.z);
+        // Under the ground (a cave, a tunnel): no wind or rain.
+        let outside = at.y > ground - 2.0;
+        let exposure = if outside { 0.35 + 0.65 * smoothstep(0.0, 40.0, at.y - ground) } else { 0.0 };
+        let weather = self.weather.at(wg, at.x, at.z, ground, self.sim.ticks, self.sim.time_of_day);
+        let wind = weather.wind.length();
+        scene.levels.insert(Ambience::Wind, (None, (0.15 + wind / 14.0).min(1.0) * exposure * 0.8));
+        if weather.fall == asc_world::weather::Fall::Rain && outside {
+            scene.levels.insert(Ambience::Rain, (None, weather.precipitation * 0.9));
+        }
+        let (river, lake) = crate::audio::water_near(wg, at, 48.0);
+        if let Some((p, strength)) = river {
+            scene.levels.insert(Ambience::River, (Some(p), 0.4 + 0.5 * strength));
+        }
+        if let Some((p, _)) = lake {
+            scene.levels.insert(Ambience::Lake, (Some(p), 0.6));
+        }
+        let mut lava = self.fluids.lava_lights(at);
+        lava.extend(self.streamer.lava_lights(&self.fluids, at, 120.0));
+        if let Some(l) = lava.iter().min_by(|a, b| a.position.distance(at).total_cmp(&b.position.distance(at))) {
+            scene.levels.insert(Ambience::Lava, (Some(l.position), 0.9));
+        }
+        let fires = self.effects.fire_lights(wg, at, 6);
+        if let Some(f) = fires.first() {
+            scene.levels.insert(Ambience::Fire, (Some(f.position), 0.35 + 0.1 * fires.len() as f32));
+        }
+        if let Some(a) = self.volcanism.active.iter().min_by(|a, b| a.summit.distance(at).total_cmp(&b.summit.distance(at))) {
+            let rumble = match a.phase {
+                Phase::Rumbling => 0.4 + 0.6 * a.strength,
+                Phase::Erupting => 1.0,
+                Phase::Waning => 0.7 * a.strength,
+                Phase::Quiet => 0.0,
+            };
+            scene.levels.insert(Ambience::Rumble, (Some(a.summit), rumble));
+            if a.phase == Phase::Erupting {
+                scene.levels.insert(Ambience::Roar, (Some(a.summit), 0.4 + 0.6 * a.strength));
+            }
+        }
+        scene.underwater = self.fluids.fraction_at(&self.world, at) > 0.5;
+        if scene.underwater {
+            scene.levels.insert(Ambience::Underwater, (None, 0.7));
+        }
+        audio.set_scene(&scene);
     }
 
     /// Ash in the air round the camera (0..1: only inside a volcano's smoke), and how far to shake

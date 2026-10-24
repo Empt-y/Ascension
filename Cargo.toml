@@ -20,7 +20,7 @@ asc-build = { path = "crates/asc-build" }
 asc-sim = { path = "crates/asc-sim" }
 wgpu = "30"
 winit = "0.30"
-glam = { version = "0.30", features = ["bytemuck", "serde"] }
+glam = { version = "0.30", features = ["bytemuck", "serde", "mint"] }
 bytemuck = { version = "1", features = ["derive"] }
 fastnoise-lite = "1.1"
 crossbeam-channel = "0.5"
@@ -39,6 +39,7 @@ gltf = { version = "1.4", default-features = false, features = ["import", "utils
 pollster = "0.4"
 thread-priority = "3"
 rayon = "1.10"
+kira = { version = "0.12.5", default-features = false, features = ["cpal", "wav", "pcm"] }
 
 [profile.dev]
 opt-level = 1

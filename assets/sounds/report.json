@@ -1,0 +1,301 @@
+{
+  "blast_0": {
+    "peak_db": -0.5,
+    "rms_db": -20.3,
+    "seconds": 10.0
+  },
+  "bomb_land_0": {
+    "peak_db": -2.0,
+    "rms_db": -26.1,
+    "seconds": 1.6
+  },
+  "bomb_land_1": {
+    "peak_db": -2.0,
+    "rms_db": -22.7,
+    "seconds": 1.6
+  },
+  "bomb_land_2": {
+    "peak_db": -2.0,
+    "rms_db": -22.2,
+    "seconds": 1.6
+  },
+  "boom_0": {
+    "peak_db": -1.0,
+    "rms_db": -19.1,
+    "seconds": 5.0
+  },
+  "boom_1": {
+    "peak_db": -1.0,
+    "rms_db": -17.0,
+    "seconds": 5.0
+  },
+  "dig_hard_0": {
+    "peak_db": -3.0,
+    "rms_db": -26.6,
+    "seconds": 0.55
+  },
+  "dig_hard_1": {
+    "peak_db": -3.0,
+    "rms_db": -27.3,
+    "seconds": 0.55
+  },
+  "dig_hard_2": {
+    "peak_db": -3.0,
+    "rms_db": -29.6,
+    "seconds": 0.55
+  },
+  "dig_hard_3": {
+    "peak_db": -3.0,
+    "rms_db": -28.8,
+    "seconds": 0.55
+  },
+  "dig_soft_0": {
+    "peak_db": -3.0,
+    "rms_db": -20.1,
+    "seconds": 0.32
+  },
+  "dig_soft_1": {
+    "peak_db": -3.0,
+    "rms_db": -20.4,
+    "seconds": 0.32
+  },
+  "dig_soft_2": {
+    "peak_db": -3.0,
+    "rms_db": -20.0,
+    "seconds": 0.32
+  },
+  "dig_soft_3": {
+    "peak_db": -3.0,
+    "rms_db": -18.2,
+    "seconds": 0.32
+  },
+  "fire": {
+    "loop": true,
+    "peak_db": -1.0,
+    "rms_db": -27.9,
+    "seconds": 8.0
+  },
+  "hurt_0": {
+    "peak_db": -3.0,
+    "rms_db": -18.1,
+    "seconds": 0.35
+  },
+  "hurt_1": {
+    "peak_db": -3.0,
+    "rms_db": -17.1,
+    "seconds": 0.35
+  },
+  "hurt_2": {
+    "peak_db": -3.0,
+    "rms_db": -18.3,
+    "seconds": 0.35
+  },
+  "lake": {
+    "loop": true,
+    "peak_db": -7.7,
+    "rms_db": -22.0,
+    "seconds": 10.0
+  },
+  "land_0": {
+    "peak_db": -3.0,
+    "rms_db": -22.5,
+    "seconds": 0.4
+  },
+  "land_1": {
+    "peak_db": -3.0,
+    "rms_db": -23.2,
+    "seconds": 0.4
+  },
+  "lava": {
+    "loop": true,
+    "peak_db": -7.3,
+    "rms_db": -18.0,
+    "seconds": 10.0
+  },
+  "place_0": {
+    "peak_db": -4.0,
+    "rms_db": -20.1,
+    "seconds": 0.3
+  },
+  "place_1": {
+    "peak_db": -4.0,
+    "rms_db": -21.9,
+    "seconds": 0.3
+  },
+  "place_2": {
+    "peak_db": -4.0,
+    "rms_db": -18.3,
+    "seconds": 0.3
+  },
+  "rain": {
+    "loop": true,
+    "peak_db": -4.2,
+    "rms_db": -22.0,
+    "seconds": 8.0
+  },
+  "river": {
+    "loop": true,
+    "peak_db": -6.1,
+    "rms_db": -20.0,
+    "seconds": 8.0
+  },
+  "roar": {
+    "loop": true,
+    "peak_db": -3.2,
+    "rms_db": -16.0,
+    "seconds": 10.0
+  },
+  "rumble": {
+    "loop": true,
+    "peak_db": -4.4,
+    "rms_db": -16.0,
+    "seconds": 10.0
+  },
+  "splash_0": {
+    "peak_db": -3.0,
+    "rms_db": -22.4,
+    "seconds": 1.0
+  },
+  "splash_1": {
+    "peak_db": -3.0,
+    "rms_db": -23.7,
+    "seconds": 1.0
+  },
+  "splash_2": {
+    "peak_db": -3.0,
+    "rms_db": -22.0,
+    "seconds": 1.0
+  },
+  "step_grass_0": {
+    "peak_db": -6.0,
+    "rms_db": -23.3,
+    "seconds": 0.22
+  },
+  "step_grass_1": {
+    "peak_db": -6.0,
+    "rms_db": -22.7,
+    "seconds": 0.22
+  },
+  "step_grass_2": {
+    "peak_db": -6.0,
+    "rms_db": -24.2,
+    "seconds": 0.22
+  },
+  "step_grass_3": {
+    "peak_db": -6.0,
+    "rms_db": -25.5,
+    "seconds": 0.22
+  },
+  "step_grass_4": {
+    "peak_db": -6.0,
+    "rms_db": -23.5,
+    "seconds": 0.22
+  },
+  "step_hard_0": {
+    "peak_db": -6.0,
+    "rms_db": -26.1,
+    "seconds": 0.18
+  },
+  "step_hard_1": {
+    "peak_db": -6.0,
+    "rms_db": -26.5,
+    "seconds": 0.18
+  },
+  "step_hard_2": {
+    "peak_db": -6.0,
+    "rms_db": -25.5,
+    "seconds": 0.18
+  },
+  "step_hard_3": {
+    "peak_db": -6.0,
+    "rms_db": -25.5,
+    "seconds": 0.18
+  },
+  "step_hard_4": {
+    "peak_db": -6.0,
+    "rms_db": -25.5,
+    "seconds": 0.18
+  },
+  "step_sand_0": {
+    "peak_db": -6.0,
+    "rms_db": -22.4,
+    "seconds": 0.26
+  },
+  "step_sand_1": {
+    "peak_db": -6.0,
+    "rms_db": -24.9,
+    "seconds": 0.26
+  },
+  "step_sand_2": {
+    "peak_db": -6.0,
+    "rms_db": -24.1,
+    "seconds": 0.26
+  },
+  "step_sand_3": {
+    "peak_db": -6.0,
+    "rms_db": -24.8,
+    "seconds": 0.26
+  },
+  "step_sand_4": {
+    "peak_db": -6.0,
+    "rms_db": -22.1,
+    "seconds": 0.26
+  },
+  "step_snow_0": {
+    "peak_db": -6.0,
+    "rms_db": -22.8,
+    "seconds": 0.3
+  },
+  "step_snow_1": {
+    "peak_db": -6.0,
+    "rms_db": -22.4,
+    "seconds": 0.3
+  },
+  "step_snow_2": {
+    "peak_db": -6.0,
+    "rms_db": -21.7,
+    "seconds": 0.3
+  },
+  "step_snow_3": {
+    "peak_db": -6.0,
+    "rms_db": -23.7,
+    "seconds": 0.3
+  },
+  "step_snow_4": {
+    "peak_db": -6.0,
+    "rms_db": -22.0,
+    "seconds": 0.3
+  },
+  "step_water_0": {
+    "peak_db": -6.0,
+    "rms_db": -23.3,
+    "seconds": 0.4
+  },
+  "step_water_1": {
+    "peak_db": -6.0,
+    "rms_db": -22.5,
+    "seconds": 0.4
+  },
+  "step_water_2": {
+    "peak_db": -6.0,
+    "rms_db": -23.2,
+    "seconds": 0.4
+  },
+  "step_water_3": {
+    "peak_db": -6.0,
+    "rms_db": -23.7,
+    "seconds": 0.4
+  },
+  "underwater": {
+    "loop": true,
+    "peak_db": -7.9,
+    "rms_db": -22.0,
+    "seconds": 8.0
+  },
+  "wind": {
+    "loop": true,
+    "peak_db": -6.6,
+    "rms_db": -20.0,
+    "seconds": 12.0
+  }
+}
