@@ -1,6 +1,7 @@
 //! Sound: one-shot effects where things happen (footsteps, digging, bombs, blasts) and looping
 //! ambience that follows the world round the listener (wind, rain, water, lava, fire, a volcano's
-//! rumble and roar). The sounds themselves are made by tools/sounds.py into assets/sounds.
+//! rumble and roar). The sounds themselves are made by tools/sounds.py into assets/sounds; free
+//! library recordings to compare them with go in assets/sounds_library (tools/library_sounds.py).
 //!
 //! Everything in the world plays through one mixer track whose low-pass filter closes when the
 //! listener is underwater. Sounds from far off arrive late, at the speed of sound (a blast's boom
@@ -85,8 +86,58 @@ pub struct Scene {
 
 struct Loop {
     track: Option<SpatialTrackHandle>,
-    sound: StaticSoundHandle,
+    sound: Option<StaticSoundHandle>,
     level: f32,
+    /// What brings the playing set's recording to the generated one's loudness.
+    gain: f32,
+}
+
+/// One set of sounds: each name's variations, and for each the gain that brings it to the
+/// generated set's loudness (so a comparison is of the sound, not its level).
+#[derive(Default)]
+struct Bank {
+    sounds: HashMap<String, Vec<StaticSoundData>>,
+    gain: HashMap<String, f32>,
+}
+
+impl Bank {
+    /// Every sound in `dir`: `<name>_<n>.<ext>` variations and `<name>.<ext>` loops (WAV, Ogg,
+    /// MP3 or FLAC).
+    fn load(dir: &Path) -> Result<Self> {
+        let mut bank = Self::default();
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .with_context(|| format!("reading {}", dir.display()))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| ["wav", "ogg", "mp3", "flac"].contains(&&*x.to_string_lossy())))
+            .collect();
+        files.sort();
+        for path in &files {
+            let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+            // `dig_soft_2` is the third variation of `dig_soft`; a loop has no number.
+            let name = match stem.rsplit_once('_') {
+                Some((base, n)) if n.parse::<u32>().is_ok() => base.to_owned(),
+                _ => stem.clone(),
+            };
+            let data = StaticSoundData::from_file(path).with_context(|| format!("loading {}", path.display()))?;
+            bank.sounds.entry(name).or_default().push(data);
+        }
+        Ok(bank)
+    }
+
+    /// How loud a sound is: a loop by its average (RMS), a one-shot by its peaks.
+    fn loudness(&self, name: &str) -> Option<f32> {
+        let variations = self.sounds.get(name)?;
+        let looped = Ambience::ALL.iter().any(|a| a.file() == name);
+        let each = variations.iter().map(|d| {
+            let mono = d.frames.iter().map(|f| 0.5 * (f.left + f.right));
+            if looped {
+                (mono.map(|x| x * x).sum::<f32>() / d.frames.len().max(1) as f32).sqrt()
+            } else {
+                mono.fold(0.0f32, |m, x| m.max(x.abs()))
+            }
+        });
+        Some(each.sum::<f32>() / variations.len().max(1) as f32)
+    }
 }
 
 pub struct Audio {
@@ -96,7 +147,11 @@ pub struct Audio {
     world: TrackHandle,
     muffle: FilterHandle,
     underwater: bool,
-    sounds: HashMap<String, Vec<StaticSoundData>>,
+    /// The generated sounds, and recordings from free libraries to compare (F8 switches; a sound
+    /// the libraries don't have stays generated).
+    generated: Bank,
+    library: Bank,
+    use_library: bool,
     loops: HashMap<Ambience, Loop>,
     /// Sounds still travelling: when they arrive, which, where, its range and volume.
     travelling: Vec<(Instant, String, Vec3, Range, f32)>,
@@ -114,9 +169,9 @@ fn tween(seconds: f32) -> Tween {
 }
 
 impl Audio {
-    /// Open the audio device and load every sound in `dir` (`<name>_<n>.wav` variations and
-    /// `<name>.wav` loops).
-    pub fn new(dir: &Path) -> Result<Self> {
+    /// Open the audio device and load the generated sounds in `dir`, and the library ones in
+    /// `library` if it's there.
+    pub fn new(dir: &Path, library: &Path) -> Result<Self> {
         let mut manager = AudioManager::<DefaultBackend>::new(AudioManagerSettings {
             capacities: kira::Capacities { sub_track_capacity: 256, ..Default::default() },
             ..Default::default()
@@ -125,59 +180,90 @@ impl Audio {
         let listener = manager.add_listener(Vec3::ZERO, Quat::IDENTITY)?;
         let mut builder = TrackBuilder::new();
         let muffle = builder.add_effect(FilterBuilder::new().cutoff(OPEN));
-        let mut world = manager.add_sub_track(builder)?;
-        let mut sounds: HashMap<String, Vec<StaticSoundData>> = HashMap::new();
-        let mut files: Vec<_> = std::fs::read_dir(dir)
-            .with_context(|| format!("reading {}", dir.display()))?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|x| x == "wav"))
-            .collect();
-        files.sort();
-        for path in &files {
-            let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
-            // `dig_soft_2` is the third variation of `dig_soft`; a loop has no number.
-            let name = match stem.rsplit_once('_') {
-                Some((base, n)) if n.parse::<u32>().is_ok() => base.to_owned(),
-                _ => stem.clone(),
+        let world = manager.add_sub_track(builder)?;
+        let generated = Bank::load(dir)?;
+        let mut library = if library.is_dir() { Bank::load(library)? } else { Bank::default() };
+        let names: Vec<String> = library.sounds.keys().cloned().collect();
+        for name in names {
+            let gain = match (generated.loudness(&name), library.loudness(&name)) {
+                (Some(g), Some(l)) if l > 1e-5 => (g / l).clamp(0.05, 20.0),
+                _ => 1.0,
             };
-            let data = StaticSoundData::from_file(path).with_context(|| format!("loading {}", path.display()))?;
-            sounds.entry(name).or_default().push(data);
+            library.gain.insert(name, gain);
         }
-        let mut loops = HashMap::new();
-        for a in Ambience::ALL {
-            let Some(data) = sounds.get(a.file()).and_then(|v| v.first()).cloned() else {
-                log::warn!("no {}.wav: that ambience is silent", a.file());
-                continue;
-            };
-            let data = data.loop_region(..).volume(Decibels::SILENCE);
-            let (track, sound) = match a.range() {
-                Some(Range(near, far)) => {
-                    let mut track = world.add_spatial_sub_track(
-                        &listener,
-                        Vec3::ZERO,
-                        SpatialTrackBuilder::new().distances((near, far)),
-                    )?;
-                    let sound = track.play(data)?;
-                    (Some(track), sound)
-                }
-                None => (None, world.play(data)?),
-            };
-            loops.insert(a, Loop { track, sound, level: 0.0 });
-        }
-        log::info!("audio: {} sounds ({} files)", sounds.len(), files.len());
-        Ok(Self {
+        log::info!("audio: {} generated sounds, {} from libraries", generated.sounds.len(), library.sounds.len());
+        let mut audio = Self {
             manager,
             listener,
             world,
             muffle,
             underwater: false,
-            sounds,
-            loops,
+            generated,
+            library,
+            use_library: false,
+            loops: HashMap::new(),
             travelling: Vec::new(),
             at: Vec3::ZERO,
             last_ambience: None,
             rng: 0x5eed_50f7,
-        })
+        };
+        audio.start_loops()?;
+        Ok(audio)
+    }
+
+    /// Switch between the generated sounds and the library recordings (where there are any).
+    pub fn toggle_library(&mut self) -> bool {
+        self.use_library = !self.use_library && !self.library.sounds.is_empty();
+        if let Err(err) = self.start_loops() {
+            log::warn!("restarting the ambience: {err}");
+        }
+        log::info!("sounds: {}", if self.use_library { "library recordings" } else { "generated" });
+        self.use_library
+    }
+
+    /// `name`'s variations from the set in use, and the gain to play them at.
+    fn variations(&self, name: &str) -> Option<(&[StaticSoundData], f32)> {
+        if self.use_library
+            && let Some(v) = self.library.sounds.get(name)
+        {
+            return Some((v, self.library.gain.get(name).copied().unwrap_or(1.0)));
+        }
+        self.generated.sounds.get(name).map(|v| (v.as_slice(), 1.0))
+    }
+
+    /// (Re)start every loop from the set in use, at its current level.
+    fn start_loops(&mut self) -> Result<()> {
+        for a in Ambience::ALL {
+            let Some((data, gain)) = self.variations(a.file()).and_then(|(v, g)| v.first().cloned().map(|d| (d, g))) else {
+                log::warn!("no {} sound: that ambience is silent", a.file());
+                continue;
+            };
+            let old = self.loops.remove(&a);
+            let level = old.as_ref().map_or(0.0, |l| l.level);
+            let mut track = match old {
+                Some(Loop { track, sound, .. }) => {
+                    if let Some(mut sound) = sound {
+                        sound.stop(tween(0.3));
+                    }
+                    track
+                }
+                None => match a.range() {
+                    Some(Range(near, far)) => Some(self.world.add_spatial_sub_track(
+                        &self.listener,
+                        Vec3::ZERO,
+                        SpatialTrackBuilder::new().distances((near, far)),
+                    )?),
+                    None => None,
+                },
+            };
+            let data = data.loop_region(..).volume(db(level * gain));
+            let sound = match &mut track {
+                Some(track) => track.play(data)?,
+                None => self.world.play(data)?,
+            };
+            self.loops.insert(a, Loop { track, sound: Some(sound), level, gain });
+        }
+        Ok(())
     }
 
     fn random(&mut self) -> f32 {
@@ -225,15 +311,15 @@ impl Audio {
 
     /// Play a variation of `name` with no place (the player's own body: hurt, a blast's boom).
     pub fn play(&mut self, name: &str, volume: f32) {
-        let Some(data) = self.pick(name) else { return };
-        let data = data.volume(db(volume));
+        let Some(data) = self.pick(name, volume) else { return };
         if let Err(err) = self.world.play(data) {
             log::debug!("couldn't play {name}: {err}");
         }
     }
 
-    fn pick(&mut self, name: &str) -> Option<StaticSoundData> {
-        let n = self.sounds.get(name).map_or(0, Vec::len);
+    /// A variation of `name` at `volume` (0..1), from the set in use.
+    fn pick(&mut self, name: &str, volume: f32) -> Option<StaticSoundData> {
+        let n = self.variations(name).map_or(0, |(v, _)| v.len());
         if n == 0 {
             log::warn!("no sound {name}");
             return None;
@@ -241,12 +327,12 @@ impl Audio {
         let i = ((self.random() * n as f32) as usize).min(n - 1);
         // A little higher or lower each time, so repeats don't sound like a machine gun.
         let rate = 1.0 + (self.random() as f64 - 0.5) * 0.12;
-        Some(self.sounds[name][i].playback_rate(rate))
+        let (v, gain) = self.variations(name)?;
+        Some(v[i].playback_rate(rate).volume(db(volume * gain)))
     }
 
     fn play_now(&mut self, name: &str, at: Vec3, range: Range, volume: f32) {
-        let Some(data) = self.pick(name) else { return };
-        let data = data.volume(db(volume));
+        let Some(data) = self.pick(name, volume) else { return };
         let track = self.world.add_spatial_sub_track(
             &self.listener,
             at,
@@ -280,7 +366,9 @@ impl Audio {
                 track.set_position(at, tween(0.25));
             }
             if (level - l.level).abs() > 0.01 {
-                l.sound.set_volume(db(level), tween(0.5));
+                if let Some(sound) = &mut l.sound {
+                    sound.set_volume(db(level * l.gain), tween(0.5));
+                }
                 l.level = level;
             }
         }

@@ -474,7 +474,7 @@ impl State {
             audio: if options.mute {
                 None
             } else {
-                match crate::assets::root().and_then(|r| crate::audio::Audio::new(&r.join("sounds"))) {
+                match crate::assets::root().and_then(|r| crate::audio::Audio::new(&r.join("sounds"), &r.join("sounds_library"))) {
                     Ok(mut a) => {
                         a.set_volume(options.volume.unwrap_or(1.0));
                         Some(a)
@@ -904,6 +904,12 @@ impl State {
                 Mode::Fly => Mode::Walk,
             };
             self.player.velocity = Vec3::ZERO;
+        }
+        if self.input.pressed(KeyCode::F8)
+            && let Some(audio) = &mut self.audio
+        {
+            let library = audio.toggle_library();
+            self.show_notice(if library { "Sounds: library recordings".into() } else { "Sounds: generated".into() });
         }
         if self.input.pressed(KeyCode::F9) {
             self.send(ClientMsg::Save);
